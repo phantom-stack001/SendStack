@@ -924,7 +924,7 @@ export async function handleApi(request: Request, path: string[]) {
   }
   const campaignAction = route.match(/^\/campaigns\/([^/]+)\/(test-send|launch|pause|resume)$/);
   if (request.method === "POST" && campaignAction) {
-    const auth = await requireAdmin(request);
+    const auth = await requirePermission(request, "campaigns.send");
     if (auth.response) return auth.response;
     if (!hasValidCsrf(request, auth.session.csrf_token)) return json(403, { error: "CSRF validation failed." });
     const campaign = await campaignById(campaignAction[1]);
