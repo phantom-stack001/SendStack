@@ -281,6 +281,7 @@ async function api(path, options = {}) {
 const ATTACHMENT_ACCEPT = ".png,.jpg,.jpeg,.gif,.webp,.pdf,.zip";
 const ATTACHMENT_MAX_FILE_BYTES = 5 * 1024 * 1024;
 const ATTACHMENT_MAX_COUNT = 3;
+const ATTACHMENT_MAX_TOTAL_BYTES = 10 * 1024 * 1024;
 
 function formatByteSize(bytes) {
   const value = Number(bytes) || 0;
@@ -297,6 +298,17 @@ function attachmentListMarkup(attachments, { editable = false } = {}) {
     <li class="attachment-item">
       <div><strong>${escapeHtml(file.filename)}</strong><span class="subtext">${escapeHtml(formatByteSize(file.byte_size))}</span></div>
       ${editable ? `<button type="button" class="button small ghost" data-remove-attachment="${escapeHtml(file.id)}">Remove</button>` : ""}
+    </li>`).join("")}</ul>`;
+}
+
+function pendingAttachmentListMarkup(pendingFiles) {
+  if (!pendingFiles.length) {
+    return `<p class="help attachment-empty">No files attached yet.</p>`;
+  }
+  return `<ul class="attachment-list">${pendingFiles.map((file, index) => `
+    <li class="attachment-item">
+      <div><strong>${escapeHtml(file.name)}</strong><span class="subtext">${escapeHtml(formatByteSize(file.size))} · pending</span></div>
+      <button type="button" class="button small ghost" data-remove-pending="${index}">Remove</button>
     </li>`).join("")}</ul>`;
 }
 
@@ -712,6 +724,7 @@ async function openCampaignComposer(campaignId = null) {
   const campaign = campaignData?.campaign || {};
   let activeCampaignId = campaignId;
   let attachments = Array.isArray(campaign.attachments) ? [...campaign.attachments] : [];
+  let pendingFiles = [];
   const storedContent = safeContentObject(campaign.content_json);
   let selectedMode = contentModes.some((mode) => mode.id === campaign.content_mode) ? campaign.content_mode : (campaignId ? "custom_html" : "visual");
   const modeDrafts = {
@@ -720,6 +733,11 @@ async function openCampaignComposer(campaignId = null) {
     custom_html: { schema_version: 1, html_body: campaign.html_body || defaultTemplate, text_body: campaign.text_body || "Hello {{first_name}},\n\nWrite your message here.\n\nUnsubscribe: {{unsubscribe_url}}" },
     plain_text: selectedMode === "plain_text" ? { schema_version: 1, plain_text: storedContent.plain_text || campaign.text_body || "" } : { schema_version: 1, plain_text: "Hello {{first_name}},\n\nWrite your message here.\n\nUnsubscribe: {{unsubscribe_url}}" },
   };
+  const totalAttachmentCount = () => attachments.length + pendingFiles.length;
+  const totalAttachmentBytes = () => (
+    attachments.reduce((sum, file) => sum + Number(file.byte_size || 0), 0)
+    + pendingFiles.reduce((sum, file) => sum + Number(file.size || 0), 0)
+  );
   openModal(campaignId ? "Edit campaign" : "New campaign", "Composer", `
     <form id="campaign-form" class="composer">
       <div class="composer-fields">
@@ -734,8 +752,9 @@ async function openCampaignComposer(campaignId = null) {
           <div class="attachment-panel-head">
             <div><strong>Attachments</strong><p class="help">PNG, JPG, GIF, WebP, PDF, or ZIP. Up to 3 files, 5 MB each (10 MB total). Some inboxes filter ZIP archives.</p></div>
           </div>
-          <div id="attachment-list">${activeCampaignId ? attachmentListMarkup(attachments, { editable: true }) : `<p class="help attachment-empty">Save the draft first, then edit it to add attachments.</p>`}</div>
-          ${activeCampaignId ? `<label class="attachment-upload button small">Add file<input id="attachment-input" type="file" accept="${ATTACHMENT_ACCEPT}" ${attachments.length >= ATTACHMENT_MAX_COUNT ? "disabled" : ""} /></label><p class="form-error" id="attachment-error" role="alert"></p>` : ""}
+          <div id="attachment-list">${activeCampaignId ? attachmentListMarkup(attachments, { editable: true }) : pendingAttachmentListMarkup(pendingFiles)}</div>
+          <label class="attachment-upload button small">Add file<input id="attachment-input" type="file" accept="${ATTACHMENT_ACCEPT}" ${totalAttachmentCount() >= ATTACHMENT_MAX_COUNT ? "disabled" : ""} /></label>
+          <p class="form-error" id="attachment-error" role="alert"></p>
         </section>
         <p class="form-error" data-form-error role="alert"></p>
         <div class="form-actions"><button type="button" class="button" data-close-modal>Cancel</button><button class="button primary" type="submit">${campaignId ? "Save changes" : "Save draft"}</button></div>
@@ -800,8 +819,35 @@ async function openCampaignComposer(campaignId = null) {
   const refreshAttachmentUi = () => {
     const listHost = form.querySelector("#attachment-list");
     const input = form.querySelector("#attachment-input");
-    if (listHost) listHost.innerHTML = attachmentListMarkup(attachments, { editable: Boolean(activeCampaignId) });
-    if (input) input.disabled = attachments.length >= ATTACHMENT_MAX_COUNT;
+    if (listHost) {
+      listHost.innerHTML = activeCampaignId
+        ? attachmentListMarkup(attachments, { editable: true })
+        : pendingAttachmentListMarkup(pendingFiles);
+    }
+    if (input) input.disabled = totalAttachmentCount() >= ATTACHMENT_MAX_COUNT;
+  };
+  const uploadPendingFiles = async (campaignIdForUpload) => {
+    const errorEl = form.querySelector("#attachment-error");
+    if (errorEl) errorEl.textContent = "";
+    const queued = [...pendingFiles];
+    pendingFiles = [];
+    for (let index = 0; index < queued.length; index += 1) {
+      const file = queued[index];
+      try {
+        const body = new FormData();
+        body.append("file", file);
+        const result = await api(`/api/campaigns/${campaignIdForUpload}/attachments`, { method: "POST", body });
+        attachments = result.attachments || [];
+      } catch (error) {
+        pendingFiles = queued.slice(index);
+        if (errorEl) errorEl.textContent = error.message;
+        else toast(error.message, "error");
+        refreshAttachmentUi();
+        return false;
+      }
+    }
+    refreshAttachmentUi();
+    return true;
   };
   const bindAttachmentControls = () => {
     const input = form.querySelector("#attachment-input");
@@ -809,10 +855,24 @@ async function openCampaignComposer(campaignId = null) {
     input?.addEventListener("change", async () => {
       const file = input.files?.[0];
       input.value = "";
-      if (!file || !activeCampaignId) return;
+      if (!file) return;
       if (errorEl) errorEl.textContent = "";
       if (file.size > ATTACHMENT_MAX_FILE_BYTES) {
         if (errorEl) errorEl.textContent = "Each attachment must be 5 MB or smaller.";
+        return;
+      }
+      if (totalAttachmentCount() >= ATTACHMENT_MAX_COUNT) {
+        if (errorEl) errorEl.textContent = "A campaign can have at most 3 attachments.";
+        return;
+      }
+      if (totalAttachmentBytes() + file.size > ATTACHMENT_MAX_TOTAL_BYTES) {
+        if (errorEl) errorEl.textContent = "Attachments for one campaign cannot exceed 10 MB total.";
+        return;
+      }
+      if (!activeCampaignId) {
+        pendingFiles.push(file);
+        refreshAttachmentUi();
+        toast("Attachment queued");
         return;
       }
       try {
@@ -828,6 +888,16 @@ async function openCampaignComposer(campaignId = null) {
       }
     });
     form.querySelector("#attachment-list")?.addEventListener("click", async (event) => {
+      const pendingButton = event.target.closest("[data-remove-pending]");
+      if (pendingButton) {
+        const index = Number(pendingButton.dataset.removePending);
+        if (Number.isInteger(index)) {
+          pendingFiles.splice(index, 1);
+          refreshAttachmentUi();
+          toast("Attachment removed");
+        }
+        return;
+      }
       const button = event.target.closest("[data-remove-attachment]");
       if (!button || !activeCampaignId) return;
       try {
@@ -851,32 +921,25 @@ async function openCampaignComposer(campaignId = null) {
     payload.content_json = content.content_json;
     payload.html_body = content.html_body;
     payload.text_body = content.text_body;
+    const creating = !activeCampaignId;
     const path = activeCampaignId ? `/api/campaigns/${activeCampaignId}` : "/api/campaigns";
     const method = activeCampaignId ? "PATCH" : "POST";
-    const result = await submitForm(form, () => api(path, { method, body: payload }), activeCampaignId ? "Campaign updated" : "Draft saved");
-    if (!(form.querySelector("[data-form-error]") || form.querySelector(".form-error"))?.textContent) {
-      if (!activeCampaignId && result?.campaign?.id) {
-        activeCampaignId = result.campaign.id;
-        toast("Draft saved — you can add attachments now");
-        const panel = form.querySelector("#attachment-panel");
-        if (panel) {
-          panel.querySelector("#attachment-list")?.remove();
-          const uploadHtml = `<div id="attachment-list">${attachmentListMarkup(attachments, { editable: true })}</div>
-            <label class="attachment-upload button small">Add file<input id="attachment-input" type="file" accept="${ATTACHMENT_ACCEPT}" /></label>
-            <p class="form-error" id="attachment-error" role="alert"></p>`;
-          panel.insertAdjacentHTML("beforeend", uploadHtml);
-          form.querySelector(".help.attachment-empty")?.remove();
-          bindAttachmentControls();
-          refreshAttachmentUi();
-        }
+    const result = await submitForm(form, () => api(path, { method, body: payload }), creating ? "Draft saved" : "Campaign updated");
+    const formError = form.querySelector("[data-form-error]");
+    if (formError?.textContent) return;
+    if (creating && result?.campaign?.id) {
+      activeCampaignId = result.campaign.id;
+      const uploaded = await uploadPendingFiles(activeCampaignId);
+      if (!uploaded) {
         const submitBtn = form.querySelector("button[type=submit]");
         if (submitBtn) submitBtn.textContent = "Save changes";
+        refreshAttachmentUi();
         return;
       }
-      closeModal();
-      if (state.currentView === "campaigns") await renderCampaigns();
-      else await navigate("campaigns");
     }
+    closeModal();
+    if (state.currentView === "campaigns") await renderCampaigns();
+    else await navigate("campaigns");
   });
 }
 

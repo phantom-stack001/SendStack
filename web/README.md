@@ -49,7 +49,7 @@ Webhook endpoint: `POST /api/webhooks/resend`
 2. Provision managed Postgres and set `DATABASE_URL`.
 3. Set a strong `SENDSTACK_SESSION_SECRET` (≥32 chars, not the example default).
 4. Set `SENDSTACK_PUBLIC_URL` to the HTTPS production origin.
-5. Run `pnpm db:migrate` against production (and seed only with a non-default admin password).
+5. Run `pnpm db:migrate` against production (and seed only with a non-default admin password). This applies all SQL under `drizzle/`, including `0003_campaign_attachments.sql` required for campaign file attachments.
 6. Deploy. Confirm `/healthz` returns ok.
 7. Add Resend keys later when ready; leave `SENDSTACK_LIVE_SEND_ENABLED=false` until domain + webhook gates pass.
 8. Register webhook URL `https://<your-domain>/api/webhooks/resend` in Resend after setting `RESEND_WEBHOOK_SECRET`.

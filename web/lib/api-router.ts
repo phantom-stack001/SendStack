@@ -589,7 +589,7 @@ export async function handleApi(request: Request, path: string[]) {
     return json(200, { campaigns: campaigns.rows });
   }
   if (request.method === "POST" && route === "/campaigns") {
-    const auth = await requireAdmin(request);
+    const auth = await requirePermission(request, "campaigns.manage");
     if (auth.response) return auth.response;
     if (!hasValidCsrf(request, auth.session.csrf_token)) {
       return json(403, { error: "CSRF validation failed." });
@@ -739,7 +739,7 @@ export async function handleApi(request: Request, path: string[]) {
     });
   }
   if (request.method === "PATCH" && campaignMatch) {
-    const auth = await requireAdmin(request);
+    const auth = await requirePermission(request, "campaigns.manage");
     if (auth.response) return auth.response;
     if (!hasValidCsrf(request, auth.session.csrf_token)) return json(403, { error: "CSRF validation failed." });
     const body = await request.json().catch(() => ({})) as { name?: string; subject?: string; from_name?: string; from_email?: string; list_id?: string; content_mode?: string; content_json?: unknown; html_body?: string; text_body?: string };
