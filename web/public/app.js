@@ -774,7 +774,7 @@ async function openCampaignComposer(campaignId = null) {
       <div class="composer-fields">
         <label>Internal campaign name<input name="name" maxlength="160" value="${escapeHtml(campaign.name || "Product update")}" required /></label>
         <label>Audience<select name="list_id" required>${listOptions(lists, campaign.list_id || lists[0]?.id)}</select><span class="help">Suppression is checked again immediately before delivery.</span></label>
-        <div class="form-grid"><label>From name<input name="from_name" value="${escapeHtml(campaign.from_name || "SendStack Team")}" required /></label><label>From email<input name="from_email" type="email" value="${escapeHtml(campaign.from_email || "updates@example.test")}" required /></label></div>
+        <div class="form-grid"><label>From name<input name="from_name" value="${escapeHtml(campaign.from_name || "")}" placeholder="Name the receiver will see" required /></label><label>From email<input name="from_email" type="email" value="${escapeHtml(campaign.from_email || "noreply@ctn-sk.com")}" required /></label></div>
         <label>Subject<input name="subject" maxlength="250" value="${escapeHtml(campaign.subject || "A quick update for {{first_name}}")}" required /></label>
         ${contentModePicker(selectedMode)}
         <div id="mode-editor-host">${modeEditorMarkup(selectedMode, modeDrafts[selectedMode])}</div>
