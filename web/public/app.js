@@ -32,7 +32,7 @@ const viewMeta = {
   contacts: ["Contacts", "Audience"],
   campaigns: ["Campaigns", "Delivery"],
   sending: ["Sending setup", "Production readiness"],
-  deliveries: ["Deliveries", "Sandbox inbox"],
+  deliveries: ["Deliveries", "Message activity"],
   suppressions: ["Suppressions", "Safety controls"],
   users: ["Users & roles", "Access control"],
   audit: ["Audit log", "Governance"],
@@ -278,7 +278,7 @@ function showApp(sessionData) {
   });
   const smtp = sessionData.delivery_mode === "smtp";
   const resend = sessionData.delivery_mode === "resend";
-  els.modePill.innerHTML = `<span></span> ${resend ? "Resend" : smtp ? "SMTP test" : "Sandbox"}`;
+  els.modePill.innerHTML = `<span></span> ${resend ? "Resend" : smtp ? "Relay preview" : "Preview"}`;
   if (sessionData.must_change_password || user?.must_change_password) {
     openChangePasswordModal(true);
     return;
@@ -412,16 +412,16 @@ async function renderDashboard() {
       </section>` : `<section class="panel access-summary"><div class="panel-body"><div class="access-lock">◌</div><h2>Recipient data is protected</h2><p>Your Analyst role includes aggregate campaign reporting without contact addresses or message contents.</p></div></section>`}
     </div>
     <section class="production-target-strip">
-      <div class="target-strip-copy"><span class="readiness-status pending">Migration required</span><div><strong>Production target: Vercel + PostgreSQL + Resend</strong><p>The architecture is selected, but live delivery is not connected to this local build yet.</p></div></div>
+      <div class="target-strip-copy"><span class="readiness-status pending">Readiness in progress</span><div><strong>Production delivery: Vercel + PostgreSQL + Resend</strong><p>Your workspace is configured for reliable, authenticated delivery as the remaining readiness checks are completed.</p></div></div>
       <button class="button" data-go="sending">View readiness</button>
     </section>
-    <div class="notice" style="margin-top:16px"><span>i</span><div><strong>${data.delivery_mode === "sandbox" ? "Sandbox delivery is active." : "SMTP test delivery is active."}</strong> ${data.delivery_mode === "sandbox" ? "No message leaves this application; every send is captured in Deliveries." : "Only explicitly allowlisted recipients can receive messages."}</div></div>`;
+    <div class="notice" style="margin-top:16px"><span>i</span><div><strong>${data.delivery_mode === "sandbox" ? "Preview delivery is active." : "Relay preview is active."}</strong> ${data.delivery_mode === "sandbox" ? "Messages stay within this workspace until production delivery is enabled." : "Only approved recipients can receive messages in this mode."}</div></div>`;
 }
 
 function readinessStatusLabel(status) {
   const labels = {
     ready: "Ready",
-    migration_required: "Migration required",
+    migration_required: "Setup required",
     not_connected: "Not connected",
     not_verified: "Not verified",
     configured_locked: "Configured (locked)",
@@ -461,7 +461,7 @@ async function renderSendingSetup() {
 
     <div class="readiness-layout">
       <section class="panel">
-        <div class="panel-head"><div><h2>Launch gates</h2><p>Every item must be verified before live sending is unlocked</p></div><span class="readiness-status ${liveReady ? "ready" : "locked"}">${liveReady ? "Live ready" : "Sandbox only"}</span></div>
+        <div class="panel-head"><div><h2>Delivery readiness</h2><p>Every item is checked before production delivery is enabled</p></div><span class="readiness-status ${liveReady ? "ready" : "locked"}">${liveReady ? "Ready for delivery" : "Preview mode"}</span></div>
         <div class="readiness-list">${data.checks.map((check) => `
           <div class="readiness-item">
             <span class="readiness-marker ${escapeHtml(check.status)}">${check.status === "ready" ? "✓" : ""}</span>
@@ -496,7 +496,7 @@ function renderRecentCampaignTable(campaigns) {
 }
 
 function renderRecentMessages(messages) {
-  if (!messages.length) return `<div class="empty-state" style="min-height:180px;padding:20px"><div><p>Messages will appear here after a test send or campaign launch.</p></div></div>`;
+  if (!messages.length) return `<div class="empty-state" style="min-height:180px;padding:20px"><div><p>Messages will appear here after a preview or campaign delivery.</p></div></div>`;
   return `<div class="activity-list">${messages.map((message) => `<div class="activity-item"><div class="activity-icon">↗</div><div><strong>${escapeHtml(message.to_email)}</strong><p>${escapeHtml(message.subject)} · ${formatDate(message.created_at)}</p></div></div>`).join("")}</div>`;
 }
 
@@ -599,8 +599,8 @@ async function renderCampaigns() {
   const data = await api("/api/campaigns");
   await getLists();
   els.content.innerHTML = `
-    <div class="section-lead"><div><h2>${data.campaigns.length} campaign${data.campaigns.length === 1 ? "" : "s"}</h2><p>${can("campaigns.send") ? "Draft, preview, and run each audience in the sandbox. Live Resend delivery remains locked." : "Read-only campaign reporting without recipient-level personal data."}</p></div>${can("campaigns.manage") ? `<button class="button primary" data-new-campaign>New campaign</button>` : ""}</div>
-    ${data.campaigns.length ? `<section class="campaign-grid">${data.campaigns.map(renderCampaignCard).join("")}</section>` : `<section class="panel empty-state"><div><div class="empty-mark">✦</div><h2>No campaigns yet</h2><p>${can("campaigns.manage") ? "Build a message, preview personalization, and capture a sandbox delivery." : "Campaign reports will appear here after a marketer creates a campaign."}</p>${can("campaigns.manage") ? `<button class="button primary" data-new-campaign>New campaign</button>` : ""}</div></section>`}`;
+    <div class="section-lead"><div><h2>${data.campaigns.length} campaign${data.campaigns.length === 1 ? "" : "s"}</h2><p>${can("campaigns.send") ? "Create, preview, and deliver messages to your selected audience." : "Read-only campaign reporting without recipient-level personal data."}</p></div>${can("campaigns.manage") ? `<button class="button primary" data-new-campaign>New campaign</button>` : ""}</div>
+    ${data.campaigns.length ? `<section class="campaign-grid">${data.campaigns.map(renderCampaignCard).join("")}</section>` : `<section class="panel empty-state"><div><div class="empty-mark">✦</div><h2>No campaigns yet</h2><p>${can("campaigns.manage") ? "Create your first message, preview personalization, and prepare it for delivery." : "Campaign reports will appear here after a campaign is created."}</p>${can("campaigns.manage") ? `<button class="button primary" data-new-campaign>New campaign</button>` : ""}</div></section>`}`;
 }
 
 function renderCampaignCard(campaign) {
@@ -620,7 +620,7 @@ function renderCampaignCard(campaign) {
       ${editable ? `<button class="button small ghost" data-action="edit" data-id="${escapeHtml(campaign.id)}">Edit</button>` : ""}
       ${can("campaigns.send") ? `<button class="button small ghost" data-action="test" data-id="${escapeHtml(campaign.id)}">Test</button>` : ""}
       ${can("campaigns.send") && campaign.status === "sending" ? `<button class="button small" data-action="pause" data-id="${escapeHtml(campaign.id)}">Pause</button>` : ""}
-      ${launchable ? `<button class="button small primary" data-action="${campaign.status === "paused" ? "resume" : "launch"}" data-id="${escapeHtml(campaign.id)}">${campaign.status === "paused" ? "Resume test" : (state.session?.delivery_mode === "sandbox" ? "Run in sandbox" : "Run controlled test")}</button>` : ""}
+      ${launchable ? `<button class="button small primary" data-action="${campaign.status === "paused" ? "resume" : "launch"}" data-id="${escapeHtml(campaign.id)}">${campaign.status === "paused" ? "Resume delivery" : (state.session?.delivery_mode === "sandbox" ? "Preview delivery" : "Start delivery")}</button>` : ""}
     </div>
   </article>`;
 }
@@ -792,7 +792,7 @@ async function openCampaignDetails(campaignId) {
 
 async function openTestSend(campaignId) {
   openModal("Send a test", "Preflight", `
-    <form id="test-send-form" class="stack"><div class="notice"><span>i</span><div>${state.session.delivery_mode === "sandbox" ? "This will be captured inside the sandbox inbox. No external email is sent." : "SMTP mode is enabled. The address must be in the server-side recipient allowlist."}</div></div><label>Test recipient<input name="email" type="email" value="owner@example.test" required /></label><p class="form-error" role="alert"></p><div class="form-actions"><button type="button" class="button" data-close-modal>Cancel</button><button class="button primary" type="submit">Send test</button></div></form>`, true);
+    <form id="test-send-form" class="stack"><div class="notice"><span>i</span><div>${state.session.delivery_mode === "sandbox" ? "This preview is captured in your workspace. No external email is sent." : "This sends a preview to an approved recipient."}</div></div><label>Preview recipient<input name="email" type="email" value="owner@example.test" required /></label><p class="form-error" role="alert"></p><div class="form-actions"><button type="button" class="button" data-close-modal>Cancel</button><button class="button primary" type="submit">Send preview</button></div></form>`, true);
   const form = document.querySelector("#test-send-form");
   form.addEventListener("submit", async (event) => {
     event.preventDefault();
@@ -809,14 +809,14 @@ async function campaignAction(action, id) {
   if (action === "edit") return openCampaignComposer(id);
   if (action === "test") return openTestSend(id);
   if (action === "launch") {
-    openModal(state.session.delivery_mode === "sandbox" ? "Run campaign in sandbox?" : "Launch controlled test?", "Delivery preflight", `
+    openModal(state.session.delivery_mode === "sandbox" ? "Preview this campaign?" : "Start campaign delivery?", "Delivery review", `
       <div class="stack">
-        <div class="notice ${state.session.delivery_mode === "smtp" ? "warning" : ""}"><span>!</span><div><strong>${state.session.delivery_mode === "sandbox" ? "Messages will stay inside the sandbox." : "Messages will be submitted to the configured SMTP test relay."}</strong><br>Eligibility and global suppression are checked again before every recipient is processed.</div></div>
+        <div class="notice ${state.session.delivery_mode === "smtp" ? "warning" : ""}"><span>!</span><div><strong>${state.session.delivery_mode === "sandbox" ? "Messages will stay within the workspace." : "Messages will be submitted to the configured delivery service."}</strong><br>Audience eligibility and suppression preferences are checked again before each recipient is processed.</div></div>
         <div class="metric-line"><span>Transport</span><strong>${escapeHtml(titleCase(state.session.delivery_mode))}</strong></div>
         <div class="metric-line"><span>Daily safety cap</span><strong>${Number(state.session.daily_limit).toLocaleString()}</strong></div>
-        <div class="metric-line"><span>Production provider</span><strong>Resend — not connected</strong></div>
-        <p class="help">Production campaigns will use Resend Broadcasts after Vercel, PostgreSQL, the sending domain, and signed webhooks are verified.</p>
-        <div class="form-actions"><button class="button" data-close-modal>Cancel</button><button class="button primary" id="confirm-launch">${state.session.delivery_mode === "sandbox" ? "Queue sandbox run" : "Queue controlled test"}</button></div>
+        <div class="metric-line"><span>Delivery service</span><strong>${escapeHtml(titleCase(state.session.delivery_mode))}</strong></div>
+        <p class="help">Every delivery is checked against audience status, suppression preferences, and your workspace safety limits.</p>
+        <div class="form-actions"><button class="button" data-close-modal>Cancel</button><button class="button primary" id="confirm-launch">${state.session.delivery_mode === "sandbox" ? "Start preview" : "Start delivery"}</button></div>
       </div>`, true);
     document.querySelector("#confirm-launch").addEventListener("click", async () => {
       closeModal();
@@ -842,7 +842,7 @@ async function renderDeliveries() {
   const data = await api(`/api/messages${suffix}`);
   els.content.innerHTML = `
     <div class="section-lead"><div><h2>${data.messages.length} captured message${data.messages.length === 1 ? "" : "s"}</h2><p>Inspect rendered content and simulate recipient feedback.</p></div><div class="section-actions">${state.deliveryCampaign ? `<button class="button" id="clear-delivery-filter">Clear campaign filter</button>` : ""}</div></div>
-    <div class="notice" style="margin-bottom:15px"><span>i</span><div><strong>Delivery status is intentionally precise.</strong> “Sandboxed” means captured locally; “submitted” means accepted by the configured relay, not necessarily delivered to an inbox.</div></div>
+    <div class="notice" style="margin-bottom:15px"><span>i</span><div><strong>Delivery status is intentionally precise.</strong> “Preview” means captured in the workspace; “Submitted” means accepted by the delivery service, not necessarily delivered to an inbox.</div></div>
     <section class="panel">${data.messages.length ? `<div class="table-wrap"><table><thead><tr><th>Recipient</th><th>Message</th><th>Campaign</th><th>Status</th><th>Time</th><th></th></tr></thead><tbody>${data.messages.map((message) => `<tr><td class="email">${escapeHtml(message.to_email)}</td><td><strong>${escapeHtml(message.subject)}</strong><span class="subtext">From ${escapeHtml(message.from_email)}</span></td><td>${escapeHtml(message.campaign_name || "Test send")}</td><td>${statusPill(message.status)}</td><td>${formatDate(message.created_at)}</td><td><button class="button small ghost" data-message-id="${escapeHtml(message.id)}">View</button></td></tr>`).join("")}</tbody></table></div>` : `<div class="empty-state"><div><div class="empty-mark">↗</div><h2>The inbox is empty</h2><p>Create a campaign and send a test to inspect the rendered result.</p><button class="button primary" data-new-campaign>Create campaign</button></div></div>`}</section>`;
   document.querySelector("#clear-delivery-filter")?.addEventListener("click", () => { state.deliveryCampaign = null; renderDeliveries(); });
 }

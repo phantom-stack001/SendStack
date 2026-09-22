@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <meta name="description" content="SendStack email campaign testing and production-readiness workspace" />
+    <meta name="description" content="SendStack campaign delivery workspace" />
     <title>SendStack</title>
     <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
     <link rel="stylesheet" href="/styles.css" />
@@ -26,16 +26,16 @@
       <main class="login-panel">
         <div class="login-card">
           <div class="brand brand-login"><span class="brand-mark">S</span><span>SendStack</span></div>
-          <p class="eyebrow">TEST ENVIRONMENT</p>
-          <h1>Campaign operations,<br />without the guesswork.</h1>
-          <p class="login-copy">Sign in to test contacts, campaigns, sandbox delivery, suppressions, and reporting.</p>
+          <p class="eyebrow">CAMPAIGN WORKSPACE</p>
+          <h1>Plan, deliver, and learn<br />from every campaign.</h1>
+          <p class="login-copy">Sign in to manage audiences, create campaigns, review delivery, and protect subscriber preferences.</p>
           <form id="login-form" class="stack" autocomplete="on">
             <label>Email address<input id="login-email" name="email" type="email" autocomplete="username" placeholder="you@example.com" required /></label>
             <label>Password<input id="login-password" name="password" type="password" autocomplete="current-password" required /></label>
             <p id="login-error" class="form-error" role="alert"></p>
             <button class="button primary full" type="submit">Sign in</button>
           </form>
-          <p class="login-hint">The default credentials are for local testing only.</p>
+          <p class="login-hint">Use the account provided by your workspace administrator.</p>
         </div>
       </main>
     </div>
@@ -43,7 +43,7 @@
     <div id="app-shell" class="app-shell" hidden>
       <aside class="sidebar">
         <div class="brand"><span class="brand-mark">S</span><span>SendStack</span></div>
-        <div id="mode-pill" class="mode-pill"><span></span> Sandbox</div>
+        <div id="mode-pill" class="mode-pill"><span></span> Preview</div>
         <nav id="main-nav" aria-label="Primary navigation">
           <button data-view="dashboard" class="nav-item active"><span class="nav-icon">⌂</span>Overview</button>
           <button data-view="contacts" data-permission="contacts.view" class="nav-item"><span class="nav-icon">◎</span>Contacts</button>
