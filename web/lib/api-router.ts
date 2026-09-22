@@ -29,7 +29,7 @@ const PERMISSION_DEFINITIONS = [
   ["lists.view", "List reporting", "View list names and audience totals"],
   ["lists.manage", "Manage lists", "Create audience lists"],
   ["contacts.view", "Recipient data", "View contact identities and consent records"],
-  ["contacts.manage", "Manage contacts", "Create and import contacts"],
+  ["contacts.manage", "Manage contacts", "Create, edit, import, and delete contacts"],
   ["campaigns.view", "Campaign reporting", "View campaigns, content, and totals"],
   ["campaigns.manage", "Manage campaigns", "Create and edit campaign drafts"],
   ["campaigns.send", "Send campaigns", "Send previews and launch campaigns"],
@@ -533,7 +533,9 @@ export async function handleApi(request: Request, path: string[]) {
     const search = new URL(request.url).searchParams.get("q")?.trim() ?? "";
     const contacts = await query(
       `SELECT c.id, c.email, c.first_name, c.last_name, c.status, c.consent_source,
-              c.created_at, STRING_AGG(l.name, ', ' ORDER BY l.name) AS lists
+              c.created_at,
+              STRING_AGG(l.name, ', ' ORDER BY l.name) AS lists,
+              COALESCE(ARRAY_AGG(l.id ORDER BY l.name) FILTER (WHERE l.id IS NOT NULL), '{}') AS list_ids
          FROM contacts c
          LEFT JOIN list_contacts lc ON lc.contact_id = c.id
          LEFT JOIN lists l ON l.id = lc.list_id
@@ -543,26 +545,170 @@ export async function handleApi(request: Request, path: string[]) {
     );
     return json(200, { contacts: contacts.rows });
   }
-  const contactMatch = route.match(/^\/contacts\/([^/]+)$/);
-  if (request.method === "PATCH" && contactMatch) {
-    const auth = await requireAdmin(request);
+  if (request.method === "POST" && route === "/contacts/import") {
+    const auth = await requirePermission(request, "contacts.manage");
     if (auth.response) return auth.response;
     if (!hasValidCsrf(request, auth.session.csrf_token)) return json(403, { error: "CSRF validation failed." });
-    const body = await request.json().catch(() => ({})) as { email?: string; first_name?: string; last_name?: string; status?: string; consent_source?: string };
+
+    const body = await request.json().catch(() => ({})) as { csv_text?: string; list_id?: string };
+    const csvText = body.csv_text ?? "";
+    const listId = body.list_id ?? "";
+    if (!csvText.trim()) return json(400, { error: "Upload a CSV file." });
+    if (!listId) return json(400, { error: "Select a destination list." });
+    const list = await query(`SELECT id FROM lists WHERE id = $1`, [listId]);
+    if (!list.rows[0]) return json(400, { error: "The selected list does not exist." });
+
+    const lines = csvText.replace(/^\uFEFF/, "").split(/\r?\n/).filter((line) => line.trim().length > 0);
+    if (lines.length < 2) return json(400, { error: "CSV must include a header row and at least one contact." });
+
+    const parseCsvLine = (line: string): string[] => {
+      const cells: string[] = [];
+      let current = "";
+      let inQuotes = false;
+      for (let i = 0; i < line.length; i += 1) {
+        const char = line[i];
+        if (char === '"') {
+          if (inQuotes && line[i + 1] === '"') {
+            current += '"';
+            i += 1;
+          } else {
+            inQuotes = !inQuotes;
+          }
+          continue;
+        }
+        if (char === "," && !inQuotes) {
+          cells.push(current.trim());
+          current = "";
+          continue;
+        }
+        current += char;
+      }
+      cells.push(current.trim());
+      return cells;
+    };
+
+    const headers = parseCsvLine(lines[0]).map((header) => header.trim().toLowerCase().replace(/\s+/g, "_"));
+    const emailIndex = headers.indexOf("email");
+    if (emailIndex < 0) return json(400, { error: "CSV must include an email column." });
+    const firstNameIndex = headers.indexOf("first_name");
+    const lastNameIndex = headers.indexOf("last_name");
+
+    let imported = 0;
+    let updated = 0;
+    let duplicates = 0;
+    let invalid = 0;
+    const seenInFile = new Set<string>();
+
+    for (const line of lines.slice(1)) {
+      const cells = parseCsvLine(line);
+      const email = normalizeEmail(cells[emailIndex] ?? "");
+      if (!validEmail(email)) {
+        invalid += 1;
+        continue;
+      }
+      if (seenInFile.has(email)) {
+        duplicates += 1;
+        continue;
+      }
+      seenInFile.add(email);
+
+      const firstName = firstNameIndex >= 0 ? (cells[firstNameIndex] ?? "").trim() : "";
+      const lastName = lastNameIndex >= 0 ? (cells[lastNameIndex] ?? "").trim() : "";
+      const existing = await query<{ id: string }>(`SELECT id FROM contacts WHERE email = $1`, [email]);
+      if (existing.rows[0]) {
+        const contactId = existing.rows[0].id;
+        await query(
+          `UPDATE contacts SET first_name = CASE WHEN $1 = '' THEN first_name ELSE $1 END,
+             last_name = CASE WHEN $2 = '' THEN last_name ELSE $2 END, updated_at = NOW()
+           WHERE id = $3`,
+          [firstName, lastName, contactId],
+        );
+        await query(
+          `INSERT INTO list_contacts (list_id, contact_id, added_at) VALUES ($1, $2, NOW())
+           ON CONFLICT (list_id, contact_id) DO NOTHING`,
+          [listId, contactId],
+        );
+        updated += 1;
+        continue;
+      }
+
+      const id = `con_${randomBytes(16).toString("hex")}`;
+      const suppressed = await query(`SELECT 1 FROM suppressions WHERE email = $1`, [email]);
+      await query(
+        `INSERT INTO contacts
+           (id, email, first_name, last_name, status, consent_source, consent_at, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, $5, 'csv_import', NOW(), NOW(), NOW())`,
+        [id, email, firstName, lastName, suppressed.rows[0] ? "suppressed" : "active"],
+      );
+      await query(
+        `INSERT INTO list_contacts (list_id, contact_id, added_at) VALUES ($1, $2, NOW())`,
+        [listId, id],
+      );
+      imported += 1;
+    }
+
+    await recordRequestAudit(request, auth.session.user_id, "contacts_imported", "list", listId, {
+      imported,
+      updated,
+      duplicates,
+      invalid,
+    });
+    return json(200, { imported, updated, duplicates, invalid });
+  }
+  const contactMatch = route.match(/^\/contacts\/([^/]+)$/);
+  if (request.method === "PATCH" && contactMatch) {
+    const auth = await requirePermission(request, "contacts.manage");
+    if (auth.response) return auth.response;
+    if (!hasValidCsrf(request, auth.session.csrf_token)) return json(403, { error: "CSRF validation failed." });
+    const body = await request.json().catch(() => ({})) as {
+      email?: string;
+      first_name?: string;
+      last_name?: string;
+      status?: string;
+      consent_source?: string;
+      list_id?: string;
+    };
     const email = normalizeEmail(body.email ?? "");
     if (!validEmail(email)) return json(400, { error: "Enter a valid email address." });
     if (!body.status || !["active", "suppressed"].includes(body.status)) return json(400, { error: "Select a valid contact status." });
+    const consentSource = (body.consent_source ?? "").trim();
+    if (!consentSource) return json(400, { error: "Consent source is required." });
+
+    const conflict = await query(
+      `SELECT id FROM contacts WHERE email = $1 AND id <> $2`,
+      [email, contactMatch[1]],
+    );
+    if (conflict.rows[0]) return json(409, { error: "That email address already exists." });
+
+    if (body.list_id) {
+      const list = await query(`SELECT id FROM lists WHERE id = $1`, [body.list_id]);
+      if (!list.rows[0]) return json(400, { error: "The selected list does not exist." });
+    }
+
     const updated = await query(
       `UPDATE contacts SET email = $1, first_name = $2, last_name = $3, status = $4, consent_source = $5, updated_at = NOW()
        WHERE id = $6 RETURNING id, email, first_name, last_name, status, consent_source, created_at`,
-      [email, (body.first_name ?? "").trim(), (body.last_name ?? "").trim(), body.status, (body.consent_source ?? "manual").trim(), contactMatch[1]],
+      [email, (body.first_name ?? "").trim(), (body.last_name ?? "").trim(), body.status, consentSource, contactMatch[1]],
     );
     if (!updated.rows[0]) return json(404, { error: "Contact not found." });
-    await recordRequestAudit(request, auth.session.user_id, "contact_updated", "contact", contactMatch[1], { email, status: body.status });
+
+    if (body.list_id) {
+      await query(`DELETE FROM list_contacts WHERE contact_id = $1`, [contactMatch[1]]);
+      await query(
+        `INSERT INTO list_contacts (list_id, contact_id, added_at) VALUES ($1, $2, NOW())`,
+        [body.list_id, contactMatch[1]],
+      );
+    }
+
+    await recordRequestAudit(request, auth.session.user_id, "contact_updated", "contact", contactMatch[1], {
+      email,
+      status: body.status,
+      list_id: body.list_id ?? null,
+    });
     return json(200, { contact: updated.rows[0] });
   }
   if (request.method === "DELETE" && contactMatch) {
-    const auth = await requireAdmin(request);
+    const auth = await requirePermission(request, "contacts.manage");
     if (auth.response) return auth.response;
     if (!hasValidCsrf(request, auth.session.csrf_token)) return json(403, { error: "CSRF validation failed." });
     const deleted = await query(`DELETE FROM contacts WHERE id = $1 RETURNING id`, [contactMatch[1]]);
@@ -862,7 +1008,7 @@ export async function handleApi(request: Request, path: string[]) {
     return json(200, { ok: true });
   }
   if (request.method === "POST" && route === "/contacts") {
-    const auth = await requireAdmin(request);
+    const auth = await requirePermission(request, "contacts.manage");
     if (auth.response) return auth.response;
     if (!hasValidCsrf(request, auth.session.csrf_token)) {
       return json(403, { error: "CSRF validation failed." });
