@@ -50,7 +50,7 @@ Webhook endpoint: `POST /api/webhooks/resend`
 3. Set a strong `SENDSTACK_SESSION_SECRET` (≥32 chars, not the example default).
 4. Set `SENDSTACK_PUBLIC_URL` to the HTTPS production origin.
 5. Run `pnpm db:migrate` against production (and seed only with a non-default admin password). This applies all SQL under `drizzle/`, including `0003_campaign_attachments.sql` required for campaign file attachments.
-6. Deploy. Confirm `/healthz` returns ok.
+6. Deploy. Each build stamps `/app.js` and `/styles.css` with the git commit and serves the SPA shell with `Cache-Control: no-store`, so browsers pick up new UI after a push. Confirm `/healthz` returns ok.
 7. Add Resend keys later when ready; leave `SENDSTACK_LIVE_SEND_ENABLED=false` until domain + webhook gates pass.
 8. Register webhook URL `https://<your-domain>/api/webhooks/resend` in Resend after setting `RESEND_WEBHOOK_SECRET`.
 

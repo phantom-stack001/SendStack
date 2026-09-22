@@ -4,7 +4,8 @@
   "private": true,
   "scripts": {
     "dev": "next dev",
-    "build": "next build",
+    "build": "node scripts/stamp-assets.mjs && next build && node scripts/stamp-assets.mjs --reset",
+    "stamp-assets": "node scripts/stamp-assets.mjs",
     "start": "next start",
     "lint": "next lint",
     "db:migrate": "tsx scripts/migrate.ts",
