@@ -591,7 +591,7 @@ async function renderContacts(query = "") {
       const label = [contact.first_name, contact.last_name].filter(Boolean).join(" ") || contact.email;
       if (!window.confirm(`Delete ${label}? This cannot be undone.`)) return;
       try {
-        await api(`/api/contacts/${contact.id}`, { method: "DELETE", body: {} });
+        await api(`/api/contacts/${contact.id}`, { method: "DELETE" });
         toast("Contact deleted");
         await renderContacts(query);
       } catch (error) {

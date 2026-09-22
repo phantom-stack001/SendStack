@@ -711,8 +711,16 @@ export async function handleApi(request: Request, path: string[]) {
     const auth = await requirePermission(request, "contacts.manage");
     if (auth.response) return auth.response;
     if (!hasValidCsrf(request, auth.session.csrf_token)) return json(403, { error: "CSRF validation failed." });
-    const deleted = await query(`DELETE FROM contacts WHERE id = $1 RETURNING id`, [contactMatch[1]]);
-    if (!deleted.rows[0]) return json(404, { error: "Contact not found." });
+    try {
+      const deleted = await query(`DELETE FROM contacts WHERE id = $1 RETURNING id`, [contactMatch[1]]);
+      if (!deleted.rows[0]) return json(404, { error: "Contact not found." });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (/foreign key|violates/i.test(message)) {
+        return json(409, { error: "This contact is still linked to campaign history and cannot be deleted yet." });
+      }
+      throw error;
+    }
     await recordRequestAudit(request, auth.session.user_id, "contact_deleted", "contact", contactMatch[1]);
     return json(200, { ok: true });
   }
