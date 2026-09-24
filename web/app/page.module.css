@@ -1,0 +1,586 @@
+.page {
+  --ink: #141821;
+  --ink-soft: #2a3344;
+  --muted: #5b6578;
+  --muted-soft: #7a8498;
+  --canvas: #e8ecef;
+  --canvas-deep: #dfe5ea;
+  --surface: rgba(255, 255, 255, 0.72);
+  --line: rgba(20, 24, 33, 0.12);
+  --accent: #0f7a72;
+  --accent-strong: #0a5f59;
+  --accent-warm: #c45c26;
+  --shadow: 0 1px 0 rgba(255, 255, 255, 0.55) inset;
+  position: relative;
+  isolation: isolate;
+  min-height: 100vh;
+  overflow-x: clip;
+  color: var(--ink);
+  background: var(--canvas);
+  font-family: var(--font-sans), ui-sans-serif, system-ui, sans-serif;
+  line-height: 1.6;
+}
+
+.page * {
+  box-sizing: border-box;
+}
+
+.atmosphere {
+  pointer-events: none;
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  overflow: hidden;
+}
+
+.glowA,
+.glowB {
+  position: absolute;
+  border-radius: 50%;
+  filter: blur(8px);
+}
+
+.glowA {
+  top: -12rem;
+  right: -8rem;
+  width: 36rem;
+  height: 36rem;
+  background: radial-gradient(circle, rgba(15, 122, 114, 0.18), transparent 68%);
+  animation: drift 18s ease-in-out infinite alternate;
+}
+
+.glowB {
+  top: 28rem;
+  left: -10rem;
+  width: 28rem;
+  height: 28rem;
+  background: radial-gradient(circle, rgba(196, 92, 38, 0.1), transparent 70%);
+  animation: drift 22s ease-in-out infinite alternate-reverse;
+}
+
+.gridlines {
+  position: absolute;
+  inset: 0;
+  background-image:
+    linear-gradient(rgba(20, 24, 33, 0.035) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(20, 24, 33, 0.035) 1px, transparent 1px);
+  background-size: 72px 72px;
+  mask-image: linear-gradient(180deg, rgba(0, 0, 0, 0.55), transparent 72%);
+}
+
+.shell {
+  width: min(1120px, calc(100% - 2.5rem));
+  margin: 0 auto;
+}
+
+.header {
+  position: sticky;
+  top: 0;
+  z-index: 20;
+  backdrop-filter: blur(14px);
+  background: rgba(232, 236, 239, 0.78);
+  border-bottom: 1px solid transparent;
+}
+
+.headerRow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 1rem 0;
+}
+
+.brand {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.7rem;
+  color: inherit;
+  text-decoration: none;
+}
+
+.brandMark {
+  width: 2.1rem;
+  height: 2.1rem;
+  display: grid;
+  place-items: center;
+  border-radius: 0.65rem;
+  background: var(--ink);
+  color: #f4f7f8;
+  font-family: var(--font-display), Georgia, serif;
+  font-weight: 700;
+  font-size: 1.05rem;
+}
+
+.brandName {
+  font-family: var(--font-display), Georgia, serif;
+  font-size: 1.35rem;
+  font-weight: 650;
+  letter-spacing: -0.03em;
+}
+
+.nav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem 1.15rem;
+  align-items: center;
+}
+
+.nav a {
+  color: var(--muted);
+  text-decoration: none;
+  font-size: 0.92rem;
+  font-weight: 560;
+  transition: color 160ms ease;
+}
+
+.nav a:hover {
+  color: var(--ink);
+}
+
+.navCta {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.55rem 0.95rem;
+  border: 1px solid var(--line);
+  border-radius: 0.55rem;
+  background: rgba(255, 255, 255, 0.65);
+  color: var(--ink) !important;
+  font-weight: 650 !important;
+}
+
+.navCta:hover {
+  border-color: rgba(20, 24, 33, 0.28);
+}
+
+.hero {
+  padding: 2.5rem 0 4.5rem;
+}
+
+.heroGrid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.05fr) minmax(0, 0.95fr);
+  gap: 2rem;
+  align-items: center;
+  min-height: min(68vh, 36rem);
+}
+
+.heroCopy {
+  display: grid;
+  gap: 1.15rem;
+  animation: rise 700ms ease both;
+}
+
+.brandHero {
+  margin: 0;
+  font-family: var(--font-display), Georgia, serif;
+  font-size: clamp(3.8rem, 11vw, 7.5rem);
+  font-weight: 650;
+  line-height: 0.9;
+  letter-spacing: -0.055em;
+  color: var(--ink);
+}
+
+.hero h1 {
+  margin: 0;
+  max-width: 14ch;
+  font-family: var(--font-display), Georgia, serif;
+  font-size: clamp(1.85rem, 3.4vw, 2.85rem);
+  font-weight: 550;
+  line-height: 1.12;
+  letter-spacing: -0.03em;
+  color: var(--ink-soft);
+}
+
+.lead {
+  margin: 0;
+  max-width: 34rem;
+  color: var(--muted);
+  font-size: 1.08rem;
+  animation: rise 700ms ease 90ms both;
+}
+
+.heroActions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  padding-top: 0.35rem;
+  animation: rise 700ms ease 160ms both;
+}
+
+.cta,
+.secondary {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0.8rem 1.2rem;
+  border-radius: 0.6rem;
+  font-weight: 680;
+  text-decoration: none;
+  transition: transform 160ms ease, background 160ms ease, border-color 160ms ease;
+}
+
+.cta {
+  background: var(--accent);
+  color: #f7fffe;
+}
+
+.cta:hover {
+  background: var(--accent-strong);
+  transform: translateY(-1px);
+}
+
+.secondary {
+  border: 1px solid var(--line);
+  background: rgba(255, 255, 255, 0.55);
+  color: var(--ink);
+}
+
+.secondary:hover {
+  border-color: rgba(20, 24, 33, 0.28);
+  transform: translateY(-1px);
+}
+
+.heroVisual {
+  display: grid;
+  place-items: center;
+  animation: fadeIn 900ms ease 120ms both;
+}
+
+.routeArt {
+  width: min(100%, 420px);
+  aspect-ratio: 1;
+  filter: drop-shadow(0 24px 40px rgba(20, 24, 33, 0.08));
+}
+
+.orbit,
+.orbitSoft {
+  stroke: rgba(20, 24, 33, 0.1);
+  stroke-width: 1.25;
+}
+
+.orbitSoft {
+  stroke-dasharray: 4 8;
+}
+
+.routePath {
+  stroke: var(--accent);
+  stroke-width: 3;
+  stroke-linecap: round;
+  fill: none;
+  stroke-dasharray: 280;
+  stroke-dashoffset: 280;
+  animation: drawRoute 1.6s ease 0.35s forwards;
+}
+
+.node,
+.nodeAccent {
+  fill: var(--ink);
+}
+
+.nodeAccent {
+  fill: var(--accent-warm);
+  animation: pulse 2.8s ease-in-out infinite;
+}
+
+.packet {
+  fill: #f7f9fa;
+  stroke: var(--ink);
+  stroke-width: 2;
+}
+
+.packetFold {
+  fill: rgba(15, 122, 114, 0.28);
+}
+
+.section {
+  padding: 1rem 0 5rem;
+}
+
+.sectionHead {
+  max-width: 38rem;
+  margin-bottom: 2rem;
+}
+
+.kicker,
+.kickerLight {
+  margin: 0 0 0.55rem;
+  font-size: 0.78rem;
+  font-weight: 720;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--accent);
+}
+
+.kickerLight {
+  color: rgba(247, 255, 254, 0.72);
+}
+
+.section h2,
+.aboutSplit h2,
+.contactPanel h2 {
+  margin: 0;
+  font-family: var(--font-display), Georgia, serif;
+  font-size: clamp(1.7rem, 3vw, 2.35rem);
+  font-weight: 580;
+  letter-spacing: -0.03em;
+  line-height: 1.15;
+}
+
+.sectionIntro {
+  margin: 0.85rem 0 0;
+  color: var(--muted);
+  font-size: 1.02rem;
+}
+
+.serviceList {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  border-top: 1px solid var(--line);
+}
+
+.serviceItem {
+  display: grid;
+  grid-template-columns: 4.5rem minmax(0, 1fr);
+  gap: 1rem;
+  padding: 1.35rem 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.serviceIndex {
+  font-family: var(--font-display), Georgia, serif;
+  font-size: 1.35rem;
+  font-weight: 550;
+  color: var(--accent);
+  letter-spacing: -0.02em;
+}
+
+.serviceItem h3 {
+  margin: 0 0 0.35rem;
+  font-size: 1.12rem;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+}
+
+.serviceItem p {
+  margin: 0;
+  max-width: 42rem;
+  color: var(--muted);
+}
+
+.aboutSplit {
+  display: grid;
+  grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.1fr);
+  gap: 2rem 3rem;
+  align-items: start;
+  padding: 2rem 0;
+  border-top: 1px solid var(--line);
+}
+
+.aboutCopy {
+  display: grid;
+  gap: 1rem;
+}
+
+.aboutCopy p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 1.05rem;
+}
+
+.contactSection {
+  padding: 0 0 4.5rem;
+}
+
+.contactPanel {
+  display: grid;
+  grid-template-columns: minmax(0, 1.1fr) minmax(0, 0.9fr);
+  gap: 2rem;
+  padding: 2rem;
+  border-radius: 1.25rem;
+  background:
+    linear-gradient(145deg, rgba(15, 122, 114, 0.95), rgba(10, 95, 89, 0.98) 55%, rgba(20, 24, 33, 0.96));
+  color: #f4fffd;
+  box-shadow: var(--shadow);
+}
+
+.contactLead {
+  margin: 0.85rem 0 0;
+  max-width: 32rem;
+  color: rgba(244, 255, 253, 0.78);
+}
+
+.contactList {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  gap: 1rem;
+  align-content: center;
+}
+
+.contactList li {
+  display: grid;
+  gap: 0.2rem;
+  padding-bottom: 0.85rem;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.16);
+}
+
+.contactList li:last-child {
+  border-bottom: 0;
+  padding-bottom: 0;
+}
+
+.contactList span:first-child {
+  font-size: 0.75rem;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: rgba(244, 255, 253, 0.58);
+}
+
+.contactList a,
+.contactList span:last-child {
+  color: #fff;
+  text-decoration: none;
+  font-size: 1.05rem;
+  font-weight: 600;
+}
+
+.contactList a:hover {
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.footer {
+  border-top: 1px solid var(--line);
+  padding: 1.5rem 0 2rem;
+}
+
+.footerRow {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 1rem;
+  color: var(--muted-soft);
+  font-size: 0.9rem;
+}
+
+.footerRow p {
+  margin: 0;
+}
+
+.footerLinks {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.85rem 1.15rem;
+}
+
+.footerLinks a {
+  color: var(--muted);
+  text-decoration: none;
+  font-weight: 560;
+}
+
+.footerLinks a:hover {
+  color: var(--ink);
+}
+
+@keyframes rise {
+  from {
+    opacity: 0;
+    transform: translateY(14px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes drawRoute {
+  to {
+    stroke-dashoffset: 0;
+  }
+}
+
+@keyframes pulse {
+  0%,
+  100% {
+    transform: scale(1);
+    opacity: 1;
+  }
+  50% {
+    transform: scale(1.12);
+    opacity: 0.85;
+  }
+}
+
+@keyframes drift {
+  from {
+    transform: translate3d(0, 0, 0);
+  }
+  to {
+    transform: translate3d(-18px, 22px, 0);
+  }
+}
+
+@media (max-width: 860px) {
+  .heroGrid,
+  .aboutSplit,
+  .contactPanel {
+    grid-template-columns: 1fr;
+  }
+
+  .heroVisual {
+    order: -1;
+  }
+
+  .routeArt {
+    width: min(100%, 280px);
+  }
+
+  .brandHero {
+    font-size: clamp(3.2rem, 18vw, 5rem);
+  }
+}
+
+@media (max-width: 640px) {
+  .headerRow {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
+  .serviceItem {
+    grid-template-columns: 3rem minmax(0, 1fr);
+  }
+
+  .contactPanel {
+    padding: 1.35rem;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .heroCopy,
+  .lead,
+  .heroActions,
+  .heroVisual,
+  .routePath,
+  .nodeAccent,
+  .glowA,
+  .glowB {
+    animation: none;
+  }
+
+  .routePath {
+    stroke-dashoffset: 0;
+  }
+}

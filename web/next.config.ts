@@ -15,14 +15,17 @@ const nextConfig: NextConfig = {
   },
   async headers() {
     return [
-      { source: "/", headers: noStore },
+      { source: "/app", headers: noStore },
       { source: "/index.html", headers: noStore },
       { source: "/app.js", headers: noStore },
       { source: "/styles.css", headers: noStore },
     ];
   },
+  async redirects() {
+    return [{ source: "/app-python", destination: "/app", permanent: true }];
+  },
   async rewrites() {
-    return [{ source: "/", destination: "/index.html" }];
+    return [{ source: "/app", destination: "/index.html" }];
   },
 };
 

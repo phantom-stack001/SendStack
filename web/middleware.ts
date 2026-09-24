@@ -3,7 +3,7 @@ import { NextResponse, type NextRequest } from "next/server";
 const CSP =
   "default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'; img-src 'self' data:; frame-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'";
 
-const NO_STORE_PATHS = new Set(["/", "/index.html", "/app.js", "/styles.css"]);
+const NO_STORE_PATHS = new Set(["/app", "/index.html", "/app.js", "/styles.css"]);
 
 export function middleware(request: NextRequest) {
   const response = NextResponse.next();

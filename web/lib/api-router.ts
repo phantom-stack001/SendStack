@@ -3,48 +3,27 @@ import { json } from "./http";
 import { config } from "./config";
 import { query } from "./db";
 import { hashPassword, makeId, normalizeEmail, validEmail, verifyPassword } from "./ids";
-import { sendResendEmail } from "./providers/resend";
+import {
+  addContactToSegment,
+  createResendBroadcastDraft,
+  createResendSegment,
+  liveSendAllowed,
+  sendResendBroadcast,
+  sendResendEmail,
+  toResendBroadcastHtml,
+  toResendBroadcastText,
+  upsertResendContact,
+} from "./providers/resend";
+import { shouldReuseExistingBroadcast } from "./providers/webhook";
 import { applySuppression } from "./suppressions";
 import {
   ATTACHMENT_MAX_COUNT,
   attachmentMeta,
   validateCampaignAttachment,
 } from "./attachments";
-
-const ADMIN_PERMISSIONS = [
-  "overview.view", "sending.view", "lists.view", "lists.manage", "contacts.view",
-  "contacts.manage", "campaigns.view", "campaigns.manage", "campaigns.send", "deliveries.view",
-  "deliveries.feedback", "suppressions.view", "suppressions.manage", "audit.view", "users.view", "users.manage",
-];
-
-const ROLE_DEFINITIONS = [
-  { id: "admin", label: "Administrator", description: "Full system control, including access management and audit history.", permissions: ADMIN_PERMISSIONS },
-  { id: "marketer", label: "Marketer", description: "Manages audiences, campaigns, sends, and suppressions.", permissions: ["overview.view", "sending.view", "lists.view", "lists.manage", "contacts.view", "contacts.manage", "campaigns.view", "campaigns.manage", "campaigns.send", "deliveries.view", "suppressions.view", "suppressions.manage"] },
-  { id: "analyst", label: "Analyst", description: "Read-only campaign reporting without recipient-level personal data.", permissions: ["overview.view", "sending.view", "lists.view", "campaigns.view"] },
-];
-
-const PERMISSION_DEFINITIONS = [
-  ["overview.view", "Overview", "View operational totals and campaign reporting"],
-  ["sending.view", "Sending setup", "View delivery setup and go-live checklist"],
-  ["lists.view", "List reporting", "View list names and audience totals"],
-  ["lists.manage", "Manage lists", "Create audience lists"],
-  ["contacts.view", "Recipient data", "View contact identities and consent records"],
-  ["contacts.manage", "Manage contacts", "Create, edit, import, and delete contacts"],
-  ["campaigns.view", "Campaign reporting", "View campaigns, content, and totals"],
-  ["campaigns.manage", "Manage campaigns", "Create and edit campaign drafts"],
-  ["campaigns.send", "Send campaigns", "Send previews and launch campaigns"],
-  ["deliveries.view", "Delivery records", "View message records"],
-  ["deliveries.feedback", "Delivery feedback", "Process delivery events"],
-  ["suppressions.view", "Suppression data", "View suppressed addresses"],
-  ["suppressions.manage", "Manage suppressions", "Add manual suppressions"],
-  ["audit.view", "Audit log", "View administrative activity"],
-  ["users.view", "User directory", "View users and roles"],
-  ["users.manage", "Manage access", "Create and update users"],
-].map(([id, label, description]) => ({ id, label, description }));
-
-function permissionsForRole(role: string): string[] {
-  return ROLE_DEFINITIONS.find((definition) => definition.id === role)?.permissions ?? [];
-}
+import { passwordChangeAllowedPath, requireCsrf } from "./auth";
+import { PERMISSION_DEFINITIONS, ROLE_DEFINITIONS, permissionsForRole, roleDefinitionsPayload } from "./rbac";
+import { renderTemplate, validateEmailContent } from "./templates";
 
 function tokenHash(token: string): string {
   return createHash("sha256").update(token).digest("hex");
@@ -62,15 +41,20 @@ function cookieHeader(token: string, maxAge: number): string {
 }
 
 function hasValidCsrf(request: Request, csrfToken: string): boolean {
-  return request.headers.get("X-CSRF-Token") === csrfToken;
+  return requireCsrf(request, { csrfToken }) === null;
 }
 
-function renderTemplate(value: string, contact: { email: string; first_name?: string; last_name?: string }, unsubscribeUrl: string): string {
-  return value
-    .replaceAll("{{first_name}}", contact.first_name ?? "")
-    .replaceAll("{{last_name}}", contact.last_name ?? "")
-    .replaceAll("{{email}}", contact.email)
-    .replaceAll("{{unsubscribe_url}}", unsubscribeUrl);
+function renderContactTemplate(
+  value: string,
+  contact: { email: string; first_name?: string; last_name?: string },
+  unsubscribeUrl: string,
+): string {
+  return renderTemplate(value, {
+    first_name: contact.first_name ?? "",
+    last_name: contact.last_name ?? "",
+    email: contact.email,
+    unsubscribe_url: unsubscribeUrl,
+  });
 }
 
 async function currentSession(request: Request) {
@@ -92,7 +76,7 @@ async function currentSession(request: Request) {
 function sessionPayload(session: NonNullable<Awaited<ReturnType<typeof currentSession>>>) {
   return {
     csrf_token: session.csrf_token,
-    permissions: permissionsForRole(session.role),
+    permissions: [...permissionsForRole(session.role)],
     delivery_mode: config.deliveryMode,
     must_change_password: session.must_change_password,
     user: {
@@ -100,7 +84,7 @@ function sessionPayload(session: NonNullable<Awaited<ReturnType<typeof currentSe
       email: session.email,
       name: session.name,
       role: session.role,
-      role_label: session.role === "admin" ? "Administrator" : session.role === "marketer" ? "Marketer" : "Analyst",
+      role_label: ROLE_DEFINITIONS[session.role]?.label ?? session.role,
       must_change_password: session.must_change_password,
     },
   };
@@ -122,13 +106,13 @@ async function requireAdmin(request: Request) {
 async function requirePermission(request: Request, permission: string) {
   const auth = await requireSession(request);
   if (auth.response) return auth;
-  return permissionsForRole(auth.session.role).includes(permission)
+  return permissionsForRole(auth.session.role).has(permission)
     ? auth
     : { response: json(403, { error: "You do not have permission to access this resource." }) };
 }
 
 function userPayload(user: { id: string; email: string; name: string; role: string; active: boolean; must_change_password: boolean; created_at: string; last_login_at?: string | null }, currentUserId: string) {
-  const role = ROLE_DEFINITIONS.find((definition) => definition.id === user.role) ?? ROLE_DEFINITIONS[2];
+  const role = ROLE_DEFINITIONS[user.role as keyof typeof ROLE_DEFINITIONS] ?? ROLE_DEFINITIONS.analyst;
   return {
     ...user,
     role_label: role.label,
@@ -203,11 +187,119 @@ async function campaignById(id: string) {
     content_mode: string; content_json: string; html_body: string; text_body: string;
     list_id: string; list_name: string; status: string; created_at: string;
     launched_at: string | null; completed_at: string | null;
+    provider_broadcast_id: string | null; provider_segment_id: string | null;
+    launch_lock_token: string | null;
   }>(
     `SELECT c.*, l.name AS list_name FROM campaigns c JOIN lists l ON l.id = c.list_id WHERE c.id = $1`,
     [id],
   );
   return result.rows[0] ?? null;
+}
+
+async function withinDailyLimit(additional = 0): Promise<boolean> {
+  const dailyLimit = Number(process.env.SENDSTACK_DAILY_LIMIT ?? 50) || 50;
+  const sent = await query<{ count: string }>(
+    `SELECT COUNT(*)::int AS count FROM messages WHERE created_at >= CURRENT_DATE AND status IN ('captured', 'submitted', 'delivered')`,
+  );
+  return Number(sent.rows[0]?.count ?? 0) + additional <= dailyLimit;
+}
+
+async function completeCampaignIfIdle(campaignId: string) {
+  await query(
+    `UPDATE campaigns
+        SET status = 'completed', completed_at = COALESCE(completed_at, NOW()), updated_at = NOW()
+      WHERE id = $1
+        AND status IN ('sending', 'paused')
+        AND EXISTS (SELECT 1 FROM campaign_recipients cr WHERE cr.campaign_id = campaigns.id)
+        AND NOT EXISTS (
+          SELECT 1 FROM campaign_recipients cr
+           WHERE cr.campaign_id = campaigns.id AND cr.status IN ('queued', 'processing')
+        )`,
+    [campaignId],
+  );
+}
+
+async function launchResendBroadcast(
+  campaign: NonNullable<Awaited<ReturnType<typeof campaignById>>>,
+  contacts: Array<{ id: string; email: string; first_name: string; last_name: string }>,
+) {
+  if (!liveSendAllowed()) {
+    throw new Error("Live Resend sending is not enabled.");
+  }
+  const lockToken = `lock_${randomBytes(16).toString("hex")}`;
+  const locked = await query<{ id: string; provider_broadcast_id: string | null; provider_segment_id: string | null }>(
+    `UPDATE campaigns
+        SET launch_lock_token = $1,
+            status = 'sending',
+            launched_at = COALESCE(launched_at, NOW()),
+            updated_at = NOW()
+      WHERE id = $2
+        AND status IN ('draft', 'paused')
+        AND (launch_lock_token IS NULL OR launch_lock_token = $1)
+      RETURNING id, provider_broadcast_id, provider_segment_id`,
+    [lockToken, campaign.id],
+  );
+  if (!locked.rows[0]) {
+    throw new Error("Could not acquire launch lock. Another launch may already be in progress.");
+  }
+
+  let segmentId = locked.rows[0].provider_segment_id;
+  let broadcastId = locked.rows[0].provider_broadcast_id;
+
+  for (const contact of contacts) {
+    const recipientId = `rec_${randomBytes(16).toString("hex")}`;
+    const messageId = `msg_${randomBytes(16).toString("hex")}`;
+    await query(
+      `INSERT INTO campaign_recipients
+         (id, campaign_id, contact_id, email, status, message_id, provider_email_id, queued_at, sent_at)
+       VALUES ($1, $2, $3, $4, 'queued', $5, NULL, NOW(), NULL)
+       ON CONFLICT (campaign_id, contact_id) DO NOTHING`,
+      [recipientId, campaign.id, contact.id, contact.email, messageId],
+    );
+  }
+
+  if (!segmentId) {
+    const segment = await createResendSegment(`SendStack ${campaign.id}`);
+    segmentId = segment.id;
+    await query(`UPDATE campaigns SET provider_segment_id = $1, updated_at = NOW() WHERE id = $2`, [segmentId, campaign.id]);
+  }
+
+  for (const contact of contacts) {
+    const providerContact = await upsertResendContact({
+      email: contact.email,
+      firstName: contact.first_name,
+      lastName: contact.last_name,
+    });
+    await addContactToSegment(providerContact.id, segmentId);
+    await query(`UPDATE contacts SET provider_contact_id = $1, updated_at = NOW() WHERE id = $2`, [providerContact.id, contact.id]);
+  }
+
+  if (!shouldReuseExistingBroadcast(broadcastId)) {
+    const draft = await createResendBroadcastDraft({
+      segmentId,
+      fromName: campaign.from_name,
+      fromEmail: campaign.from_email,
+      subject: campaign.subject,
+      html: toResendBroadcastHtml(campaign.html_body),
+      text: toResendBroadcastText(campaign.text_body),
+    });
+    broadcastId = draft.id;
+    await query(
+      `UPDATE campaigns SET provider_broadcast_id = $1, updated_at = NOW() WHERE id = $2`,
+      [broadcastId, campaign.id],
+    );
+  }
+
+  await sendResendBroadcast(broadcastId!);
+  await query(
+    `UPDATE campaign_recipients SET status = 'processing' WHERE campaign_id = $1 AND status = 'queued'`,
+    [campaign.id],
+  );
+  await query(
+    `UPDATE campaigns SET launch_lock_token = NULL, updated_at = NOW() WHERE id = $1`,
+    [campaign.id],
+  );
+  return { queued: contacts.length, broadcastId, segmentId };
 }
 
 async function listCampaignAttachmentMeta(campaignId: string) {
@@ -298,6 +390,12 @@ function readinessResponse() {
 
 export async function handleApi(request: Request, path: string[]) {
   const route = `/${path.join("/")}`;
+  if (!(request.method === "POST" && route === "/auth/login")) {
+    const session = await currentSession(request);
+    if (session?.must_change_password && !passwordChangeAllowedPath(`/api${route}`, request.method)) {
+      return json(403, { error: "You must change your password before continuing." });
+    }
+  }
   if (request.method === "POST" && route === "/auth/login") {
     const body = await request.json().catch(() => ({})) as { email?: string; password?: string };
     const result = await query<{ id: string; email: string; name: string; role: "admin" | "marketer" | "analyst"; password_hash: string; must_change_password: boolean }>(
@@ -400,7 +498,7 @@ export async function handleApi(request: Request, path: string[]) {
          ORDER BY u.created_at`);
     return json(200, {
       users: users.rows.map((user) => userPayload(user, auth.session.user_id)),
-      roles: ROLE_DEFINITIONS,
+      roles: roleDefinitionsPayload(),
       permissions: PERMISSION_DEFINITIONS,
     });
   }
@@ -470,7 +568,7 @@ export async function handleApi(request: Request, path: string[]) {
     const email = normalizeEmail(body.email ?? "");
     const role = body.role ?? "marketer";
     if (!name || !validEmail(email)) return json(400, { error: "Enter a name and valid email address." });
-    if (!ROLE_DEFINITIONS.some((definition) => definition.id === role)) return json(400, { error: "Select a valid role." });
+    if (!(role in ROLE_DEFINITIONS)) return json(400, { error: "Select a valid role." });
     if (!body.password || body.password.length < 12) return json(400, { error: "Password must be at least 12 characters." });
     const existing = await query(`SELECT 1 FROM users WHERE email = $1`, [email]);
     if (existing.rows[0]) return json(409, { error: "That email address already exists." });
@@ -493,7 +591,7 @@ export async function handleApi(request: Request, path: string[]) {
     const name = (body.name ?? "").trim();
     const email = normalizeEmail(body.email ?? "");
     if (!name || !validEmail(email)) return json(400, { error: "Enter a name and valid email address." });
-    if (!ROLE_DEFINITIONS.some((definition) => definition.id === body.role)) return json(400, { error: "Select a valid role." });
+    if (!body.role || !(body.role in ROLE_DEFINITIONS)) return json(400, { error: "Select a valid role." });
     const updated = await query(
       `UPDATE users SET name = $1, email = $2, role = $3, active = $4, updated_at = NOW()
        WHERE id = $5 RETURNING id, email, name, role, active, must_change_password, created_at`,
@@ -774,6 +872,12 @@ export async function handleApi(request: Request, path: string[]) {
     const list = await query(`SELECT id FROM lists WHERE id = $1`, [listId]);
     if (!list.rows[0]) return json(400, { error: "The selected list does not exist." });
 
+    try {
+      validateEmailContent(body.html_body ?? "", body.text_body ?? "");
+    } catch (error) {
+      return json(400, { error: error instanceof Error ? error.message : "Campaign content is invalid." });
+    }
+
     let contentJson = "{\"schema_version\":1}";
     if (body.content_json) {
       try {
@@ -903,6 +1007,11 @@ export async function handleApi(request: Request, path: string[]) {
     if (!validEmail(fromEmail)) return json(400, { error: "Enter a valid sender email address." });
     const contentJson = typeof body.content_json === "string" ? body.content_json : JSON.stringify(body.content_json ?? { schema_version: 1 });
     try { JSON.parse(contentJson); } catch { return json(400, { error: "Campaign content is invalid." }); }
+    try {
+      validateEmailContent(body.html_body ?? "", body.text_body ?? "");
+    } catch (error) {
+      return json(400, { error: error instanceof Error ? error.message : "Campaign content is invalid." });
+    }
     const updated = await query(
       `UPDATE campaigns SET name = $1, subject = $2, from_name = $3, from_email = $4, list_id = $5,
        content_mode = $6, content_json = $7, html_body = $8, text_body = $9, updated_at = NOW()
@@ -948,17 +1057,105 @@ export async function handleApi(request: Request, path: string[]) {
       await recordRequestAudit(request, auth.session.user_id, `campaign_${campaignAction[2]}d`, "campaign", campaign.id, { status });
       return json(200, { ok: true, status });
     }
+
+    if (campaignAction[2] === "launch" && config.deliveryMode === "resend") {
+      if (!await withinDailyLimit(contacts.length)) {
+        return json(429, { error: "Daily delivery limit reached." });
+      }
+      try {
+        const result = await launchResendBroadcast(
+          campaign,
+          contacts.filter((contact): contact is { id: string; email: string; first_name: string; last_name: string } => Boolean(contact.id)),
+        );
+        await recordRequestAudit(request, auth.session.user_id, "campaign_launched", "campaign", campaign.id, {
+          recipients: result.queued,
+          delivery_mode: "resend",
+          provider_broadcast_id: result.broadcastId,
+          provider_segment_id: result.segmentId,
+        });
+        return json(200, { queued: result.queued, sent: 0, provider_broadcast_id: result.broadcastId });
+      } catch (error) {
+        await query(
+          `UPDATE campaigns SET launch_lock_token = NULL, status = CASE WHEN status = 'sending' THEN 'paused' ELSE status END, updated_at = NOW() WHERE id = $1`,
+          [campaign.id],
+        );
+        return json(500, { error: error instanceof Error ? error.message : "Broadcast launch failed." });
+      }
+    }
+
+    if (campaignAction[2] === "launch") {
+      if (!await withinDailyLimit(contacts.length)) {
+        return json(429, { error: "Daily delivery limit reached." });
+      }
+      await query(
+        `UPDATE campaigns
+            SET status = 'sending', launched_at = COALESCE(launched_at, NOW()), updated_at = NOW()
+          WHERE id = $1`,
+        [campaign.id],
+      );
+    }
+
     const sendAttachments = await loadCampaignAttachmentsForSend(campaign.id);
+    let sentCount = 0;
+    let failedCount = 0;
     for (const contact of contacts) {
-      const recipientId = `rec_${randomBytes(16).toString("hex")}`;
+      let linkedRecipientId: string | null = null;
       const messageId = `msg_${randomBytes(16).toString("hex")}`;
+
+      if (contact.id) {
+        const existing = await query<{ id: string; status: string }>(
+          `SELECT id, status FROM campaign_recipients WHERE campaign_id = $1 AND contact_id = $2`,
+          [campaign.id, contact.id],
+        );
+        if (existing.rows[0]) {
+          const prior = existing.rows[0];
+          const alreadyMessaged = await query<{ id: string }>(
+            `SELECT id FROM messages WHERE recipient_id = $1 LIMIT 1`,
+            [prior.id],
+          );
+          if (alreadyMessaged.rows[0] && prior.status !== "queued" && prior.status !== "processing") {
+            continue;
+          }
+          linkedRecipientId = prior.id;
+        } else {
+          const recipientId = `rec_${randomBytes(16).toString("hex")}`;
+          const inserted = await query<{ id: string }>(
+            `INSERT INTO campaign_recipients
+               (id, campaign_id, contact_id, email, status, message_id, provider_email_id, queued_at, sent_at)
+             VALUES ($1, $2, $3, $4, 'processing', $5, NULL, NOW(), NULL)
+             ON CONFLICT (campaign_id, contact_id) DO NOTHING
+             RETURNING id`,
+            [recipientId, campaign.id, contact.id, contact.email, messageId],
+          );
+          linkedRecipientId = inserted.rows[0]?.id ?? null;
+          if (!linkedRecipientId) {
+            const raced = await query<{ id: string; status: string }>(
+              `SELECT id, status FROM campaign_recipients WHERE campaign_id = $1 AND contact_id = $2`,
+              [campaign.id, contact.id],
+            );
+            if (!raced.rows[0]) continue;
+            const racedMessage = await query<{ id: string }>(
+              `SELECT id FROM messages WHERE recipient_id = $1 LIMIT 1`,
+              [raced.rows[0].id],
+            );
+            if (racedMessage.rows[0] && raced.rows[0].status !== "queued" && raced.rows[0].status !== "processing") {
+              continue;
+            }
+            linkedRecipientId = raced.rows[0].id;
+          }
+        }
+      }
+
       const unsubscribeToken = randomBytes(24).toString("base64url");
       const unsubscribeUrl = `${process.env.SENDSTACK_PUBLIC_URL ?? "http://localhost:3000"}/u/${unsubscribeToken}`;
-      const htmlBody = renderTemplate(campaign.html_body, contact, unsubscribeUrl);
-      const textBody = renderTemplate(campaign.text_body, contact, unsubscribeUrl);
-      const subject = renderTemplate(campaign.subject, contact, unsubscribeUrl);
-      const providerEmail = config.deliveryMode === "resend"
-        ? await sendResendEmail({
+      const htmlBody = renderContactTemplate(campaign.html_body, contact, unsubscribeUrl);
+      const textBody = renderContactTemplate(campaign.text_body, contact, unsubscribeUrl);
+      const subject = renderContactTemplate(campaign.subject, contact, unsubscribeUrl);
+
+      let providerEmail: { id: string } | null = null;
+      try {
+        if (config.deliveryMode === "resend") {
+          providerEmail = await sendResendEmail({
             to: contact.email,
             subject,
             html: htmlBody,
@@ -967,27 +1164,53 @@ export async function handleApi(request: Request, path: string[]) {
             fromEmail: campaign.from_email,
             unsubscribeUrl,
             attachments: sendAttachments,
-          })
-        : null;
-      if (contact.id) {
+          });
+        }
+      } catch (error) {
+        failedCount += 1;
+        const errorMessage = error instanceof Error ? error.message : "Delivery failed.";
+        if (linkedRecipientId) {
+          await query(
+            `UPDATE campaign_recipients SET status = 'failed', error = $1 WHERE id = $2`,
+            [errorMessage.slice(0, 500), linkedRecipientId],
+          );
+        }
         await query(
-          `INSERT INTO campaign_recipients (id, campaign_id, contact_id, email, status, message_id, provider_email_id, queued_at, sent_at)
-           VALUES ($1, $2, $3, $4, 'sent', $5, $6, NOW(), NOW()) ON CONFLICT (campaign_id, contact_id) DO NOTHING`,
-          [recipientId, campaign.id, contact.id, contact.email, messageId, providerEmail?.id ?? null],
+          `INSERT INTO messages (id, campaign_id, recipient_id, contact_id, to_email, subject, from_email, html_body, text_body, status, unsubscribe_token, created_at, error)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'failed', $10, NOW(), $11)`,
+          [messageId, campaign.id, linkedRecipientId, contact.id, contact.email, subject, campaign.from_email, htmlBody, textBody, unsubscribeToken, errorMessage.slice(0, 500)],
         );
+        continue;
       }
+
       await query(
         `INSERT INTO messages (id, campaign_id, recipient_id, contact_id, to_email, subject, from_email, html_body, text_body, status, unsubscribe_token, created_at)
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'captured', $10, NOW())`,
-        [messageId, campaign.id, contact.id ? recipientId : null, contact.id, contact.email, subject, campaign.from_email, htmlBody, textBody, unsubscribeToken],
+        [messageId, campaign.id, linkedRecipientId, contact.id, contact.email, subject, campaign.from_email, htmlBody, textBody, unsubscribeToken],
       );
       if (providerEmail) {
         await query(`UPDATE messages SET status = 'submitted', provider_id = $1 WHERE id = $2`, [providerEmail.id, messageId]);
       }
+      if (linkedRecipientId) {
+        await query(
+          `UPDATE campaign_recipients
+              SET status = 'sent', message_id = $1, provider_email_id = $2, sent_at = NOW(), error = NULL
+            WHERE id = $3`,
+          [messageId, providerEmail?.id ?? null, linkedRecipientId],
+        );
+      }
+      sentCount += 1;
     }
-    await query(`UPDATE campaigns SET status = 'completed', completed_at = NOW(), updated_at = NOW() WHERE id = $1`, [campaign.id]);
-    await recordRequestAudit(request, auth.session.user_id, campaignAction[2] === "test-send" ? "campaign_test_sent" : "campaign_launched", "campaign", campaign.id, { recipients: contacts.length, delivery_mode: config.deliveryMode });
-    return json(200, { queued: contacts.length, sent: contacts.length });
+
+    if (campaignAction[2] === "launch") {
+      await completeCampaignIfIdle(campaign.id);
+    }
+    await recordRequestAudit(request, auth.session.user_id, campaignAction[2] === "test-send" ? "campaign_test_sent" : "campaign_launched", "campaign", campaign.id, {
+      recipients: sentCount,
+      failed: failedCount,
+      delivery_mode: config.deliveryMode,
+    });
+    return json(200, { queued: sentCount, sent: sentCount, failed: failedCount });
   }
   if (request.method === "GET" && route === "/messages") {
     const auth = await requirePermission(request, "deliveries.view");
