@@ -15,6 +15,7 @@ const nextConfig: NextConfig = {
   },
   async headers() {
     return [
+      { source: "/", headers: noStore },
       { source: "/app", headers: noStore },
       { source: "/index.html", headers: noStore },
       { source: "/app.js", headers: noStore },

@@ -1,7 +1,25 @@
-node_modules
-.next
+# Dependencies
+node_modules/
+
+# Next.js
+.next/
+out/
+
+# Env / secrets (keep committed examples only)
 .env
-.env.local
-.env.*.local
-coverage
+.env.*
+!.env.example
+
+# Test / coverage
+coverage/
+playwright-report/
+test-results/
+
+# Logs and caches
 *.log
+*.tsbuildinfo
+.turbo/
+.vercel/
+
+# OS
+.DS_Store
