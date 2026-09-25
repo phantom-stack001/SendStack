@@ -28,7 +28,7 @@ export const ROLE_DEFINITIONS = {
   marketer: {
     id: "marketer",
     label: "Marketer",
-    description: "Manages audiences, campaigns, sends, and suppressions.",
+    description: "Manages audiences and campaign drafts; cannot launch delivery or manage users.",
     permissions: [
       "overview.view",
       "lists.view",
@@ -37,7 +37,6 @@ export const ROLE_DEFINITIONS = {
       "contacts.manage",
       "campaigns.view",
       "campaigns.manage",
-      "campaigns.send",
       "deliveries.view",
       "suppressions.view",
       "suppressions.manage",
@@ -62,8 +61,8 @@ export const PERMISSION_DEFINITIONS = [
   { id: "contacts.manage", label: "Manage contacts", description: "Create and import contacts" },
   { id: "contacts.edit", label: "Edit contacts", description: "Edit or delete existing contacts" },
   { id: "campaigns.view", label: "Campaign reporting", description: "View campaigns, content, and totals" },
-  { id: "campaigns.manage", label: "Manage campaigns", description: "Create and edit campaign drafts" },
-  { id: "campaigns.send", label: "Send campaigns", description: "Send previews and launch campaigns" },
+  { id: "campaigns.manage", label: "Manage campaigns", description: "Create and edit campaign drafts; send previews" },
+  { id: "campaigns.send", label: "Send campaigns", description: "Launch, pause, and resume campaign delivery (administrators only)" },
   { id: "deliveries.view", label: "Delivery records", description: "View message records" },
   { id: "deliveries.feedback", label: "Delivery feedback", description: "Process delivery events" },
   { id: "suppressions.view", label: "Suppression data", description: "View suppressed addresses" },
@@ -119,8 +118,11 @@ export function requiredPermission(method: string, path: string): string | null 
     if (method === "POST" || method === "DELETE") return "campaigns.manage";
     return null;
   }
-  if (/^\/api\/campaigns\/[^/]+\/(launch|pause|resume|test-send)$/.test(normalized)) {
+  if (/^\/api\/campaigns\/[^/]+\/(launch|pause|resume)$/.test(normalized)) {
     return method === "POST" ? "campaigns.send" : null;
+  }
+  if (/^\/api\/campaigns\/[^/]+\/test-send$/.test(normalized)) {
+    return method === "POST" ? "campaigns.manage" : null;
   }
   if (/^\/api\/contacts\/[^/]+$/.test(normalized)) {
     if (method === "GET") return "contacts.view";

@@ -7,6 +7,13 @@ const state = {
   roles: [],
   permissionDefinitions: [],
   pollTimer: null,
+  deliveryFilters: {
+    campaignId: null,
+    q: "",
+    status: "",
+    from: "",
+    to: "",
+  },
 };
 
 const els = {
@@ -58,14 +65,14 @@ const defaultTemplate = `<!doctype html>
     <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="background:#f1f5fb;padding:32px 16px">
       <tr><td align="center">
         <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="max-width:600px;background:white;border-radius:14px;overflow:hidden">
-          <tr><td style="padding:26px 30px;background:#172952;color:white;font-size:20px;font-weight:bold">SendStack</td></tr>
+          <tr><td style="padding:26px 30px;background:#0f7a72;color:white;font-size:20px;font-weight:bold">CTN</td></tr>
           <tr><td style="padding:34px 30px">
             <p style="margin:0 0 14px;font-size:16px">Hello {{first_name}},</p>
-            <h1 style="margin:0 0 16px;font-size:28px;line-height:1.2">A useful update, sent thoughtfully.</h1>
+            <h1 style="margin:0 0 16px;font-size:28px;line-height:1.2">A useful update from CTN.</h1>
             <p style="margin:0 0 22px;color:#53627a;line-height:1.65">Replace this text with the message you want your audience to receive. Preview shows the fully personalized result.</p>
-            <a href="#" style="display:inline-block;background:#5b7cff;color:white;text-decoration:none;padding:12px 18px;border-radius:8px;font-weight:bold">Primary action</a>
+            <a href="#" style="display:inline-block;background:#0f7a72;color:white;text-decoration:none;padding:12px 18px;border-radius:8px;font-weight:bold">Learn more</a>
           </td></tr>
-          <tr><td style="padding:21px 30px;background:#f7f9fc;color:#718097;font-size:12px;line-height:1.6">You are receiving this because you opted in to updates.<br><a href="{{unsubscribe_url}}" style="color:#536fd9">Unsubscribe</a></td></tr>
+          <tr><td style="padding:21px 30px;background:#f7f9fc;color:#718097;font-size:12px;line-height:1.6">You are receiving this because you opted in to updates.<br><a href="{{unsubscribe_url}}" style="color:#0f7a72">Unsubscribe</a></td></tr>
         </table>
       </td></tr>
     </table>
@@ -75,17 +82,19 @@ const defaultTemplate = `<!doctype html>
 const defaultVisualContent = {
   schema_version: 1,
   template: "announcement",
-  brand_name: "SendStack",
-  preheader: "A useful update for our subscribers",
-  headline: "A useful update, sent thoughtfully.",
-  body: "Replace this text with the message you want your audience to receive. Preview shows the fully personalized result.",
-  cta_label: "Primary action",
-  cta_url: "https://example.com",
-  accent_color: "#5b7cff",
+  brand_name: "CTN",
+  preheader: "A short update for you",
+  headline: "A useful update from CTN",
+  body: "Write the message your audience should read. The preview on the right updates as you type.",
+  cta_label: "Learn more",
+  cta_url: "https://ctn-sk.com",
+  accent_color: "#0f7a72",
   footer: "You are receiving this because you opted in to updates.",
 };
 
-const defaultRichContent = `<h1>A useful update, sent thoughtfully.</h1><p>Hello {{first_name}},</p><p>Write your message here. Use the toolbar for emphasis and lists without touching HTML.</p><p><strong>Thank you for reading.</strong></p>`;
+const defaultRichContent = `<h1>A useful update from CTN</h1><p>Hello {{first_name}},</p><p>Write your message here. Use the toolbar for emphasis and lists without touching HTML.</p><p><strong>Thank you for reading.</strong></p>`;
+
+const defaultPlainContent = "Hello {{first_name}},\n\nWrite your message here.\n\nUnsubscribe: {{unsubscribe_url}}";
 
 function escapeHtml(value) {
   return String(value ?? "")
@@ -211,15 +220,17 @@ function titleCase(value) {
     .replace(/\b\w/g, (character) => character.toUpperCase());
 }
 
-function statusPill(status) {
+function statusPill(status, { title } = {}) {
   const safe = String(status || "unknown").toLowerCase();
   const labels = {
     sandboxed: "Captured",
+    captured: "Captured",
     submitted: "Submitted",
     delivered: "Delivered",
     bounced: "Bounced",
     complained: "Complained",
     suppressed: "Suppressed",
+    unsubscribed: "Unsubscribed",
     queued: "Queued",
     sending: "Sending",
     paused: "Paused",
@@ -229,7 +240,53 @@ function statusPill(status) {
     active: "Active",
     inactive: "Inactive",
   };
-  return `<span class="status ${escapeHtml(safe)}">${escapeHtml(labels[safe] || titleCase(safe))}</span>`;
+  const label = labels[safe] || titleCase(safe);
+  const tip = title || deliveryStatusMeaning(safe);
+  const titleAttr = tip ? ` title="${escapeHtml(tip)}"` : "";
+  return `<span class="status ${escapeHtml(safe)}"${titleAttr}>${escapeHtml(label)}</span>`;
+}
+
+function deliveryStatusMeaning(status) {
+  switch (String(status || "").toLowerCase()) {
+    case "captured":
+    case "sandboxed":
+      return "Stored in this workspace only — no email left the app";
+    case "submitted":
+      return "Accepted by the delivery service — not proof it reached the inbox";
+    case "delivered":
+      return "Delivery provider confirmed handoff to the recipient mailbox";
+    case "failed":
+      return "Send attempt failed before the provider accepted it";
+    case "bounced":
+      return "Hard bounce — address rejected; recipient is suppressed";
+    case "complained":
+      return "Marked as spam — recipient is suppressed";
+    case "unsubscribed":
+      return "Recipient opted out via unsubscribe";
+    case "suppressed":
+      return "Skipped because the address is on the suppression list";
+    default:
+      return "";
+  }
+}
+
+function deliveryStatusLegend(live) {
+  const items = live
+    ? [
+        ["submitted", "Accepted by provider — not inbox proof"],
+        ["delivered", "Confirmed handoff to the mailbox"],
+        ["bounced", "Rejected address · suppressed"],
+        ["complained", "Marked spam · suppressed"],
+        ["failed", "Send failed before accept"],
+      ]
+    : [
+        ["captured", "Stored here only — not mailed"],
+        ["submitted", "Accepted by provider"],
+        ["bounced", "Rejected address · suppressed"],
+        ["failed", "Send failed before accept"],
+      ];
+  return `<div class="status-legend" role="list">${items.map(([status, meaning]) => `
+    <div class="status-legend-item" role="listitem">${statusPill(status)}<span>${escapeHtml(meaning)}</span></div>`).join("")}</div>`;
 }
 
 function deliveryModeLabel(mode) {
@@ -238,8 +295,56 @@ function deliveryModeLabel(mode) {
   return "Preview";
 }
 
-function deliveryStatusLabel(mode) {
+function deliveryStatusLabel(mode = state.session?.delivery_mode) {
   return mode === "resend" ? "LIVE" : "Dev Mode";
+}
+
+function isLiveDelivery(mode = state.session?.delivery_mode) {
+  return mode === "resend";
+}
+
+function testSendNotice(mode = state.session?.delivery_mode) {
+  if (isLiveDelivery(mode)) {
+    return "LIVE: this sends a real email to the address you enter. It will leave this workspace.";
+  }
+  if (mode === "smtp") {
+    return "Dev Mode: delivery is limited to approved test addresses.";
+  }
+  return "Dev Mode: the message is captured in Deliveries. No email leaves the app.";
+}
+
+function testSendSuccessMessage(email, mode = state.session?.delivery_mode) {
+  if (isLiveDelivery(mode)) {
+    return `Live preview submitted to ${email}`;
+  }
+  return `Preview captured for ${email} — open Deliveries to inspect it`;
+}
+
+function launchConfirmCopy(mode = state.session?.delivery_mode) {
+  const live = isLiveDelivery(mode);
+  return {
+    title: live ? "Send live to audience?" : "Send in Dev Mode?",
+    notice: live
+      ? "LIVE: eligible recipients will receive a real email."
+      : "Dev Mode: messages are captured in this workspace. No email leaves the app.",
+    confirm: live ? "Send to real recipients" : "Start Dev Mode send",
+    outcome: live
+      ? "After you confirm, delivery starts immediately for eligible recipients."
+      : "After you confirm, messages appear in Deliveries as Captured.",
+  };
+}
+
+function launchOutcomeMessage(result, mode = state.session?.delivery_mode) {
+  const queued = Number(result?.queued ?? 0);
+  const sent = Number(result?.sent ?? queued);
+  const failed = Number(result?.failed ?? 0);
+  if (isLiveDelivery(mode)) {
+    if (failed) return `Live send started: ${queued} queued · ${failed} failed`;
+    return queued === 1 ? "Live send started for 1 recipient" : `Live send started for ${queued} recipients`;
+  }
+  if (failed) return `Dev Mode send finished: ${sent} captured · ${failed} failed`;
+  if (sent === 0) return "Dev Mode send finished — no eligible recipients";
+  return sent === 1 ? "Dev Mode: 1 message captured in Deliveries" : `Dev Mode: ${sent} messages captured in Deliveries`;
 }
 
 function initials(name) {
@@ -296,24 +401,38 @@ function formatByteSize(bytes) {
 
 function attachmentListMarkup(attachments, { editable = false } = {}) {
   if (!attachments?.length) {
-    return `<p class="help attachment-empty">${editable ? "No files attached yet." : "No attachments."}</p>`;
+    return `<p class="help attachment-empty">${editable ? "No files attached yet. Drop files here or use Add files." : "No attachments."}</p>`;
   }
   return `<ul class="attachment-list">${attachments.map((file) => `
     <li class="attachment-item">
-      <div><strong>${escapeHtml(file.filename)}</strong><span class="subtext">${escapeHtml(formatByteSize(file.byte_size))}</span></div>
+      <div><strong>${escapeHtml(file.filename)}</strong><span class="subtext">${escapeHtml(formatByteSize(file.byte_size))} · uploaded</span></div>
       ${editable ? `<button type="button" class="button small ghost" data-remove-attachment="${escapeHtml(file.id)}">Remove</button>` : ""}
     </li>`).join("")}</ul>`;
 }
 
 function pendingAttachmentListMarkup(pendingFiles) {
   if (!pendingFiles.length) {
-    return `<p class="help attachment-empty">No files attached yet.</p>`;
+    return `<p class="help attachment-empty">No files yet. Drop files here or use Add files — they upload when you save the draft.</p>`;
   }
   return `<ul class="attachment-list">${pendingFiles.map((file, index) => `
-    <li class="attachment-item">
-      <div><strong>${escapeHtml(file.name)}</strong><span class="subtext">${escapeHtml(formatByteSize(file.size))} · pending</span></div>
+    <li class="attachment-item pending">
+      <div><strong>${escapeHtml(file.name)}</strong><span class="subtext">${escapeHtml(formatByteSize(file.size))} · uploads on save</span></div>
       <button type="button" class="button small ghost" data-remove-pending="${index}">Remove</button>
     </li>`).join("")}</ul>`;
+}
+
+function attachmentMeterMarkup(count, bytes) {
+  const countPct = Math.min(100, Math.round((count / ATTACHMENT_MAX_COUNT) * 100));
+  const bytesPct = Math.min(100, Math.round((bytes / ATTACHMENT_MAX_TOTAL_BYTES) * 100));
+  const remaining = Math.max(0, ATTACHMENT_MAX_TOTAL_BYTES - bytes);
+  return `<div class="attachment-meter" aria-live="polite">
+    <div class="attachment-meter-row"><span>${count} / ${ATTACHMENT_MAX_COUNT} files</span><span>${formatByteSize(bytes)} / ${formatByteSize(ATTACHMENT_MAX_TOTAL_BYTES)}</span></div>
+    <div class="attachment-meter-bars" aria-hidden="true">
+      <span class="attachment-meter-bar" style="width:${countPct}%"></span>
+      <span class="attachment-meter-bar bytes" style="width:${bytesPct}%"></span>
+    </div>
+    <p class="help">${remaining > 0 ? `${formatByteSize(remaining)} remaining · PNG, JPG, GIF, WebP, PDF, or ZIP · 5 MB per file` : "Attachment limit reached"}</p>
+  </div>`;
 }
 
 function showLogin() {
@@ -928,7 +1047,7 @@ async function renderCampaigns() {
   const data = await api("/api/campaigns");
   await getLists();
   els.content.innerHTML = `
-    <div class="section-lead"><div><h2>${data.campaigns.length} campaign${data.campaigns.length === 1 ? "" : "s"}</h2><p>${can("campaigns.send") ? "Create, preview, and deliver messages to your selected audience." : "Read-only campaign reporting without recipient-level personal data."}</p></div>${can("campaigns.manage") ? `<button class="button primary" data-new-campaign>New campaign</button>` : ""}</div>
+    <div class="section-lead"><div><h2>${data.campaigns.length} campaign${data.campaigns.length === 1 ? "" : "s"}</h2><p>${can("campaigns.manage") ? (can("campaigns.send") ? "Create, preview, and deliver messages to your selected audience." : "Create and edit drafts, and send previews. An administrator launches delivery.") : "Read-only campaign reporting without recipient-level personal data."}</p></div>${can("campaigns.manage") ? `<button class="button primary" data-new-campaign>New campaign</button>` : ""}</div>
     ${data.campaigns.length ? `<section class="campaign-grid">${data.campaigns.map(renderCampaignCard).join("")}</section>` : `<section class="panel empty-state"><div><div class="empty-mark">✦</div><h2>No campaigns yet</h2><p>${can("campaigns.manage") ? "Create your first message, preview personalization, and prepare it for delivery." : "Campaign reports will appear here after a campaign is created."}</p>${can("campaigns.manage") ? `<button class="button primary" data-new-campaign>New campaign</button>` : ""}</div></section>`}`;
 }
 
@@ -937,32 +1056,54 @@ function renderCampaignCard(campaign) {
   const sent = Number(campaign.sent || 0);
   const queued = Number(campaign.queued || 0);
   const issues = Number(campaign.failed || 0) + Number(campaign.bounced || 0) + Number(campaign.complained || 0);
-  const editable = can("campaigns.manage") && ["draft", "paused"].includes(campaign.status);
+  const editable = can("campaigns.manage") && (
+    campaign.status === "draft"
+    || (campaign.status === "paused" && can("campaigns.send"))
+  );
   const launchable = can("campaigns.send") && ["draft", "paused"].includes(campaign.status);
+  const canPreview = can("campaigns.manage");
   return `<article class="campaign-card" data-campaign-id="${escapeHtml(campaign.id)}">
     <div class="campaign-card-top"><span class="subtext">${escapeHtml(campaign.list_name)} · ${escapeHtml(titleCase(campaign.content_mode || "custom_html"))}</span>${statusPill(campaign.status)}</div>
     <h3>${escapeHtml(campaign.name)}</h3><p>${escapeHtml(campaign.subject)}</p>
-    <div class="campaign-stats"><div><span>Recipients</span><strong>${recipients}</strong></div><div><span>Captured</span><strong>${sent}</strong></div><div><span>Issues</span><strong>${issues}</strong></div></div>
+    <div class="campaign-stats"><div><span>Recipients</span><strong>${recipients}</strong></div><div><span>${isLiveDelivery() ? "Sent" : "Captured"}</span><strong>${sent}</strong></div><div><span>Issues</span><strong>${issues}</strong></div></div>
     ${queued ? `<div class="progress" style="margin-bottom:14px"><span style="width:${recipients ? Math.round((sent / recipients) * 100) : 0}%"></span></div>` : ""}
     <div class="campaign-card-actions">
       <button class="button small" data-action="view" data-id="${escapeHtml(campaign.id)}">Details</button>
       ${editable ? `<button class="button small ghost" data-action="edit" data-id="${escapeHtml(campaign.id)}">Edit</button>` : ""}
-      ${can("campaigns.send") ? `<button class="button small ghost" data-action="test" data-id="${escapeHtml(campaign.id)}">Preview</button>` : ""}
+      ${canPreview ? `<button class="button small ghost" data-action="test" data-id="${escapeHtml(campaign.id)}">Preview</button>` : ""}
       ${can("campaigns.send") && campaign.status === "sending" ? `<button class="button small" data-action="pause" data-id="${escapeHtml(campaign.id)}">Pause</button>` : ""}
-      ${launchable ? `<button class="button small primary" data-action="${campaign.status === "paused" ? "resume" : "launch"}" data-id="${escapeHtml(campaign.id)}">${campaign.status === "paused" ? "Resume delivery" : (state.session?.delivery_mode === "sandbox" ? "Preview delivery" : "Start delivery")}</button>` : ""}
+      ${launchable ? `<button class="button small primary" data-action="${campaign.status === "paused" ? "resume" : "launch"}" data-id="${escapeHtml(campaign.id)}">${campaign.status === "paused" ? "Resume delivery" : (isLiveDelivery() ? "Start delivery" : "Send in Dev Mode")}</button>` : ""}
     </div>
   </article>`;
 }
 
 const contentModes = [
-  { id: "visual", icon: "▦", title: "Visual builder", copy: "Compose a branded layout from simple fields." },
-  { id: "rich_text", icon: "Aa", title: "Rich text", copy: "Write and format without working in code." },
-  { id: "custom_html", icon: "</>", title: "Custom HTML", copy: "Paste or edit complete email markup." },
-  { id: "plain_text", icon: "¶", title: "Plain text", copy: "Send a simple, text-first message." },
+  { id: "visual", icon: "▦", title: "Visual builder", copy: "Fill in brand, headline, and CTA — we build the email.", recommended: true },
+  { id: "rich_text", icon: "Aa", title: "Rich text", copy: "Write like a doc. Bold, lists, and links — no HTML." },
+  { id: "custom_html", icon: "</>", title: "Custom HTML", copy: "Paste a full template when you need full control." },
+  { id: "plain_text", icon: "¶", title: "Plain text", copy: "Text-only for maximum deliverability." },
 ];
 
+const contentModeHints = {
+  visual: "Best for most campaigns. Layout, colors, and unsubscribe are handled for you.",
+  rich_text: "Good when the message is mostly prose and you want light formatting.",
+  custom_html: "Use when you already have HTML from a designer or another tool.",
+  plain_text: "Simplest format. A basic HTML wrapper is still generated for clients that need it.",
+};
+
 function contentModePicker(selectedMode) {
-  return `<div class="content-mode-section"><span class="field-label">Message format</span><div class="content-mode-grid" role="radiogroup" aria-label="Message format">${contentModes.map((mode) => `<button class="content-mode-card ${mode.id === selectedMode ? "selected" : ""}" type="button" data-content-mode="${mode.id}" role="radio" aria-checked="${mode.id === selectedMode}"><span class="content-mode-icon">${escapeHtml(mode.icon)}</span><span><strong>${escapeHtml(mode.title)}</strong><small>${escapeHtml(mode.copy)}</small></span></button>`).join("")}</div></div>`;
+  return `<div class="content-mode-section">
+    <span class="field-label">How do you want to write this email?</span>
+    <div class="content-mode-grid" role="radiogroup" aria-label="Message format">${contentModes.map((mode) => `
+      <button class="content-mode-card ${mode.id === selectedMode ? "selected" : ""}" type="button" data-content-mode="${mode.id}" role="radio" aria-checked="${mode.id === selectedMode}">
+        <span class="content-mode-icon">${escapeHtml(mode.icon)}</span>
+        <span>
+          <strong>${escapeHtml(mode.title)}${mode.recommended ? `<em class="content-mode-badge">Recommended</em>` : ""}</strong>
+          <small>${escapeHtml(mode.copy)}</small>
+        </span>
+      </button>`).join("")}</div>
+    <p class="help content-mode-hint" id="content-mode-hint">${escapeHtml(contentModeHints[selectedMode] || "")}</p>
+  </div>`;
 }
 
 function modeEditorMarkup(mode, draft) {
@@ -984,9 +1125,9 @@ function modeEditorMarkup(mode, draft) {
     return `<div class="mode-editor" data-mode-editor="rich_text"><span class="field-label">Message</span><div class="rich-toolbar" role="toolbar" aria-label="Text formatting"><button type="button" data-rich-command="bold" aria-label="Bold"><strong>B</strong></button><button type="button" data-rich-command="italic" aria-label="Italic"><em>I</em></button><button type="button" data-rich-command="underline" aria-label="Underline"><u>U</u></button><button type="button" data-rich-command="insertUnorderedList" aria-label="Bulleted list">• List</button></div><div id="rich-editor" class="rich-editor" contenteditable="true" role="textbox" aria-multiline="true" aria-label="Rich text message">${richHtml}</div><p class="help">Formatting is limited to email-safe text, headings, links, and lists. Unsubscribe is added automatically.</p></div>`;
   }
   if (mode === "plain_text") {
-    return `<div class="mode-editor" data-mode-editor="plain_text"><label>Plain-text message<textarea id="plain-editor" class="plain-editor" rows="15">${escapeHtml(draft?.plain_text || "Hello {{first_name}},\n\nWrite your message here.\n\nUnsubscribe: {{unsubscribe_url}}")}</textarea><span class="help">Line breaks are preserved. A safe HTML wrapper is generated for clients that require it.</span></label></div>`;
+    return `<div class="mode-editor" data-mode-editor="plain_text"><label>Plain-text message<textarea id="plain-editor" class="plain-editor" rows="15">${escapeHtml(draft?.plain_text || defaultPlainContent)}</textarea><span class="help">Line breaks are preserved. A safe HTML wrapper is generated for clients that require it.</span></label></div>`;
   }
-  return `<div class="mode-editor" data-mode-editor="custom_html"><label>HTML message<textarea id="html-editor" class="code-area" rows="16" required>${escapeHtml(draft?.html_body || defaultTemplate)}</textarea><span class="help">Scripts, forms, embedded objects, unsafe URLs, and event handlers are blocked.</span></label><label>Plain-text alternative<textarea id="html-text-fallback" rows="8">${escapeHtml(draft?.text_body || "Hello {{first_name}},\n\nWrite your message here.\n\nUnsubscribe: {{unsubscribe_url}}")}</textarea></label></div>`;
+  return `<div class="mode-editor" data-mode-editor="custom_html"><label>HTML message<textarea id="html-editor" class="code-area" rows="16" required>${escapeHtml(draft?.html_body || defaultTemplate)}</textarea><span class="help">Scripts, forms, embedded objects, unsafe URLs, and event handlers are blocked.</span></label><label>Plain-text alternative<textarea id="html-text-fallback" rows="8">${escapeHtml(draft?.text_body || defaultPlainContent)}</textarea></label></div>`;
 }
 
 async function openCampaignComposer(campaignId = null) {
@@ -1003,9 +1144,11 @@ async function openCampaignComposer(campaignId = null) {
   const modeDrafts = {
     visual: selectedMode === "visual" ? { ...defaultVisualContent, ...storedContent } : { ...defaultVisualContent },
     rich_text: selectedMode === "rich_text" ? { schema_version: 1, rich_html: storedContent.rich_html || defaultRichContent } : { schema_version: 1, rich_html: defaultRichContent },
-    custom_html: { schema_version: 1, html_body: campaign.html_body || defaultTemplate, text_body: campaign.text_body || "Hello {{first_name}},\n\nWrite your message here.\n\nUnsubscribe: {{unsubscribe_url}}" },
-    plain_text: selectedMode === "plain_text" ? { schema_version: 1, plain_text: storedContent.plain_text || campaign.text_body || "" } : { schema_version: 1, plain_text: "Hello {{first_name}},\n\nWrite your message here.\n\nUnsubscribe: {{unsubscribe_url}}" },
+    custom_html: { schema_version: 1, html_body: campaign.html_body || defaultTemplate, text_body: campaign.text_body || defaultPlainContent },
+    plain_text: selectedMode === "plain_text" ? { schema_version: 1, plain_text: storedContent.plain_text || campaign.text_body || defaultPlainContent } : { schema_version: 1, plain_text: defaultPlainContent },
   };
+  const defaultFromName = campaign.from_name || state.session?.user?.name || "CTN";
+  const defaultCampaignName = campaign.name || (campaignId ? "" : "Untitled campaign");
   const totalAttachmentCount = () => attachments.length + pendingFiles.length;
   const totalAttachmentBytes = () => (
     attachments.reduce((sum, file) => sum + Number(file.byte_size || 0), 0)
@@ -1014,19 +1157,22 @@ async function openCampaignComposer(campaignId = null) {
   openModal(campaignId ? "Edit campaign" : "New campaign", "Composer", `
     <form id="campaign-form" class="composer">
       <div class="composer-fields">
-        <label>Internal campaign name<input name="name" maxlength="160" value="${escapeHtml(campaign.name || "Product update")}" required /></label>
+        <label>Internal campaign name<input name="name" maxlength="160" value="${escapeHtml(defaultCampaignName)}" placeholder="Untitled campaign" required /></label>
         <label>Audience<select name="list_id" required>${listOptions(lists, campaign.list_id || lists[0]?.id)}</select><span class="help">Suppression is checked again immediately before delivery.</span></label>
-        <div class="form-grid"><label>From name<input name="from_name" value="${escapeHtml(campaign.from_name || "")}" placeholder="Name the receiver will see" required /></label><label>From email<input name="from_email" type="email" value="${escapeHtml(campaign.from_email || "noreply@ctn-sk.com")}" required /></label></div>
-        <label>Subject<input name="subject" maxlength="250" value="${escapeHtml(campaign.subject || "A quick update for {{first_name}}")}" required /></label>
+        <div class="form-grid"><label>From name<input name="from_name" value="${escapeHtml(defaultFromName)}" placeholder="Name the receiver will see" required /></label><label>From email<input name="from_email" type="email" value="${escapeHtml(campaign.from_email || "noreply@ctn-sk.com")}" required /></label></div>
+        <label>Subject<input name="subject" maxlength="250" value="${escapeHtml(campaign.subject || "An update from CTN")}" required /></label>
         ${contentModePicker(selectedMode)}
         <div id="mode-editor-host">${modeEditorMarkup(selectedMode, modeDrafts[selectedMode])}</div>
         <p class="help variable-help">Personalization: {{first_name}}, {{last_name}}, {{email}}, {{unsubscribe_url}}</p>
         <section class="attachment-panel" id="attachment-panel">
           <div class="attachment-panel-head">
-            <div><strong>Attachments</strong><p class="help">PNG, JPG, GIF, WebP, PDF, or ZIP. Up to 3 files, 5 MB each (10 MB total). Some inboxes filter ZIP archives.</p></div>
+            <div><strong>Attachments</strong></div>
+            <div id="attachment-meter">${attachmentMeterMarkup(totalAttachmentCount(), totalAttachmentBytes())}</div>
           </div>
-          <div id="attachment-list">${activeCampaignId ? attachmentListMarkup(attachments, { editable: true }) : pendingAttachmentListMarkup(pendingFiles)}</div>
-          <label class="attachment-upload button small">Add file<input id="attachment-input" type="file" accept="${ATTACHMENT_ACCEPT}" ${totalAttachmentCount() >= ATTACHMENT_MAX_COUNT ? "disabled" : ""} /></label>
+          <div class="attachment-dropzone" id="attachment-dropzone" tabindex="0" aria-label="Attachment drop zone">
+            <div id="attachment-list">${activeCampaignId ? attachmentListMarkup(attachments, { editable: true }) : pendingAttachmentListMarkup(pendingFiles)}</div>
+            <label class="attachment-upload button small">Add files<input id="attachment-input" type="file" accept="${ATTACHMENT_ACCEPT}" multiple ${totalAttachmentCount() >= ATTACHMENT_MAX_COUNT ? "disabled" : ""} /></label>
+          </div>
           <p class="form-error" id="attachment-error" role="alert"></p>
         </section>
         <p class="form-error" data-form-error role="alert"></p>
@@ -1083,6 +1229,8 @@ async function openCampaignComposer(campaignId = null) {
       item.classList.toggle("selected", active);
       item.setAttribute("aria-checked", String(active));
     });
+    const hint = form.querySelector("#content-mode-hint");
+    if (hint) hint.textContent = contentModeHints[selectedMode] || "";
     editorHost.innerHTML = modeEditorMarkup(selectedMode, modeDrafts[selectedMode]);
     attachEditorEvents();
     updatePreview();
@@ -1091,13 +1239,55 @@ async function openCampaignComposer(campaignId = null) {
   updatePreview();
   const refreshAttachmentUi = () => {
     const listHost = form.querySelector("#attachment-list");
+    const meterHost = form.querySelector("#attachment-meter");
     const input = form.querySelector("#attachment-input");
+    const dropzone = form.querySelector("#attachment-dropzone");
     if (listHost) {
       listHost.innerHTML = activeCampaignId
         ? attachmentListMarkup(attachments, { editable: true })
         : pendingAttachmentListMarkup(pendingFiles);
     }
+    if (meterHost) meterHost.innerHTML = attachmentMeterMarkup(totalAttachmentCount(), totalAttachmentBytes());
     if (input) input.disabled = totalAttachmentCount() >= ATTACHMENT_MAX_COUNT;
+    dropzone?.classList.toggle("is-full", totalAttachmentCount() >= ATTACHMENT_MAX_COUNT);
+  };
+  const queueOrUploadFiles = async (fileList) => {
+    const errorEl = form.querySelector("#attachment-error");
+    if (errorEl) errorEl.textContent = "";
+    const files = Array.from(fileList || []);
+    if (!files.length) return;
+    for (const file of files) {
+      if (file.size > ATTACHMENT_MAX_FILE_BYTES) {
+        if (errorEl) errorEl.textContent = `"${file.name}" is larger than 5 MB.`;
+        return;
+      }
+      if (totalAttachmentCount() >= ATTACHMENT_MAX_COUNT) {
+        if (errorEl) errorEl.textContent = "A campaign can have at most 3 attachments.";
+        return;
+      }
+      if (totalAttachmentBytes() + file.size > ATTACHMENT_MAX_TOTAL_BYTES) {
+        if (errorEl) errorEl.textContent = "Attachments for one campaign cannot exceed 10 MB total.";
+        return;
+      }
+      if (!activeCampaignId) {
+        pendingFiles.push(file);
+        continue;
+      }
+      try {
+        const body = new FormData();
+        body.append("file", file);
+        const result = await api(`/api/campaigns/${activeCampaignId}/attachments`, { method: "POST", body });
+        attachments = result.attachments || [];
+      } catch (error) {
+        if (errorEl) errorEl.textContent = error.message;
+        else toast(error.message, "error");
+        refreshAttachmentUi();
+        return;
+      }
+    }
+    refreshAttachmentUi();
+    if (!activeCampaignId) toast(files.length === 1 ? "Attachment queued — uploads on save" : `${files.length} attachments queued — upload on save`);
+    else toast(files.length === 1 ? "Attachment added" : `${files.length} attachments added`);
   };
   const uploadPendingFiles = async (campaignIdForUpload) => {
     const errorEl = form.querySelector("#attachment-error");
@@ -1124,42 +1314,31 @@ async function openCampaignComposer(campaignId = null) {
   };
   const bindAttachmentControls = () => {
     const input = form.querySelector("#attachment-input");
-    const errorEl = form.querySelector("#attachment-error");
+    const dropzone = form.querySelector("#attachment-dropzone");
     input?.addEventListener("change", async () => {
-      const file = input.files?.[0];
+      const files = input.files;
       input.value = "";
-      if (!file) return;
-      if (errorEl) errorEl.textContent = "";
-      if (file.size > ATTACHMENT_MAX_FILE_BYTES) {
-        if (errorEl) errorEl.textContent = "Each attachment must be 5 MB or smaller.";
-        return;
-      }
-      if (totalAttachmentCount() >= ATTACHMENT_MAX_COUNT) {
-        if (errorEl) errorEl.textContent = "A campaign can have at most 3 attachments.";
-        return;
-      }
-      if (totalAttachmentBytes() + file.size > ATTACHMENT_MAX_TOTAL_BYTES) {
-        if (errorEl) errorEl.textContent = "Attachments for one campaign cannot exceed 10 MB total.";
-        return;
-      }
-      if (!activeCampaignId) {
-        pendingFiles.push(file);
-        refreshAttachmentUi();
-        toast("Attachment queued");
-        return;
-      }
-      try {
-        const body = new FormData();
-        body.append("file", file);
-        const result = await api(`/api/campaigns/${activeCampaignId}/attachments`, { method: "POST", body });
-        attachments = result.attachments || [];
-        refreshAttachmentUi();
-        toast("Attachment added");
-      } catch (error) {
-        if (errorEl) errorEl.textContent = error.message;
-        else toast(error.message, "error");
-      }
+      await queueOrUploadFiles(files);
     });
+    if (dropzone) {
+      ["dragenter", "dragover"].forEach((type) => {
+        dropzone.addEventListener(type, (event) => {
+          event.preventDefault();
+          event.stopPropagation();
+          if (totalAttachmentCount() < ATTACHMENT_MAX_COUNT) dropzone.classList.add("is-dragover");
+        });
+      });
+      ["dragleave", "drop"].forEach((type) => {
+        dropzone.addEventListener(type, (event) => {
+          event.preventDefault();
+          event.stopPropagation();
+          dropzone.classList.remove("is-dragover");
+        });
+      });
+      dropzone.addEventListener("drop", async (event) => {
+        await queueOrUploadFiles(event.dataTransfer?.files);
+      });
+    }
     form.querySelector("#attachment-list")?.addEventListener("click", async (event) => {
       const pendingButton = event.target.closest("[data-remove-pending]");
       if (pendingButton) {
@@ -1220,13 +1399,14 @@ async function openCampaignDetails(campaignId) {
   const { campaign } = await api(`/api/campaigns/${campaignId}`);
   const stats = campaign.stats || {};
   const total = Object.values(stats).reduce((sum, value) => sum + Number(value || 0), 0);
+  const sentLabel = isLiveDelivery() ? "Sent / submitted" : "Captured";
   openModal(campaign.name, "Campaign detail", `
     <div class="stack">
       <div class="notice"><span>i</span><div><strong>${escapeHtml(campaign.subject)}</strong><br>${escapeHtml(campaign.list_name)} · ${escapeHtml(campaign.from_name)} &lt;${escapeHtml(campaign.from_email)}&gt;</div></div>
       <div class="form-grid">
         <section class="panel"><div class="panel-head"><h3>Delivery totals</h3>${statusPill(campaign.status)}</div><div class="panel-body">
           <div class="metric-line"><span>Audience snapshot</span><strong>${total}</strong></div>
-          <div class="metric-line"><span>Captured / submitted</span><strong>${Number(stats.sent || 0)}</strong></div>
+          <div class="metric-line"><span>${sentLabel}</span><strong>${Number(stats.sent || 0)}</strong></div>
           <div class="metric-line"><span>Queued</span><strong>${Number(stats.queued || 0) + Number(stats.processing || 0)}</strong></div>
           <div class="metric-line"><span>Suppressed</span><strong>${Number(stats.suppressed || 0)}</strong></div>
           <div class="metric-line"><span>Failed / bounced / complained</span><strong>${Number(stats.failed || 0) + Number(stats.bounced || 0) + Number(stats.complained || 0)}</strong></div>
@@ -1241,21 +1421,100 @@ async function openCampaignDetails(campaignId) {
     </div>`, false);
   document.querySelector("#view-campaign-deliveries")?.addEventListener("click", () => {
     closeModal();
-    state.deliveryCampaign = campaignId;
+    state.deliveryFilters.campaignId = campaignId;
     navigate("deliveries");
   });
 }
 
 async function openTestSend(campaignId) {
+  const { campaign } = await api(`/api/campaigns/${campaignId}`);
+  const live = isLiveDelivery();
+  const defaultEmail = live
+    ? (state.session?.user?.email || "")
+    : (state.session?.user?.email || "owner@example.test");
+  const noticeClass = live ? "notice warning" : "notice";
+  const submitLabel = live ? "Send live preview" : "Capture preview";
   openModal("Send a preview", "Before you send", `
-    <form id="test-send-form" class="stack"><div class="notice"><span>i</span><div>${state.session.delivery_mode === "sandbox" ? "This message stays in SendStack. No external email is sent." : state.session.delivery_mode === "resend" ? "This sends a live test through Resend to the address you enter." : "Allowlisted SMTP is enabled. The address must be on the recipient allowlist."}</div></div><label>Preview recipient<input name="email" type="email" value="owner@example.test" required /></label><p class="form-error" role="alert"></p><div class="form-actions"><button type="button" class="button" data-close-modal>Cancel</button><button class="button primary" type="submit">Send preview</button></div></form>`, true);
+    <form id="test-send-form" class="stack">
+      <div class="${noticeClass}"><span>${live ? "!" : "i"}</span><div><strong>${escapeHtml(testSendNotice())}</strong></div></div>
+      <div class="metric-line"><span>Campaign</span><strong>${escapeHtml(campaign.name)}</strong></div>
+      <div class="metric-line"><span>Subject</span><strong>${escapeHtml(campaign.subject)}</strong></div>
+      <div class="metric-line"><span>Status</span><strong>${escapeHtml(deliveryStatusLabel())}</strong></div>
+      <label>Preview recipient<input name="email" type="email" value="${escapeHtml(defaultEmail)}" placeholder="name@example.com" required autocomplete="email" /></label>
+      ${live ? `<label class="confirm-ack"><input type="checkbox" name="ack_live" required /><span>I understand this sends a real email to the address above.</span></label>` : `<p class="help">Result appears in Deliveries as Captured — nothing is mailed externally.</p>`}
+      <p class="form-error" role="alert"></p>
+      <div class="form-actions">
+        <button type="button" class="button" data-close-modal>Cancel</button>
+        <button class="button ${live ? "danger" : "primary"}" type="submit">${escapeHtml(submitLabel)}</button>
+      </div>
+    </form>`, true);
   const form = document.querySelector("#test-send-form");
   form.addEventListener("submit", async (event) => {
     event.preventDefault();
-    await submitForm(form, () => api(`/api/campaigns/${campaignId}/test-send`, { method: "POST", body: { email: form.elements.email.value } }), "Preview message recorded");
-    if (!form.querySelector(".form-error").textContent) {
+    const email = String(form.elements.email.value || "").trim();
+    const result = await submitForm(
+      form,
+      () => api(`/api/campaigns/${campaignId}/test-send`, { method: "POST", body: { email } }),
+      testSendSuccessMessage(email),
+    );
+    if (!result) return;
+    closeModal();
+    state.deliveryFilters.campaignId = campaignId;
+    navigate("deliveries");
+  });
+}
+
+async function openLaunchConfirm(campaignId) {
+  const { campaign } = await api(`/api/campaigns/${campaignId}`);
+  const copy = launchConfirmCopy();
+  const live = isLiveDelivery();
+  const eligible = Number(campaign.eligible_recipients || 0);
+  const noticeClass = live ? "notice warning" : "notice";
+  const setupHelp = can("sending.view") && !live
+    ? `<p class="help">Turn on live delivery in Sending setup when you are ready for real recipients.</p>`
+    : "";
+  const emptyWarn = eligible === 0
+    ? `<div class="notice warning"><span>!</span><div>No eligible recipients on this list (active and not suppressed). Launch will complete with nothing sent.</div></div>`
+    : "";
+  openModal(copy.title, "Confirm delivery", `
+    <div class="stack" id="launch-confirm">
+      <div class="${noticeClass}"><span>!</span><div><strong>${escapeHtml(copy.notice)}</strong><br>${escapeHtml(copy.outcome)}</div></div>
+      ${emptyWarn}
+      <div class="metric-line"><span>Campaign</span><strong>${escapeHtml(campaign.name)}</strong></div>
+      <div class="metric-line"><span>Subject</span><strong>${escapeHtml(campaign.subject)}</strong></div>
+      <div class="metric-line"><span>Audience</span><strong>${escapeHtml(campaign.list_name)}</strong></div>
+      <div class="metric-line"><span>Eligible now</span><strong>${eligible.toLocaleString()}</strong></div>
+      <div class="metric-line"><span>Status</span><strong>${escapeHtml(deliveryStatusLabel())}</strong></div>
+      <div class="metric-line"><span>Daily send limit</span><strong>${Number(state.session.daily_limit).toLocaleString()}</strong></div>
+      ${setupHelp}
+      ${live ? `<label class="confirm-ack"><input type="checkbox" id="launch-ack" /><span>I understand this will email up to ${eligible.toLocaleString()} real recipient${eligible === 1 ? "" : "s"}.</span></label>` : ""}
+      <p class="form-error" id="launch-error" role="alert"></p>
+      <div class="form-actions">
+        <button class="button" data-close-modal type="button">Cancel</button>
+        <button class="button ${live ? "danger" : "primary"}" id="confirm-launch" ${live ? "disabled" : ""}>${escapeHtml(copy.confirm)}</button>
+      </div>
+    </div>`, true);
+  const ack = document.querySelector("#launch-ack");
+  const confirmBtn = document.querySelector("#confirm-launch");
+  const errorEl = document.querySelector("#launch-error");
+  ack?.addEventListener("change", () => {
+    confirmBtn.disabled = !ack.checked;
+  });
+  confirmBtn.addEventListener("click", async () => {
+    if (live && !ack?.checked) return;
+    confirmBtn.disabled = true;
+    if (errorEl) errorEl.textContent = "";
+    try {
+      const result = await api(`/api/campaigns/${campaignId}/launch`, { method: "POST", body: {} });
       closeModal();
-      navigate("deliveries");
+      toast(launchOutcomeMessage(result));
+      state.deliveryFilters.campaignId = campaignId;
+      if (state.currentView === "campaigns") await renderCampaigns();
+      else await navigate("campaigns");
+    } catch (error) {
+      if (errorEl) errorEl.textContent = error.message;
+      else toast(error.message, "error");
+      confirmBtn.disabled = live ? !ack?.checked : false;
     }
   });
 }
@@ -1264,19 +1523,19 @@ async function campaignAction(action, id) {
   if (action === "view") return openCampaignDetails(id);
   if (action === "edit") return openCampaignComposer(id);
   if (action === "test") return openTestSend(id);
-  if (action === "launch") {
-    openModal(state.session.delivery_mode === "sandbox" ? "Send campaign preview?" : "Send campaign to audience?", "Before you send", `
+  if (action === "launch") return openLaunchConfirm(id);
+  if (action === "resume") {
+    openModal("Resume delivery?", "Confirm", `
       <div class="stack">
-        <div class="notice ${state.session.delivery_mode === "smtp" ? "warning" : ""}"><span>!</span><div><strong>${state.session.delivery_mode === "sandbox" ? "Messages will stay inside SendStack." : state.session.delivery_mode === "resend" ? "Messages will be submitted through Resend." : "Messages will be submitted to the configured allowlisted SMTP relay."}</strong><br>Eligibility and global suppression are checked again before every recipient is processed.</div></div>
-        <div class="metric-line"><span>Transport</span><strong>${escapeHtml(deliveryModeLabel(state.session.delivery_mode))}</strong></div>
-        <div class="metric-line"><span>Daily send limit</span><strong>${Number(state.session.daily_limit).toLocaleString()}</strong></div>
-        <div class="metric-line"><span>Live email</span><strong>${state.session.delivery_mode === "resend" ? "On" : "Off — preview or allowlisted only"}</strong></div>
-        <p class="help">Live customer delivery uses Resend once Sending setup is complete and live email is enabled.</p>
-        <div class="form-actions"><button class="button" data-close-modal>Cancel</button><button class="button primary" id="confirm-launch">${state.session.delivery_mode === "sandbox" ? "Start preview send" : "Start send"}</button></div>
+        <div class="notice"><span>i</span><div>Delivery will continue for remaining eligible recipients under <strong>${escapeHtml(deliveryStatusLabel())}</strong>.</div></div>
+        <div class="form-actions">
+          <button class="button" data-close-modal type="button">Cancel</button>
+          <button class="button primary" id="confirm-resume">Resume delivery</button>
+        </div>
       </div>`, true);
-    document.querySelector("#confirm-launch").addEventListener("click", async () => {
+    document.querySelector("#confirm-resume").addEventListener("click", async () => {
       closeModal();
-      await executeCampaignAction(action, id);
+      await executeCampaignAction("resume", id);
     });
     return;
   }
@@ -1286,7 +1545,10 @@ async function campaignAction(action, id) {
 async function executeCampaignAction(action, id) {
   try {
     const result = await api(`/api/campaigns/${id}/${action}`, { method: "POST", body: {} });
-    toast(action === "launch" ? `${result.queued} recipients queued` : `Campaign ${action}d`);
+    if (action === "launch") toast(launchOutcomeMessage(result));
+    else if (action === "pause") toast("Delivery paused");
+    else if (action === "resume") toast("Delivery resumed");
+    else toast(`Campaign ${action}d`);
     await renderCampaigns();
   } catch (error) {
     toast(error.message, "error");
@@ -1294,19 +1556,135 @@ async function executeCampaignAction(action, id) {
 }
 
 async function renderDeliveries() {
-  const suffix = state.deliveryCampaign ? `?campaign_id=${encodeURIComponent(state.deliveryCampaign)}` : "";
-  const data = await api(`/api/messages${suffix}`);
+  const filters = state.deliveryFilters;
+  const params = new URLSearchParams();
+  if (filters.campaignId) params.set("campaign_id", filters.campaignId);
+  if (filters.q) params.set("q", filters.q);
+  if (filters.status) params.set("status", filters.status);
+  if (filters.from) params.set("from", filters.from);
+  if (filters.to) params.set("to", filters.to);
+  const queryString = params.toString();
+  const data = await api(`/api/messages${queryString ? `?${queryString}` : ""}`);
+  const live = isLiveDelivery();
+  const count = data.messages.length;
+  const filtering = Boolean(filters.campaignId || filters.q || filters.status || filters.from || filters.to);
+  const statusOptions = [
+    ["", "All statuses"],
+    ["captured", "Captured"],
+    ["submitted", "Submitted"],
+    ["delivered", "Delivered"],
+    ["failed", "Failed"],
+    ["bounced", "Bounced"],
+    ["complained", "Complained"],
+    ["unsubscribed", "Unsubscribed"],
+    ["suppressed", "Suppressed"],
+  ].map(([value, label]) => `<option value="${value}" ${filters.status === value ? "selected" : ""}>${label}</option>`).join("");
+  const heading = filtering
+    ? `${count.toLocaleString()} match${count === 1 ? "" : "es"}`
+    : live
+      ? `${count.toLocaleString()} deliver${count === 1 ? "y" : "ies"}`
+      : `${count.toLocaleString()} captured message${count === 1 ? "" : "s"}`;
+  const lead = live
+    ? "Review outbound results, open rendered content, and check delivery status."
+    : "Inspect rendered content captured in this workspace. No email leaves the app in Dev Mode.";
+  const emptyCopy = filtering
+    ? "Nothing matches these filters. Try clearing search, status, or date range."
+    : live
+      ? "Send a campaign or preview to see delivery records here."
+      : "Create a campaign and send a preview to inspect the rendered result in this workspace.";
+  const filterBits = [];
+  if (filters.campaignId) filterBits.push(live ? "campaign deliveries" : "campaign messages");
+  if (filters.q) filterBits.push(`“${escapeHtml(filters.q)}”`);
+  if (filters.status) filterBits.push(filters.status === "captured" ? "Captured" : titleCase(filters.status));
+  if (filters.from || filters.to) {
+    filterBits.push([filters.from || "…", filters.to || "…"].join(" → "));
+  }
+  const filterNote = filterBits.length
+    ? `<p class="delivery-filter-note">Filtered by ${filterBits.join(" · ")}.</p>`
+    : "";
+  const emptyMarkup = filtering
+    ? `<div class="empty-state"><div><div class="empty-mark">⌕</div><h2>No matching deliveries</h2><p>${emptyCopy}</p><button class="button" id="clear-delivery-filters">Clear filters</button></div></div>`
+    : `<div class="empty-state"><div><div class="empty-mark">↗</div><h2>No deliveries yet</h2><p>${emptyCopy}</p><button class="button primary" data-new-campaign>Create campaign</button></div></div>`;
+
+  const tableRows = data.messages.map((message) => `<tr>
+      <td class="delivery-recipient"><strong class="email">${escapeHtml(message.to_email)}</strong></td>
+      <td class="delivery-message"><strong>${escapeHtml(message.subject)}</strong><span class="subtext">${escapeHtml(message.from_email)}</span></td>
+      <td class="delivery-campaign">${escapeHtml(message.campaign_name || "Test send")}</td>
+      <td class="delivery-status">${statusPill(message.status)}</td>
+      <td class="delivery-time"><span class="date-cell">${formatDate(message.created_at)}</span></td>
+      <td class="table-actions"><button class="button small ghost" data-message-id="${escapeHtml(message.id)}">View</button></td>
+    </tr>`).join("");
+
   els.content.innerHTML = `
-    <div class="section-lead"><div><h2>${data.messages.length} captured message${data.messages.length === 1 ? "" : "s"}</h2><p>Inspect rendered content and simulate recipient feedback.</p></div><div class="section-actions">${state.deliveryCampaign ? `<button class="button" id="clear-delivery-filter">Clear campaign filter</button>` : ""}</div></div>
-    <div class="notice" style="margin-bottom:15px"><span>i</span><div><strong>Delivery status is intentionally precise.</strong> “Preview” means captured in the workspace; “Submitted” means accepted by the delivery service, not necessarily delivered to an inbox.</div></div>
-    <section class="panel">${data.messages.length ? `<div class="table-wrap"><table><thead><tr><th>Recipient</th><th>Message</th><th>Campaign</th><th>Status</th><th>Time</th><th></th></tr></thead><tbody>${data.messages.map((message) => `<tr><td class="email">${escapeHtml(message.to_email)}</td><td><strong>${escapeHtml(message.subject)}</strong><span class="subtext">From ${escapeHtml(message.from_email)}</span></td><td>${escapeHtml(message.campaign_name || "Test send")}</td><td>${statusPill(message.status)}</td><td>${formatDate(message.created_at)}</td><td><button class="button small ghost" data-message-id="${escapeHtml(message.id)}">View</button></td></tr>`).join("")}</tbody></table></div>` : `<div class="empty-state"><div><div class="empty-mark">↗</div><h2>The inbox is empty</h2><p>Create a campaign and send a test to inspect the rendered result.</p><button class="button primary" data-new-campaign>Create campaign</button></div></div>`}</section>`;
-  document.querySelector("#clear-delivery-filter")?.addEventListener("click", () => { state.deliveryCampaign = null; renderDeliveries(); });
+    <div class="section-lead"><div><h2>${heading}</h2><p>${lead}</p></div><div class="section-actions">${filtering ? `<button class="button" id="clear-delivery-filters">Clear filters</button>` : ""}</div></div>
+    ${deliveryStatusLegend(live)}
+    ${filterNote}
+    <div class="toolbar deliveries-toolbar">
+      <div class="search"><input id="delivery-search" type="search" placeholder="Search recipient, subject, or campaign" value="${escapeHtml(filters.q)}" aria-label="Search deliveries" /></div>
+      <select id="delivery-status-filter" aria-label="Filter by status">${statusOptions}</select>
+      <label class="delivery-date"><span>From</span><input id="delivery-from" type="date" value="${escapeHtml(filters.from)}" aria-label="From date" /></label>
+      <label class="delivery-date"><span>To</span><input id="delivery-to" type="date" value="${escapeHtml(filters.to)}" aria-label="To date" /></label>
+    </div>
+    <section class="panel deliveries-panel">${data.messages.length ? `<div class="table-wrap"><table class="deliveries-table"><thead><tr><th>Recipient</th><th>Message</th><th>Campaign</th><th>Status</th><th>Time</th><th></th></tr></thead><tbody>${tableRows}</tbody></table></div>` : emptyMarkup}</section>`;
+
+  const search = document.querySelector("#delivery-search");
+  const statusFilter = document.querySelector("#delivery-status-filter");
+  const fromInput = document.querySelector("#delivery-from");
+  const toInput = document.querySelector("#delivery-to");
+  let searchTimer;
+
+  const applyFilters = (next = {}) => {
+    state.deliveryFilters = {
+      ...state.deliveryFilters,
+      ...next,
+    };
+    if ("q" in next) state.deliveryFilters._focusSearch = true;
+    renderDeliveries();
+  };
+  const clearFilters = () => {
+    state.deliveryFilters = { campaignId: null, q: "", status: "", from: "", to: "" };
+    renderDeliveries();
+  };
+
+  search?.addEventListener("input", () => {
+    clearTimeout(searchTimer);
+    searchTimer = setTimeout(() => applyFilters({ q: search.value.trim() }), 280);
+  });
+  statusFilter?.addEventListener("change", () => applyFilters({ status: statusFilter.value || "" }));
+  fromInput?.addEventListener("change", () => {
+    const from = fromInput.value || "";
+    if (from && filters.to && from > filters.to) {
+      toast("Start date must be on or before end date.", "error");
+      fromInput.value = filters.from;
+      return;
+    }
+    applyFilters({ from });
+  });
+  toInput?.addEventListener("change", () => {
+    const to = toInput.value || "";
+    if (filters.from && to && filters.from > to) {
+      toast("End date must be on or after start date.", "error");
+      toInput.value = filters.to;
+      return;
+    }
+    applyFilters({ to });
+  });
+  document.querySelectorAll("#clear-delivery-filters").forEach((button) => {
+    button.addEventListener("click", clearFilters);
+  });
+
+  if (state.deliveryFilters._focusSearch) {
+    delete state.deliveryFilters._focusSearch;
+    search?.focus();
+    const len = search?.value.length || 0;
+    search?.setSelectionRange(len, len);
+  }
 }
 
 async function openMessage(messageId) {
   const { message } = await api(`/api/messages/${messageId}`);
   openModal(message.subject, "Message", `
-    <dl class="message-meta"><dt>To</dt><dd>${escapeHtml(message.to_email)}</dd><dt>From</dt><dd>${escapeHtml(message.from_email)}</dd><dt>Status</dt><dd>${statusPill(message.status)}</dd><dt>Captured</dt><dd>${formatDate(message.created_at)}</dd></dl>
+    <dl class="message-meta"><dt>To</dt><dd>${escapeHtml(message.to_email)}</dd><dt>From</dt><dd>${escapeHtml(message.from_email)}</dd><dt>Status</dt><dd>${statusPill(message.status)}${deliveryStatusMeaning(message.status) ? `<span class="status-hint">${escapeHtml(deliveryStatusMeaning(message.status))}</span>` : ""}</dd><dt>${isLiveDelivery() ? "Sent" : "Captured"}</dt><dd>${formatDate(message.created_at)}</dd></dl>
     <div class="message-preview"><iframe title="Message preview" sandbox=""></iframe></div>
     <div class="form-actions" style="margin-top:16px"><button class="button" data-close-modal>Close</button>${can("deliveries.feedback") ? `<a class="button" href="/u/${encodeURIComponent(message.unsubscribe_token)}" target="_blank" rel="noopener">Test unsubscribe</a><button class="button danger" data-feedback="hard_bounce">Simulate hard bounce</button><button class="button danger" data-feedback="complaint">Simulate complaint</button>` : ""}</div>`, false);
   const policy = `<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src data:">`;

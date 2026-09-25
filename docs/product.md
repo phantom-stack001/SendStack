@@ -23,9 +23,9 @@ Permissions are enforced on every protected API route. Hiding a control in the U
 
 | Role | Access |
 | --- | --- |
-| **Administrator** | Full access: users, roles, audit history, suppressions, and simulated delivery feedback |
-| **Marketer** | Lists, contacts, campaigns, controlled sends, deliveries, and manual suppressions; cannot manage users or read the audit log |
-| **Analyst** | Read-only overview, sending readiness, list totals, and campaign reporting without recipient-level contact, delivery, or suppression data |
+| **Administrator** | Full access: users, roles, audit history, suppressions, simulated delivery feedback, and campaign launch |
+| **Marketer** | Lists, contacts, campaign drafts and previews, deliveries, and manual suppressions; cannot launch delivery, manage users, or read the audit log |
+| **Analyst** | Read-only overview, list totals, and campaign reporting without recipient-level contact, delivery, or suppression data |
 
 Administrators can create, update, disable, reactivate, and reset users. User deletion is unavailable so ownership and audit history remain intact. Role, status, and password changes revoke the affected user’s sessions. An administrator cannot demote or disable their own account.
 

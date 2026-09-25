@@ -55,10 +55,30 @@ describe("rbac", () => {
     expect(requiredPermission("GET", "/api/production-readiness")).toBe("sending.view");
   });
 
+  it("reserves campaign launch for administrators", () => {
+    expect(permissionsForRole("admin").has("campaigns.send")).toBe(true);
+    expect(permissionsForRole("marketer").has("campaigns.manage")).toBe(true);
+    expect(permissionsForRole("marketer").has("campaigns.send")).toBe(false);
+    expect(permissionsForRole("analyst").has("campaigns.manage")).toBe(false);
+    expect(requiredPermission("POST", "/api/campaigns/cam_1/launch")).toBe("campaigns.send");
+    expect(requiredPermission("POST", "/api/campaigns/cam_1/pause")).toBe("campaigns.send");
+    expect(requiredPermission("POST", "/api/campaigns/cam_1/resume")).toBe("campaigns.send");
+    expect(requiredPermission("POST", "/api/campaigns/cam_1/test-send")).toBe("campaigns.manage");
+    expect(requiredPermission("POST", "/api/campaigns")).toBe("campaigns.manage");
+  });
+
   it("maps routes to permissions", () => {
     expect(requiredPermission("POST", "/api/campaigns/cam_1/launch")).toBe("campaigns.send");
     expect(requiredPermission("GET", "/api/campaigns/cam_1")).toBe("campaigns.view");
     expect(requiredPermission("POST", "/api/auth/login")).toBeNull();
+  });
+
+  it("lets marketers view delivery message details but not simulate feedback", () => {
+    expect(permissionsForRole("marketer").has("deliveries.view")).toBe(true);
+    expect(permissionsForRole("marketer").has("deliveries.feedback")).toBe(false);
+    expect(requiredPermission("GET", "/api/messages")).toBe("deliveries.view");
+    expect(requiredPermission("GET", "/api/messages/msg_1")).toBe("deliveries.view");
+    expect(requiredPermission("POST", "/api/messages/msg_1/event")).toBe("deliveries.feedback");
   });
 });
 

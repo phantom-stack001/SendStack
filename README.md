@@ -64,7 +64,7 @@ The default transport is `sandbox`. “Sandboxed” means captured locally; it d
 SendStack includes three built-in roles. Permissions are enforced by the server on every protected route; hiding an interface control is only a usability aid.
 
 - **Administrator:** full access, including users, roles, audit history, and simulated delivery feedback.
-- **Marketer:** manages lists, contacts, campaigns, controlled sends, deliveries, and manual suppressions. It cannot manage users or read the audit log.
+- **Marketer:** manages lists, contacts, campaign drafts and previews, deliveries, and manual suppressions. It cannot launch delivery, manage users, or read the audit log.
 - **Analyst:** read-only overview, sending readiness, list totals, and campaign reporting without recipient-level contact, delivery, or suppression data.
 
 Administrators can create, update, disable, reactivate, and reset users under **Users & roles**. User deletion is intentionally unavailable so ownership and audit history remain intact. Role, status, and password changes revoke the affected user’s active sessions, and an administrator cannot demote or disable their own account.

@@ -78,6 +78,7 @@ function sessionPayload(session: NonNullable<Awaited<ReturnType<typeof currentSe
     csrf_token: session.csrf_token,
     permissions: [...permissionsForRole(session.role)],
     delivery_mode: config.deliveryMode,
+    daily_limit: Number(process.env.SENDSTACK_DAILY_LIMIT ?? 50),
     must_change_password: session.must_change_password,
     user: {
       id: session.user_id,
@@ -1064,11 +1065,19 @@ export async function handleApi(request: Request, path: string[]) {
       [campaign.id],
     );
     const attachments = await listCampaignAttachmentMeta(campaign.id);
+    const eligible = await query<{ count: string }>(
+      `SELECT COUNT(*)::int AS count
+         FROM contacts c JOIN list_contacts lc ON lc.contact_id = c.id
+        WHERE lc.list_id = $1 AND c.status = 'active'
+          AND NOT EXISTS (SELECT 1 FROM suppressions s WHERE s.email = c.email)`,
+      [campaign.list_id],
+    );
     return json(200, {
       campaign: {
         ...campaign,
         stats: Object.fromEntries(stats.rows.map((row) => [row.status, row.count])),
         attachments,
+        eligible_recipients: Number(eligible.rows[0]?.count ?? 0),
       },
     });
   }
@@ -1076,6 +1085,15 @@ export async function handleApi(request: Request, path: string[]) {
     const auth = await requirePermission(request, "campaigns.manage");
     if (auth.response) return auth.response;
     if (!hasValidCsrf(request, auth.session.csrf_token)) return json(403, { error: "CSRF validation failed." });
+    const existing = await campaignById(campaignMatch[1]);
+    if (!existing) return json(404, { error: "Editable campaign not found." });
+    if (existing.status === "paused") {
+      if (!permissionsForRole(auth.session.role).has("campaigns.send")) {
+        return json(403, { error: "Only an administrator can edit a paused campaign." });
+      }
+    } else if (existing.status !== "draft") {
+      return json(409, { error: "Only draft or paused campaigns can be edited." });
+    }
     const body = await request.json().catch(() => ({})) as { name?: string; subject?: string; from_name?: string; from_email?: string; list_id?: string; content_mode?: string; content_json?: unknown; html_body?: string; text_body?: string };
     const name = (body.name ?? "").trim();
     const fromEmail = normalizeEmail(body.from_email ?? "");
@@ -1091,10 +1109,10 @@ export async function handleApi(request: Request, path: string[]) {
     const updated = await query(
       `UPDATE campaigns SET name = $1, subject = $2, from_name = $3, from_email = $4, list_id = $5,
        content_mode = $6, content_json = $7, html_body = $8, text_body = $9, updated_at = NOW()
-       WHERE id = $10 AND status IN ('draft', 'paused') RETURNING id, name, subject, status, list_id`,
-      [name, (body.subject ?? "").trim(), (body.from_name ?? "").trim(), fromEmail, body.list_id, body.content_mode ?? "custom_html", contentJson, body.html_body ?? "", body.text_body ?? "", campaignMatch[1]],
+       WHERE id = $10 AND status = $11 RETURNING id, name, subject, status, list_id`,
+      [name, (body.subject ?? "").trim(), (body.from_name ?? "").trim(), fromEmail, body.list_id, body.content_mode ?? "custom_html", contentJson, body.html_body ?? "", body.text_body ?? "", campaignMatch[1], existing.status],
     );
-    if (!updated.rows[0]) return json(404, { error: "Editable campaign not found." });
+    if (!updated.rows[0]) return json(409, { error: "Campaign could not be updated." });
     await recordRequestAudit(request, auth.session.user_id, "campaign_updated", "campaign", campaignMatch[1], { name, list_id: body.list_id });
     return json(200, { campaign: updated.rows[0] });
   }
@@ -1109,7 +1127,8 @@ export async function handleApi(request: Request, path: string[]) {
   }
   const campaignAction = route.match(/^\/campaigns\/([^/]+)\/(test-send|launch|pause|resume)$/);
   if (request.method === "POST" && campaignAction) {
-    const auth = await requirePermission(request, "campaigns.send");
+    const actionPermission = campaignAction[2] === "test-send" ? "campaigns.manage" : "campaigns.send";
+    const auth = await requirePermission(request, actionPermission);
     if (auth.response) return auth.response;
     if (!hasValidCsrf(request, auth.session.csrf_token)) return json(403, { error: "CSRF validation failed." });
     const campaign = await campaignById(campaignAction[1]);
@@ -1291,15 +1310,83 @@ export async function handleApi(request: Request, path: string[]) {
   if (request.method === "GET" && route === "/messages") {
     const auth = await requirePermission(request, "deliveries.view");
     if (auth.response) return auth.response;
+    const params = new URL(request.url).searchParams;
+    const campaignId = params.get("campaign_id")?.trim() || "";
+    const q = params.get("q")?.trim() || "";
+    const status = params.get("status")?.trim().toLowerCase() || "";
+    const from = params.get("from")?.trim() || "";
+    const to = params.get("to")?.trim() || "";
+    const allowedStatuses = new Set([
+      "captured",
+      "submitted",
+      "delivered",
+      "failed",
+      "bounced",
+      "complained",
+      "unsubscribed",
+      "suppressed",
+    ]);
+    if (status && !allowedStatuses.has(status)) {
+      return json(400, { error: "Invalid status filter." });
+    }
+    const datePattern = /^\d{4}-\d{2}-\d{2}$/;
+    if ((from && !datePattern.test(from)) || (to && !datePattern.test(to))) {
+      return json(400, { error: "Dates must be YYYY-MM-DD." });
+    }
+    if (from && to && from > to) {
+      return json(400, { error: "Start date must be on or before end date." });
+    }
+
+    const values: unknown[] = [];
+    const where: string[] = [];
+    if (campaignId) {
+      values.push(campaignId);
+      where.push(`m.campaign_id = $${values.length}`);
+    }
+    if (q) {
+      values.push(q);
+      const idx = values.length;
+      where.push(
+        `(m.to_email ILIKE '%' || $${idx} || '%' OR m.subject ILIKE '%' || $${idx} || '%' OR m.from_email ILIKE '%' || $${idx} || '%' OR COALESCE(c.name, '') ILIKE '%' || $${idx} || '%')`,
+      );
+    }
+    if (status === "captured") {
+      where.push(`m.status IN ('captured', 'sandboxed')`);
+    } else if (status) {
+      values.push(status);
+      where.push(`m.status = $${values.length}`);
+    }
+    if (from) {
+      values.push(from);
+      where.push(`m.created_at >= $${values.length}::date`);
+    }
+    if (to) {
+      values.push(to);
+      where.push(`m.created_at < ($${values.length}::date + interval '1 day')`);
+    }
+
+    const whereSql = where.length ? `WHERE ${where.join(" AND ")}` : "";
     const messages = await query(
       `SELECT m.id, m.to_email, m.subject, m.from_email, m.status, m.created_at, m.unsubscribe_token, c.name AS campaign_name
-         FROM messages m LEFT JOIN campaigns c ON c.id = m.campaign_id ORDER BY m.created_at DESC LIMIT 500`,
+         FROM messages m LEFT JOIN campaigns c ON c.id = m.campaign_id
+         ${whereSql}
+        ORDER BY m.created_at DESC LIMIT 500`,
+      values,
     );
-    return json(200, { messages: messages.rows });
+    return json(200, {
+      messages: messages.rows,
+      filters: {
+        campaign_id: campaignId || null,
+        q: q || null,
+        status: status || null,
+        from: from || null,
+        to: to || null,
+      },
+    });
   }
   const messageMatch = route.match(/^\/messages\/([^/]+)$/);
   if (request.method === "GET" && messageMatch) {
-    const auth = await requireAdmin(request);
+    const auth = await requirePermission(request, "deliveries.view");
     if (auth.response) return auth.response;
     const message = await query(`SELECT m.*, c.name AS campaign_name FROM messages m LEFT JOIN campaigns c ON c.id = m.campaign_id WHERE m.id = $1`, [messageMatch[1]]);
     if (!message.rows[0]) return json(404, { error: "Message not found." });
