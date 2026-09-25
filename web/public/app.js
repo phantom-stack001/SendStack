@@ -568,31 +568,92 @@ async function renderContacts(query = "") {
   ]);
   const canManage = can("contacts.manage");
   const canEdit = can("contacts.edit");
+  const contacts = data.contacts || [];
+  const activeCount = contacts.filter((contact) => contact.status === "active").length;
+  const suppressedCount = contacts.filter((contact) => contact.status === "suppressed").length;
+  const searching = Boolean(query);
+  const listSummary = lists.length
+    ? lists.slice(0, 6).map((list) => `<span class="list-chip">${escapeHtml(list.name)}<em>${Number(list.contact_count || 0)}</em></span>`).join("")
+    : `<span class="list-chip muted">No lists yet</span>`;
+
+  const tableRows = contacts.map((contact) => {
+    const displayName = [contact.first_name, contact.last_name].filter(Boolean).join(" ") || "Unnamed contact";
+    const listNames = String(contact.lists || "")
+      .split(",")
+      .map((name) => name.trim())
+      .filter(Boolean);
+    return `<tr data-contact-id="${escapeHtml(contact.id)}">
+      <td>
+        <div class="contact-identity">
+          <span class="contact-avatar" aria-hidden="true">${escapeHtml(initials(displayName === "Unnamed contact" ? contact.email : displayName))}</span>
+          <div>
+            <strong>${escapeHtml(displayName)}</strong>
+            <span class="subtext email">${escapeHtml(contact.email)}</span>
+          </div>
+        </div>
+      </td>
+      <td>${listNames.length ? `<div class="list-chip-row">${listNames.map((name) => `<span class="list-chip">${escapeHtml(name)}</span>`).join("")}</div>` : `<span class="muted-dash">—</span>`}</td>
+      <td><span class="consent-tag">${escapeHtml(titleCase(contact.consent_source))}</span></td>
+      <td>${statusPill(contact.status)}</td>
+      <td><span class="date-cell">${formatDate(contact.created_at)}</span></td>
+      ${canEdit ? `<td class="table-actions"><button class="button small ghost" data-contact-edit="${escapeHtml(contact.id)}">Edit</button><button class="button small ghost danger-text" data-contact-delete="${escapeHtml(contact.id)}">Delete</button></td>` : ""}
+    </tr>`;
+  }).join("");
+
+  const emptyMarkup = searching
+    ? `<div class="empty-state contacts-empty"><div><div class="empty-mark">⌕</div><h2>No matches for “${escapeHtml(query)}”</h2><p>Try another email or name, or clear the search to see everyone.</p><button class="button" id="clear-contact-search">Clear search</button></div></div>`
+    : `<div class="empty-state contacts-empty"><div><div class="empty-mark">◎</div><h2>No contacts yet</h2><p>Add someone manually or import a consented CSV audience to get started.</p>${canManage ? `<div class="empty-actions"><button class="button" id="empty-import-contacts">Import CSV</button><button class="button primary" id="empty-add-contact">Add contact</button></div>` : ""}</div></div>`;
+
   els.content.innerHTML = `
-    <div class="section-lead"><div><h2>${data.contacts.length.toLocaleString()} contacts</h2><p>Consent-aware audience records across ${lists.length} list${lists.length === 1 ? "" : "s"}.</p></div>${canManage ? `<div class="section-actions"><button class="button" id="import-contacts">Import CSV</button><button class="button primary" id="add-contact">Add contact</button></div>` : ""}</div>
-    <div class="toolbar"><div class="search"><input id="contact-search" type="search" placeholder="Search email or name" value="${escapeHtml(query)}" /></div>${can("lists.manage") ? `<div class="toolbar-group"><button class="button small ghost" id="create-list">+ New list</button></div>` : ""}</div>
-    <section class="panel">
-      ${data.contacts.length ? `<div class="table-wrap"><table><thead><tr><th>Contact</th><th>Lists</th><th>Consent</th><th>Status</th><th>Added</th>${canEdit ? "<th></th>" : ""}</tr></thead><tbody>${data.contacts.map((contact) => `<tr data-contact-id="${escapeHtml(contact.id)}"><td><strong>${escapeHtml([contact.first_name, contact.last_name].filter(Boolean).join(" ") || "Unnamed contact")}</strong><span class="subtext email">${escapeHtml(contact.email)}</span></td><td>${escapeHtml(contact.lists || "—")}</td><td>${escapeHtml(titleCase(contact.consent_source))}</td><td>${statusPill(contact.status)}</td><td>${formatDate(contact.created_at)}</td>${canEdit ? `<td class="table-actions"><button class="button small ghost" data-contact-edit="${escapeHtml(contact.id)}">Edit</button><button class="button small ghost" data-contact-delete="${escapeHtml(contact.id)}">Delete</button></td>` : ""}</tr>`).join("")}</tbody></table></div>` : `<div class="empty-state"><div><div class="empty-mark">◎</div><h2>No contacts found</h2><p>Import a consented audience or add a contact.</p>${canManage ? `<button class="button primary" id="empty-add-contact">Add contact</button>` : ""}</div></div>`}
-    </section>`;
+    <div class="contacts-view">
+      <div class="section-lead contacts-lead">
+        <div>
+          <h2>${searching ? "Search results" : "Audience"}</h2>
+          <p>${searching ? `${contacts.length.toLocaleString()} match${contacts.length === 1 ? "" : "es"} for “${escapeHtml(query)}”` : `${contacts.length.toLocaleString()} contact${contacts.length === 1 ? "" : "s"} across ${lists.length.toLocaleString()} list${lists.length === 1 ? "" : "s"}`}</p>
+        </div>
+        ${canManage ? `<div class="section-actions"><button class="button" id="import-contacts">Import CSV</button><button class="button primary" id="add-contact">Add contact</button></div>` : ""}
+      </div>
+
+      <div class="contacts-meta">
+        <div class="contacts-stat"><span>Shown</span><strong>${contacts.length.toLocaleString()}</strong></div>
+        <div class="contacts-stat"><span>Active</span><strong>${activeCount.toLocaleString()}</strong></div>
+        <div class="contacts-stat"><span>Suppressed</span><strong>${suppressedCount.toLocaleString()}</strong></div>
+        <div class="contacts-stat contacts-stat-lists"><span>Lists</span><div class="list-chip-row">${listSummary}${lists.length > 6 ? `<span class="list-chip muted">+${lists.length - 6}</span>` : ""}</div></div>
+      </div>
+
+      <div class="toolbar contacts-toolbar">
+        <div class="search"><input id="contact-search" type="search" placeholder="Search by email or name" value="${escapeHtml(query)}" aria-label="Search contacts" /></div>
+        <div class="toolbar-group">
+          ${can("lists.manage") ? `<button class="button small ghost" id="create-list">+ New list</button>` : ""}
+        </div>
+      </div>
+
+      <section class="panel contacts-panel">
+        ${contacts.length ? `<div class="table-wrap"><table class="contacts-table"><thead><tr><th>Contact</th><th>Lists</th><th>Consent</th><th>Status</th><th>Added</th>${canEdit ? "<th></th>" : ""}</tr></thead><tbody>${tableRows}</tbody></table></div>` : emptyMarkup}
+      </section>
+    </div>`;
+
   const search = document.querySelector("#contact-search");
   let searchTimer;
   search?.addEventListener("input", () => {
     clearTimeout(searchTimer);
     searchTimer = setTimeout(() => renderContacts(search.value.trim()), 280);
   });
+  document.querySelector("#clear-contact-search")?.addEventListener("click", () => renderContacts(""));
   document.querySelector("#add-contact")?.addEventListener("click", () => openContactModal());
   document.querySelector("#empty-add-contact")?.addEventListener("click", () => openContactModal());
   document.querySelector("#import-contacts")?.addEventListener("click", openImportModal);
+  document.querySelector("#empty-import-contacts")?.addEventListener("click", openImportModal);
   document.querySelector("#create-list")?.addEventListener("click", openListModal);
   els.content.querySelectorAll("[data-contact-edit]").forEach((button) => {
     button.addEventListener("click", () => {
-      const contact = data.contacts.find((row) => row.id === button.getAttribute("data-contact-edit"));
+      const contact = contacts.find((row) => row.id === button.getAttribute("data-contact-edit"));
       if (contact) openContactModal(contact);
     });
   });
   els.content.querySelectorAll("[data-contact-delete]").forEach((button) => {
     button.addEventListener("click", async () => {
-      const contact = data.contacts.find((row) => row.id === button.getAttribute("data-contact-delete"));
+      const contact = contacts.find((row) => row.id === button.getAttribute("data-contact-delete"));
       if (!contact) return;
       const label = [contact.first_name, contact.last_name].filter(Boolean).join(" ") || contact.email;
       if (!window.confirm(`Delete ${label}? This cannot be undone.`)) return;
@@ -606,6 +667,7 @@ async function renderContacts(query = "") {
     });
   });
 }
+
 
 function listOptions(lists, selected = "") {
   return lists.map((list) => `<option value="${escapeHtml(list.id)}" ${list.id === selected ? "selected" : ""}>${escapeHtml(list.name)} (${Number(list.contact_count || 0)})</option>`).join("");
