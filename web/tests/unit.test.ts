@@ -48,6 +48,13 @@ describe("rbac", () => {
     expect(requiredPermission("POST", "/api/contacts")).toBe("contacts.manage");
   });
 
+  it("reserves sending setup for administrators", () => {
+    expect(permissionsForRole("admin").has("sending.view")).toBe(true);
+    expect(permissionsForRole("marketer").has("sending.view")).toBe(false);
+    expect(permissionsForRole("analyst").has("sending.view")).toBe(false);
+    expect(requiredPermission("GET", "/api/production-readiness")).toBe("sending.view");
+  });
+
   it("maps routes to permissions", () => {
     expect(requiredPermission("POST", "/api/campaigns/cam_1/launch")).toBe("campaigns.send");
     expect(requiredPermission("GET", "/api/campaigns/cam_1")).toBe("campaigns.view");

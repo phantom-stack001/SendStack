@@ -31,7 +31,6 @@ export const ROLE_DEFINITIONS = {
     description: "Manages audiences, campaigns, sends, and suppressions.",
     permissions: [
       "overview.view",
-      "sending.view",
       "lists.view",
       "lists.manage",
       "contacts.view",
@@ -48,7 +47,7 @@ export const ROLE_DEFINITIONS = {
     id: "analyst",
     label: "Analyst",
     description: "Read-only campaign reporting without recipient-level personal data.",
-    permissions: ["overview.view", "sending.view", "lists.view", "campaigns.view"],
+    permissions: ["overview.view", "lists.view", "campaigns.view"],
   },
 } as const;
 
@@ -56,7 +55,7 @@ export type RoleId = keyof typeof ROLE_DEFINITIONS;
 
 export const PERMISSION_DEFINITIONS = [
   { id: "overview.view", label: "Overview", description: "View operational totals and campaign reporting" },
-  { id: "sending.view", label: "Sending setup", description: "View delivery setup and go-live checklist" },
+  { id: "sending.view", label: "Sending setup", description: "View delivery setup and go-live checklist (administrators only)" },
   { id: "lists.view", label: "List reporting", description: "View list names and audience totals" },
   { id: "lists.manage", label: "Manage lists", description: "Create audience lists" },
   { id: "contacts.view", label: "Recipient data", description: "View contact identities and consent records" },

@@ -238,6 +238,10 @@ function deliveryModeLabel(mode) {
   return "Preview";
 }
 
+function deliveryStatusLabel(mode) {
+  return mode === "resend" ? "LIVE" : "Dev Mode";
+}
+
 function initials(name) {
   return String(name || "User")
     .split(/\s+/)
@@ -333,7 +337,8 @@ function showApp(sessionData) {
   document.querySelectorAll("[data-permission]").forEach((element) => {
     element.hidden = !can(element.dataset.permission);
   });
-  els.modePill.innerHTML = `<span></span> ${deliveryModeLabel(sessionData.delivery_mode)}`;
+  els.modePill.innerHTML = `<span></span> ${deliveryStatusLabel(sessionData.delivery_mode)}`;
+  els.modePill.dataset.status = sessionData.delivery_mode === "resend" ? "live" : "dev";
   if (sessionData.must_change_password || user?.must_change_password) {
     openChangePasswordModal(true);
     return;
@@ -466,10 +471,10 @@ async function renderDashboard() {
         <div class="panel-body">${renderRecentMessages(data.recent_messages)}</div>
       </section>` : `<section class="panel access-summary"><div class="panel-body"><div class="access-lock">◌</div><h2>Recipient data is protected</h2><p>Your Analyst role includes aggregate campaign reporting without contact addresses or message contents.</p></div></section>`}
     </div>
-    <section class="production-target-strip">
+    ${can("sending.view") ? `<section class="production-target-strip">
       <div class="target-strip-copy"><span class="readiness-status pending">Readiness in progress</span><div><strong>Production delivery: Vercel + PostgreSQL + Resend</strong><p>Your workspace is configured for reliable, authenticated delivery as the remaining readiness checks are completed.</p></div></div>
       <button class="button" data-go="sending">View readiness</button>
-    </section>
+    </section>` : ""}
     <div class="notice" style="margin-top:16px"><span>i</span><div><strong>${data.delivery_mode === "sandbox" ? "Preview delivery is active." : "Relay preview is active."}</strong> ${data.delivery_mode === "sandbox" ? "Messages stay within this workspace until production delivery is enabled." : "Only approved recipients can receive messages in this mode."}</div></div>`;
 }
 
