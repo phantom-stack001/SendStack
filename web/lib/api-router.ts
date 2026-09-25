@@ -755,7 +755,7 @@ export async function handleApi(request: Request, path: string[]) {
   }
   const contactMatch = route.match(/^\/contacts\/([^/]+)$/);
   if (request.method === "PATCH" && contactMatch) {
-    const auth = await requirePermission(request, "contacts.manage");
+    const auth = await requirePermission(request, "contacts.edit");
     if (auth.response) return auth.response;
     if (!hasValidCsrf(request, auth.session.csrf_token)) return json(403, { error: "CSRF validation failed." });
     const body = await request.json().catch(() => ({})) as {
@@ -806,7 +806,7 @@ export async function handleApi(request: Request, path: string[]) {
     return json(200, { contact: updated.rows[0] });
   }
   if (request.method === "DELETE" && contactMatch) {
-    const auth = await requirePermission(request, "contacts.manage");
+    const auth = await requirePermission(request, "contacts.edit");
     if (auth.response) return auth.response;
     if (!hasValidCsrf(request, auth.session.csrf_token)) return json(403, { error: "CSRF validation failed." });
     try {

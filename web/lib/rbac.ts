@@ -5,6 +5,7 @@ const ADMIN_PERMISSIONS = [
   "lists.manage",
   "contacts.view",
   "contacts.manage",
+  "contacts.edit",
   "campaigns.view",
   "campaigns.manage",
   "campaigns.send",
@@ -59,7 +60,8 @@ export const PERMISSION_DEFINITIONS = [
   { id: "lists.view", label: "List reporting", description: "View list names and audience totals" },
   { id: "lists.manage", label: "Manage lists", description: "Create audience lists" },
   { id: "contacts.view", label: "Recipient data", description: "View contact identities and consent records" },
-  { id: "contacts.manage", label: "Manage contacts", description: "Create, edit, import, and delete contacts" },
+  { id: "contacts.manage", label: "Manage contacts", description: "Create and import contacts" },
+  { id: "contacts.edit", label: "Edit contacts", description: "Edit or delete existing contacts" },
   { id: "campaigns.view", label: "Campaign reporting", description: "View campaigns, content, and totals" },
   { id: "campaigns.manage", label: "Manage campaigns", description: "Create and edit campaign drafts" },
   { id: "campaigns.send", label: "Send campaigns", description: "Send previews and launch campaigns" },
@@ -123,7 +125,7 @@ export function requiredPermission(method: string, path: string): string | null 
   }
   if (/^\/api\/contacts\/[^/]+$/.test(normalized)) {
     if (method === "GET") return "contacts.view";
-    if (method === "PATCH" || method === "DELETE") return "contacts.manage";
+    if (method === "PATCH" || method === "DELETE") return "contacts.edit";
     return null;
   }
   if (/^\/api\/messages\/[^/]+$/.test(normalized)) {

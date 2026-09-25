@@ -39,6 +39,15 @@ describe("rbac", () => {
     expect(permissionsForRole("admin").size).toBe(ROLE_DEFINITIONS.admin.permissions.length);
   });
 
+  it("reserves contact edit and delete for administrators", () => {
+    expect(permissionsForRole("admin").has("contacts.edit")).toBe(true);
+    expect(permissionsForRole("marketer").has("contacts.manage")).toBe(true);
+    expect(permissionsForRole("marketer").has("contacts.edit")).toBe(false);
+    expect(requiredPermission("PATCH", "/api/contacts/ct_1")).toBe("contacts.edit");
+    expect(requiredPermission("DELETE", "/api/contacts/ct_1")).toBe("contacts.edit");
+    expect(requiredPermission("POST", "/api/contacts")).toBe("contacts.manage");
+  });
+
   it("maps routes to permissions", () => {
     expect(requiredPermission("POST", "/api/campaigns/cam_1/launch")).toBe("campaigns.send");
     expect(requiredPermission("GET", "/api/campaigns/cam_1")).toBe("campaigns.view");
