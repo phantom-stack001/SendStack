@@ -332,6 +332,17 @@ label { display: grid; gap: 7px; color: #b7c5d9; font-size: 13px; font-weight: 6
   border-radius: var(--radius);
   background: linear-gradient(120deg, rgba(102,133,255,.1), rgba(80,212,194,.045));
 }
+
+.production-target-strip[data-status="live"] {
+  border-color: rgba(78, 210, 157, 0.28);
+  background: linear-gradient(120deg, rgba(78, 210, 157, 0.12), rgba(15, 28, 48, 0.2));
+}
+
+.production-target-strip[data-status="dev"] {
+  border-color: rgba(243, 182, 90, 0.26);
+  background: linear-gradient(120deg, rgba(243, 182, 90, 0.1), rgba(15, 28, 48, 0.2));
+}
+
 .target-strip-copy { display: flex; align-items: center; gap: 15px; }
 .target-strip-copy strong { display: block; color: #eef3ff; font-size: 14px; }
 .target-strip-copy p { margin: 3px 0 0; color: var(--muted); font-size: 12px; }

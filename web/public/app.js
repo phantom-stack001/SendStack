@@ -467,15 +467,15 @@ async function renderDashboard() {
         ${renderRecentCampaignTable(data.recent_campaigns)}
       </section>
       ${can("deliveries.view") ? `<section class="panel">
-        <div class="panel-head"><div><h2>Latest messages</h2><p>${escapeHtml(deliveryModeLabel(data.delivery_mode))} delivery activity</p></div><button class="button small ghost" data-go="deliveries">Open inbox</button></div>
+        <div class="panel-head"><div><h2>Latest messages</h2><p>${escapeHtml(deliveryStatusLabel(data.delivery_mode))} delivery activity</p></div><button class="button small ghost" data-go="deliveries">Open inbox</button></div>
         <div class="panel-body">${renderRecentMessages(data.recent_messages)}</div>
       </section>` : `<section class="panel access-summary"><div class="panel-body"><div class="access-lock">◌</div><h2>Recipient data is protected</h2><p>Your Analyst role includes aggregate campaign reporting without contact addresses or message contents.</p></div></section>`}
     </div>
-    ${can("sending.view") ? `<section class="production-target-strip">
-      <div class="target-strip-copy"><span class="readiness-status pending">Readiness in progress</span><div><strong>Production delivery: Vercel + PostgreSQL + Resend</strong><p>Your workspace is configured for reliable, authenticated delivery as the remaining readiness checks are completed.</p></div></div>
-      <button class="button" data-go="sending">View readiness</button>
+    ${can("sending.view") ? `<section class="production-target-strip" data-status="${data.delivery_mode === "resend" ? "live" : "dev"}">
+      <div class="target-strip-copy"><span class="readiness-status ${data.delivery_mode === "resend" ? "ready" : "pending"}">${escapeHtml(deliveryStatusLabel(data.delivery_mode))}</span><div><strong>${data.delivery_mode === "resend" ? "Live delivery is on" : "Workspace is in Dev Mode"}</strong><p>${data.delivery_mode === "resend" ? "Campaigns and previews can reach real mailboxes. Review setup anytime if something looks off." : "Messages stay inside this workspace until an administrator turns on live delivery."}</p></div></div>
+      <button class="button" data-go="sending">Open setup</button>
     </section>` : ""}
-    <div class="notice" style="margin-top:16px"><span>i</span><div><strong>${data.delivery_mode === "sandbox" ? "Preview delivery is active." : "Relay preview is active."}</strong> ${data.delivery_mode === "sandbox" ? "Messages stay within this workspace until production delivery is enabled." : "Only approved recipients can receive messages in this mode."}</div></div>`;
+    <div class="notice" style="margin-top:16px"><span>i</span><div><strong>${data.delivery_mode === "resend" ? "Live delivery is active." : "Dev Mode is active."}</strong> ${data.delivery_mode === "resend" ? "Outbound messages can leave this workspace." : "Messages stay within this workspace until live delivery is enabled."}</div></div>`;
 }
 
 function readinessStatusLabel(status) {
