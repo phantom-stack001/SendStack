@@ -778,6 +778,58 @@ export async function handleApi(request: Request, path: string[]) {
     return json(200, { imported, updated, duplicates, invalid, issues, issues_truncated: issuesTruncated });
   }
   const contactMatch = route.match(/^\/contacts\/([^/]+)$/);
+  if (request.method === "GET" && contactMatch) {
+    const auth = await requirePermission(request, "contacts.view");
+    if (auth.response) return auth.response;
+
+    const contact = await query(
+      `SELECT c.id, c.email, c.first_name, c.last_name, c.status, c.consent_source,
+              c.consent_at, c.created_at, c.updated_at,
+              STRING_AGG(l.name, ', ' ORDER BY l.name) AS lists,
+              COALESCE(ARRAY_AGG(l.id ORDER BY l.name) FILTER (WHERE l.id IS NOT NULL), '{}') AS list_ids
+         FROM contacts c
+         LEFT JOIN list_contacts lc ON lc.contact_id = c.id
+         LEFT JOIN lists l ON l.id = lc.list_id
+        WHERE c.id = $1
+        GROUP BY c.id`,
+      [contactMatch[1]],
+    );
+    if (!contact.rows[0]) return json(404, { error: "Contact not found." });
+
+    const row = contact.rows[0] as {
+      id: string;
+      email: string;
+      first_name: string;
+      last_name: string;
+      status: string;
+      consent_source: string;
+      consent_at: string;
+      created_at: string;
+      updated_at: string;
+      lists: string | null;
+      list_ids: string[];
+    };
+
+    const suppression = await query<{ reason: string; source: string; created_at: string }>(
+      `SELECT reason, source, created_at FROM suppressions WHERE email = $1`,
+      [row.email],
+    );
+    const messages = await query(
+      `SELECT m.id, m.subject, m.status, m.created_at, m.campaign_id, c.name AS campaign_name
+         FROM messages m
+         LEFT JOIN campaigns c ON c.id = m.campaign_id
+        WHERE m.contact_id = $1
+        ORDER BY m.created_at DESC
+        LIMIT 50`,
+      [row.id],
+    );
+
+    return json(200, {
+      contact: row,
+      suppression: suppression.rows[0] ?? null,
+      messages: messages.rows,
+    });
+  }
   if (request.method === "PATCH" && contactMatch) {
     const auth = await requirePermission(request, "contacts.edit");
     if (auth.response) return auth.response;

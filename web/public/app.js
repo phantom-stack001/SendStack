@@ -607,7 +607,10 @@ async function renderContacts(query = "", listId = "") {
       <td><span class="consent-tag">${escapeHtml(titleCase(contact.consent_source))}</span></td>
       <td>${statusPill(contact.status)}</td>
       <td><span class="date-cell">${formatDate(contact.created_at)}</span></td>
-      ${canEdit ? `<td class="table-actions"><button class="button small ghost" data-contact-edit="${escapeHtml(contact.id)}">Edit</button><button class="button small ghost danger-text" data-contact-delete="${escapeHtml(contact.id)}">Delete</button></td>` : ""}
+      <td class="table-actions">
+        <button class="button small ghost" data-contact-view="${escapeHtml(contact.id)}">View</button>
+        ${canEdit ? `<button class="button small ghost" data-contact-edit="${escapeHtml(contact.id)}">Edit</button><button class="button small ghost danger-text" data-contact-delete="${escapeHtml(contact.id)}">Delete</button>` : ""}
+      </td>
     </tr>`;
   }).join("");
 
@@ -650,7 +653,7 @@ async function renderContacts(query = "", listId = "") {
       </div>
 
       <section class="panel contacts-panel">
-        ${contacts.length ? `<div class="table-wrap"><table class="contacts-table"><thead><tr><th>Contact</th><th>Lists</th><th>Consent</th><th>Status</th><th>Added</th>${canEdit ? "<th></th>" : ""}</tr></thead><tbody>${tableRows}</tbody></table></div>` : emptyMarkup}
+        ${contacts.length ? `<div class="table-wrap"><table class="contacts-table"><thead><tr><th>Contact</th><th>Lists</th><th>Consent</th><th>Status</th><th>Added</th><th></th></tr></thead><tbody>${tableRows}</tbody></table></div>` : emptyMarkup}
       </section>
     </div>`;
 
@@ -671,6 +674,9 @@ async function renderContacts(query = "", listId = "") {
   document.querySelector("#import-contacts")?.addEventListener("click", () => openImportModal(currentListId()));
   document.querySelector("#empty-import-contacts")?.addEventListener("click", () => openImportModal(currentListId()));
   document.querySelector("#create-list")?.addEventListener("click", openListModal);
+  els.content.querySelectorAll("[data-contact-view]").forEach((button) => {
+    button.addEventListener("click", () => openContactDetail(button.getAttribute("data-contact-view"), currentListId()));
+  });
   els.content.querySelectorAll("[data-contact-edit]").forEach((button) => {
     button.addEventListener("click", () => {
       const contact = contacts.find((row) => row.id === button.getAttribute("data-contact-edit"));
@@ -697,6 +703,78 @@ async function renderContacts(query = "", listId = "") {
 
 function listOptions(lists, selected = "") {
   return lists.map((list) => `<option value="${escapeHtml(list.id)}" ${list.id === selected ? "selected" : ""}>${escapeHtml(list.name)} (${Number(list.contact_count || 0)})</option>`).join("");
+}
+
+async function openContactDetail(contactId, preferredListId = "") {
+  if (!contactId) return;
+  try {
+    const data = await api(`/api/contacts/${contactId}`);
+    const contact = data.contact;
+    const displayName = [contact.first_name, contact.last_name].filter(Boolean).join(" ") || "Unnamed contact";
+    const listNames = String(contact.lists || "")
+      .split(",")
+      .map((name) => name.trim())
+      .filter(Boolean);
+    const canOpenMessage = can("deliveries.view");
+    const messages = Array.isArray(data.messages) ? data.messages : [];
+    const suppression = data.suppression;
+    const messageRows = messages.map((message) => {
+      const subjectCell = canOpenMessage
+        ? `<button type="button" class="text-link" data-message-id="${escapeHtml(message.id)}">${escapeHtml(message.subject || "Untitled")}</button>`
+        : escapeHtml(message.subject || "Untitled");
+      return `<tr>
+        <td>${escapeHtml(message.campaign_name || "—")}</td>
+        <td>${subjectCell}</td>
+        <td>${statusPill(message.status)}</td>
+        <td><span class="date-cell">${formatDate(message.created_at)}</span></td>
+      </tr>`;
+    }).join("");
+
+    openModal(displayName, "Contact", `
+      <div class="contact-detail">
+        <dl class="message-meta">
+          <dt>Email</dt><dd class="email">${escapeHtml(contact.email)}</dd>
+          <dt>Status</dt><dd>${statusPill(contact.status)}</dd>
+          <dt>Consent</dt><dd>${escapeHtml(titleCase(contact.consent_source))}</dd>
+          <dt>Lists</dt><dd>${listNames.length ? listNames.map((name) => escapeHtml(name)).join(", ") : "—"}</dd>
+          <dt>Added</dt><dd>${formatDate(contact.created_at)}</dd>
+          <dt>Updated</dt><dd>${formatDate(contact.updated_at)}</dd>
+        </dl>
+
+        ${suppression
+          ? `<div class="notice warning"><span>!</span><div><strong>On the global suppression list.</strong><br>${escapeHtml(titleCase(suppression.reason))} · ${escapeHtml(titleCase(suppression.source))} · ${formatDate(suppression.created_at)}</div></div>`
+          : `<div class="notice"><span>i</span><div><strong>Not on the global suppression list.</strong><br>This address is eligible for campaign sends unless contact status is suppressed.</div></div>`}
+
+        <div class="contact-detail-section">
+          <h3>Send history</h3>
+          ${messages.length
+            ? `<div class="table-wrap"><table><thead><tr><th>Campaign</th><th>Subject</th><th>Status</th><th>Sent</th></tr></thead><tbody>${messageRows}</tbody></table></div>`
+            : `<p class="help">No sends recorded for this contact yet.</p>`}
+        </div>
+
+        <div class="form-actions">
+          <button class="button" data-close-modal>Close</button>
+          ${can("contacts.edit") ? `<button class="button" id="contact-detail-edit">Edit</button>` : ""}
+        </div>
+      </div>`, false);
+
+    if (canOpenMessage) {
+      els.modalBody.querySelectorAll("[data-message-id]").forEach((button) => {
+        button.addEventListener("click", async () => {
+          try {
+            await openMessage(button.getAttribute("data-message-id"));
+          } catch (error) {
+            toast(error.message, "error");
+          }
+        });
+      });
+    }
+    document.querySelector("#contact-detail-edit")?.addEventListener("click", () => {
+      openContactModal(contact, preferredListId);
+    });
+  } catch (error) {
+    toast(error.message, "error");
+  }
 }
 
 async function openContactModal(contact = null, preferredListId = "") {

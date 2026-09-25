@@ -370,6 +370,17 @@ label { display: grid; gap: 7px; color: #b7c5d9; font-size: 13px; font-weight: 6
 .empty-state p { margin: 0 0 18px; color: var(--muted); font-size: 14px; }
 
 .contacts-view { display: grid; gap: 16px; }
+.contact-detail { display: grid; gap: 16px; }
+.contact-detail .message-meta { margin-bottom: 0; }
+.contact-detail-section { display: grid; gap: 10px; }
+.contact-detail-section h3 {
+  margin: 0;
+  color: #e8eef9;
+  font-size: 14px;
+  font-weight: 750;
+  letter-spacing: -0.01em;
+}
+.contact-detail .form-actions { margin-top: 0; }
 .contacts-lead { margin-bottom: 0; }
 .contacts-meta {
   display: grid;
