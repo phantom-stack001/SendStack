@@ -705,17 +705,31 @@ export async function handleApi(request: Request, path: string[]) {
     let updated = 0;
     let duplicates = 0;
     let invalid = 0;
+    const issues: Array<{ row: number; email: string; reason: string }> = [];
+    let issuesTruncated = false;
+    const ISSUE_CAP = 100;
+    const pushIssue = (row: number, email: string, reason: string) => {
+      if (issues.length >= ISSUE_CAP) {
+        issuesTruncated = true;
+        return;
+      }
+      issues.push({ row, email, reason });
+    };
     const seenInFile = new Set<string>();
 
-    for (const line of lines.slice(1)) {
-      const cells = parseCsvLine(line);
-      const email = normalizeEmail(cells[emailIndex] ?? "");
+    for (let index = 1; index < lines.length; index += 1) {
+      const row = index + 1;
+      const cells = parseCsvLine(lines[index]);
+      const rawEmail = (cells[emailIndex] ?? "").trim();
+      const email = normalizeEmail(rawEmail);
       if (!validEmail(email)) {
         invalid += 1;
+        pushIssue(row, rawEmail || email, "invalid_email");
         continue;
       }
       if (seenInFile.has(email)) {
         duplicates += 1;
+        pushIssue(row, email, "duplicate_in_file");
         continue;
       }
       seenInFile.add(email);
@@ -761,7 +775,7 @@ export async function handleApi(request: Request, path: string[]) {
       duplicates,
       invalid,
     });
-    return json(200, { imported, updated, duplicates, invalid });
+    return json(200, { imported, updated, duplicates, invalid, issues, issues_truncated: issuesTruncated });
   }
   const contactMatch = route.match(/^\/contacts\/([^/]+)$/);
   if (request.method === "PATCH" && contactMatch) {

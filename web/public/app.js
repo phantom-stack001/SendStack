@@ -746,33 +746,102 @@ async function openListModal() {
   });
 }
 
+function downloadTextFile(filename, text, mime = "text/csv;charset=utf-8") {
+  const blob = new Blob([text], { type: mime });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
+}
+
+function importIssueLabel(reason) {
+  if (reason === "invalid_email") return "Invalid email";
+  if (reason === "duplicate_in_file") return "Duplicate in file";
+  return reason || "Skipped";
+}
+
 async function openImportModal(preferredListId = "") {
   const lists = await getLists();
   openModal("Import contacts", "CSV audience", `
     <form id="import-form" class="stack">
-      <div class="notice"><span>i</span><div>The CSV must include an <strong>email</strong> column. Optional fields: <strong>first_name</strong> and <strong>last_name</strong>. Import only permission-based contacts.</div></div>
+      <div class="notice"><span>i</span><div>The CSV must include an <strong>email</strong> column. Optional fields: <strong>first_name</strong> and <strong>last_name</strong>. Import only permission-based contacts. <button type="button" class="text-link" id="download-sample-csv">Download sample CSV</button></div></div>
       <label>Destination list<select name="list_id" required>${listOptions(lists, preferredListId)}</select></label>
       <label>CSV file<input name="file" type="file" accept=".csv,text/csv" required /></label>
       <p class="form-error" role="alert"></p>
+      <div id="import-progress" class="import-progress" hidden>
+        <div class="import-progress-label">Importing…</div>
+        <div class="progress indeterminate" aria-hidden="true"><span></span></div>
+      </div>
       <div id="import-result"></div>
       <div class="form-actions"><button type="button" class="button" data-close-modal>Close</button><button class="button primary" type="submit">Import CSV</button></div>
     </form>`, true);
+
+  document.querySelector("#download-sample-csv")?.addEventListener("click", () => {
+    downloadTextFile(
+      "sendstack-contacts-sample.csv",
+      "email,first_name,last_name\nalex@example.com,Alex,Rivera\njordan@example.com,Jordan,Lee\n",
+    );
+  });
+
   document.querySelector("#import-form").addEventListener("submit", async (event) => {
     event.preventDefault();
     const form = event.currentTarget;
     const file = form.elements.file.files[0];
     const error = form.querySelector(".form-error");
+    const progress = document.querySelector("#import-progress");
+    const resultEl = document.querySelector("#import-result");
+    const submit = form.querySelector('button[type="submit"]');
+    const controls = [form.elements.list_id, form.elements.file, submit].filter(Boolean);
     error.textContent = "";
+    resultEl.innerHTML = "";
     if (!file) return;
+
+    controls.forEach((el) => { el.disabled = true; });
+    if (progress) progress.hidden = false;
+
     try {
       const csvText = await file.text();
       const result = await api("/api/contacts/import", { method: "POST", body: { csv_text: csvText, list_id: form.elements.list_id.value } });
-      document.querySelector("#import-result").innerHTML = `<div class="notice"><span>✓</span><div><strong>${result.imported} imported, ${result.updated} updated.</strong><br>${result.duplicates} duplicates and ${result.invalid} invalid rows skipped.</div></div>`;
+      if (progress) progress.hidden = true;
+      controls.forEach((el) => { el.disabled = false; });
+      const issues = Array.isArray(result.issues) ? result.issues : [];
+      const issueRows = issues.map((issue) => `<tr><td>${Number(issue.row) || "—"}</td><td>${escapeHtml(issue.email || "—")}</td><td>${escapeHtml(importIssueLabel(issue.reason))}</td></tr>`).join("");
+      const truncatedNote = result.issues_truncated
+        ? `<p class="help">Showing the first ${issues.length} skipped rows.</p>`
+        : "";
+      resultEl.innerHTML = `
+        <div class="notice"><span>✓</span><div><strong>${Number(result.imported) || 0} imported, ${Number(result.updated) || 0} updated.</strong><br>${Number(result.duplicates) || 0} duplicates and ${Number(result.invalid) || 0} invalid rows skipped.</div></div>
+        ${issues.length ? `
+          <div class="import-issues">
+            <div class="import-issues-head">
+              <strong>Skipped rows</strong>
+              <button type="button" class="button small ghost" id="download-import-issues">Download skipped rows</button>
+            </div>
+            <div class="table-wrap"><table><thead><tr><th>Row</th><th>Email</th><th>Reason</th></tr></thead><tbody>${issueRows}</tbody></table></div>
+            ${truncatedNote}
+          </div>` : ""}`;
+      if (issues.length) {
+        document.querySelector("#download-import-issues")?.addEventListener("click", () => {
+          const lines = ["row,email,reason", ...issues.map((issue) => {
+            const email = String(issue.email || "").replace(/"/g, '""');
+            const reason = String(issue.reason || "").replace(/"/g, '""');
+            return `${Number(issue.row) || ""},"${email}","${reason}"`;
+          })];
+          downloadTextFile("sendstack-import-skipped.csv", `${lines.join("\n")}\n`);
+        });
+      }
       state.lists = [];
       toast("CSV import complete");
       await renderContacts(document.querySelector("#contact-search")?.value.trim() || "", preferredListId || form.elements.list_id.value);
     } catch (requestError) {
       error.textContent = requestError.message;
+    } finally {
+      controls.forEach((el) => { el.disabled = false; });
+      if (progress) progress.hidden = true;
     }
   });
 }

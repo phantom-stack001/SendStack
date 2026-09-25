@@ -264,6 +264,58 @@ td strong { color: #edf3ff; font-weight: 680; }
 
 .progress { width: 100%; height: 6px; overflow: hidden; border-radius: 99px; background: #1b2a43; }
 .progress span { display: block; height: 100%; border-radius: inherit; background: linear-gradient(90deg, #5876f2, #6ee1d1); }
+.progress.indeterminate span {
+  width: 36%;
+  animation: progress-indeterminate 1.1s ease-in-out infinite;
+}
+@keyframes progress-indeterminate {
+  0% { transform: translateX(-120%); }
+  100% { transform: translateX(320%); }
+}
+.import-progress { display: grid; gap: 8px; }
+.import-progress[hidden] { display: none; }
+.import-progress-label {
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 650;
+}
+.import-issues {
+  display: grid;
+  gap: 10px;
+  margin-top: 12px;
+  max-height: 240px;
+  overflow: auto;
+  padding: 12px;
+  border: 1px solid var(--border-soft);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.02);
+}
+.import-issues-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.import-issues table { width: 100%; }
+.import-issues th, .import-issues td {
+  padding: 6px 8px;
+  font-size: 12px;
+  text-align: left;
+}
+.text-link {
+  display: inline;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: #9eb2ff;
+  font: inherit;
+  font-weight: 650;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
+.text-link:hover { color: #c2ceff; }
 
 .activity-list { display: grid; }
 .activity-item { display: grid; grid-template-columns: 36px minmax(0,1fr); gap: 11px; padding: 13px 0; border-bottom: 1px solid var(--border-soft); }
