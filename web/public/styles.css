@@ -435,6 +435,56 @@ label { display: grid; gap: 7px; color: #b7c5d9; font-size: 13px; font-weight: 6
   min-width: 160px;
   flex: 0 1 180px;
 }
+.audit-toolbar {
+  margin-bottom: 15px;
+  gap: 12px;
+  flex-wrap: wrap;
+  align-items: end;
+}
+.audit-toolbar .search { flex: 1 1 240px; }
+.audit-toolbar select {
+  width: auto;
+  min-width: 180px;
+  flex: 0 1 220px;
+  padding: 9px 11px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: #0b1728;
+  color: #eef4ff;
+}
+.audit-filter-note {
+  margin: -4px 0 12px;
+  color: var(--muted-2);
+  font-size: 12px;
+}
+.audit-detail {
+  max-width: 320px;
+  min-width: 160px;
+}
+.audit-detail > span {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.audit-detail .subtext {
+  margin-top: 2px;
+  font-size: 11px;
+}
+.audit-entity {
+  max-width: 220px;
+  min-width: 120px;
+}
+.audit-entity > span {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.audit-entity .subtext {
+  margin-top: 2px;
+  font-size: 11px;
+}
 .delivery-date {
   display: grid;
   gap: 5px;

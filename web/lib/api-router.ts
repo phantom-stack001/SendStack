@@ -141,6 +141,126 @@ async function recordRequestAudit(request: Request, actorUserId: string | null, 
   return recordAudit(actorUserId, action, entityType, entityId, { ...requestAuditContext(request), ...detail });
 }
 
+function collectEntityIds(events: Array<{ entity_type: string; entity_id: string | null }>, entityType: string): string[] {
+  return [...new Set(events.filter((event) => event.entity_type === entityType && event.entity_id).map((event) => event.entity_id as string))];
+}
+
+async function loadEntityLabelMap(
+  ids: string[],
+  sql: string,
+  pick: (row: Record<string, unknown>) => string | null,
+): Promise<Map<string, string>> {
+  const map = new Map<string, string>();
+  if (!ids.length) return map;
+  const result = await query<Record<string, unknown>>(sql, [ids]);
+  for (const row of result.rows) {
+    const id = typeof row.id === "string" ? row.id : null;
+    const label = pick(row);
+    if (id && label) map.set(id, label);
+  }
+  return map;
+}
+
+function detailString(detail: Record<string, unknown>, key: string): string | null {
+  const value = detail[key];
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  return trimmed || null;
+}
+
+function resolveAuditEntityLabel(
+  entityType: string,
+  entityId: string | null,
+  detail: Record<string, unknown>,
+  lookups: {
+    campaign: Map<string, string>;
+    list: Map<string, string>;
+    contact: Map<string, string>;
+    user: Map<string, string>;
+    message: Map<string, string>;
+  },
+): string | null {
+  const detailName = detailString(detail, "name");
+  const detailEmail = detailString(detail, "email");
+
+  if (entityType === "campaign") return detailName || (entityId ? lookups.campaign.get(entityId) ?? null : null);
+  if (entityType === "list") return detailName || (entityId ? lookups.list.get(entityId) ?? null : null);
+  if (entityType === "contact") return detailEmail || (entityId ? lookups.contact.get(entityId) ?? null : null);
+  if (entityType === "user") return detailEmail || detailName || (entityId ? lookups.user.get(entityId) ?? null : null);
+  if (entityType === "message") return entityId ? lookups.message.get(entityId) ?? null : null;
+  if (entityType === "suppression") return entityId;
+  if (entityType === "authentication") return detailEmail;
+  if (entityType === "session") return null;
+  if (entityType === "provider_event") {
+    if (!entityId) return null;
+    return entityId.length > 36 ? `${entityId.slice(0, 18)}…` : entityId;
+  }
+  return detailName || detailEmail;
+}
+
+async function enrichAuditEvents(events: Array<{
+  id: string;
+  actor_user_id: string | null;
+  actor_name: string | null;
+  action: string;
+  entity_type: string;
+  entity_id: string | null;
+  detail_json: string;
+  created_at: string;
+}>) {
+  const parsed = events.map((event) => {
+    let detail: Record<string, unknown> = {};
+    try {
+      detail = JSON.parse(event.detail_json || "{}") as Record<string, unknown>;
+    } catch {
+      detail = {};
+    }
+    return { ...event, detail };
+  });
+
+  const [campaign, list, contact, user, message] = await Promise.all([
+    loadEntityLabelMap(
+      collectEntityIds(parsed, "campaign"),
+      `SELECT id, name FROM campaigns WHERE id = ANY($1::text[])`,
+      (row) => (typeof row.name === "string" && row.name.trim() ? row.name.trim() : null),
+    ),
+    loadEntityLabelMap(
+      collectEntityIds(parsed, "list"),
+      `SELECT id, name FROM lists WHERE id = ANY($1::text[])`,
+      (row) => (typeof row.name === "string" && row.name.trim() ? row.name.trim() : null),
+    ),
+    loadEntityLabelMap(
+      collectEntityIds(parsed, "contact"),
+      `SELECT id, email FROM contacts WHERE id = ANY($1::text[])`,
+      (row) => (typeof row.email === "string" && row.email.trim() ? row.email.trim() : null),
+    ),
+    loadEntityLabelMap(
+      collectEntityIds(parsed, "user"),
+      `SELECT id, name, email FROM users WHERE id = ANY($1::text[])`,
+      (row) => {
+        if (typeof row.name === "string" && row.name.trim()) return row.name.trim();
+        if (typeof row.email === "string" && row.email.trim()) return row.email.trim();
+        return null;
+      },
+    ),
+    loadEntityLabelMap(
+      collectEntityIds(parsed, "message"),
+      `SELECT id, to_email, subject FROM messages WHERE id = ANY($1::text[])`,
+      (row) => {
+        if (typeof row.to_email === "string" && row.to_email.trim()) return row.to_email.trim();
+        if (typeof row.subject === "string" && row.subject.trim()) return row.subject.trim();
+        return null;
+      },
+    ),
+  ]);
+
+  const lookups = { campaign, list, contact, user, message };
+  return parsed.map((event) => ({
+    ...event,
+    entity_label: resolveAuditEntityLabel(event.entity_type, event.entity_id, event.detail, lookups),
+  }));
+}
+
 async function summaryResponse() {
   const counts = await query<{
     contacts: string;
@@ -517,7 +637,46 @@ export async function handleApi(request: Request, path: string[]) {
     const params = new URL(request.url).searchParams;
     const actionFilter = params.get("action")?.trim() ?? "";
     const entityFilter = params.get("entity_type")?.trim() ?? "";
+    const q = params.get("q")?.trim() ?? "";
+    const from = params.get("from")?.trim() ?? "";
+    const to = params.get("to")?.trim() ?? "";
     const limit = Math.min(Math.max(Number(params.get("limit") ?? 500) || 500, 1), 1000);
+    const datePattern = /^\d{4}-\d{2}-\d{2}$/;
+    if ((from && !datePattern.test(from)) || (to && !datePattern.test(to))) {
+      return json(400, { error: "Dates must be YYYY-MM-DD." });
+    }
+    if (from && to && from > to) {
+      return json(400, { error: "Start date must be on or before end date." });
+    }
+
+    const values: unknown[] = [];
+    const where: string[] = [];
+    if (actionFilter) {
+      values.push(actionFilter);
+      where.push(`a.action = $${values.length}`);
+    }
+    if (entityFilter) {
+      values.push(entityFilter);
+      where.push(`a.entity_type = $${values.length}`);
+    }
+    if (q) {
+      values.push(q);
+      const idx = values.length;
+      where.push(
+        `(COALESCE(u.name, '') ILIKE '%' || $${idx} || '%' OR a.action ILIKE '%' || $${idx} || '%' OR a.entity_type ILIKE '%' || $${idx} || '%' OR COALESCE(a.entity_id, '') ILIKE '%' || $${idx} || '%' OR a.detail_json ILIKE '%' || $${idx} || '%')`,
+      );
+    }
+    if (from) {
+      values.push(from);
+      where.push(`a.created_at >= $${values.length}::date`);
+    }
+    if (to) {
+      values.push(to);
+      where.push(`a.created_at < ($${values.length}::date + interval '1 day')`);
+    }
+
+    values.push(limit);
+    const whereSql = where.length ? `WHERE ${where.join(" AND ")}` : "";
     const events = await query<{
       id: string; actor_user_id: string | null; actor_name: string | null; action: string;
       entity_type: string; entity_id: string | null; detail_json: string; created_at: string;
@@ -525,15 +684,19 @@ export async function handleApi(request: Request, path: string[]) {
       `SELECT a.id, a.actor_user_id, u.name AS actor_name, a.action, a.entity_type,
               a.entity_id, a.detail_json, a.created_at
          FROM audit_events a LEFT JOIN users u ON u.id = a.actor_user_id
-        WHERE ($1 = '' OR a.action = $1) AND ($2 = '' OR a.entity_type = $2)
-        ORDER BY a.created_at DESC LIMIT $3`,
-      [actionFilter, entityFilter, limit],
+         ${whereSql}
+        ORDER BY a.created_at DESC LIMIT $${values.length}`,
+      values,
     );
     return json(200, {
-      events: events.rows.map((event) => ({
-        ...event,
-        detail: (() => { try { return JSON.parse(event.detail_json || "{}"); } catch { return {}; } })(),
-      })),
+      events: await enrichAuditEvents(events.rows),
+      filters: {
+        action: actionFilter || null,
+        entity_type: entityFilter || null,
+        q: q || null,
+        from: from || null,
+        to: to || null,
+      },
     });
   }
   if (request.method === "POST" && route === "/suppressions") {

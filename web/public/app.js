@@ -14,6 +14,13 @@ const state = {
     from: "",
     to: "",
   },
+  auditFilters: {
+    action: "",
+    entityType: "",
+    q: "",
+    from: "",
+    to: "",
+  },
 };
 
 const els = {
@@ -218,6 +225,57 @@ function titleCase(value) {
   return String(value ?? "")
     .replaceAll("_", " ")
     .replace(/\b\w/g, (character) => character.toUpperCase());
+}
+
+const AUDIT_DETAIL_OMIT = new Set(["ip", "user_agent"]);
+const AUDIT_DETAIL_ORDER = [
+  "email",
+  "name",
+  "role",
+  "active",
+  "status",
+  "recipients",
+  "reason",
+  "consent_source",
+  "content_mode",
+  "delivery_mode",
+];
+
+function formatAuditDetailValue(value) {
+  if (value === null || value === undefined || value === "") return null;
+  if (typeof value === "boolean") return value ? "Yes" : "No";
+  if (typeof value === "object") {
+    try {
+      return JSON.stringify(value);
+    } catch {
+      return String(value);
+    }
+  }
+  return String(value);
+}
+
+function formatAuditDetail(detail) {
+  const source = detail && typeof detail === "object" ? detail : {};
+  const preferred = [];
+  const seen = new Set();
+  for (const key of AUDIT_DETAIL_ORDER) {
+    if (!(key in source) || AUDIT_DETAIL_OMIT.has(key)) continue;
+    const formatted = formatAuditDetailValue(source[key]);
+    if (formatted === null) continue;
+    preferred.push(`${titleCase(key)}: ${formatted}`);
+    seen.add(key);
+  }
+  const leftovers = Object.keys(source)
+    .filter((key) => !AUDIT_DETAIL_OMIT.has(key) && !seen.has(key))
+    .sort()
+    .map((key) => {
+      const formatted = formatAuditDetailValue(source[key]);
+      return formatted === null ? null : `${titleCase(key)}: ${formatted}`;
+    })
+    .filter(Boolean);
+  const primary = [...preferred, ...leftovers].join(" · ") || "—";
+  const ip = typeof source.ip === "string" && source.ip && source.ip !== "unknown" ? source.ip : "";
+  return { primary, ip };
 }
 
 function statusPill(status, { title } = {}) {
@@ -1819,11 +1877,227 @@ function openManageUserModal(userId) {
   });
 }
 
+const AUDIT_ACTION_OPTIONS = [
+  ["", "All actions"],
+  ["login_succeeded", "Signed in"],
+  ["login_failed", "Sign-in failed"],
+  ["logout", "Signed out"],
+  ["password_changed", "Password changed"],
+  ["user_created", "User created"],
+  ["user_access_updated", "Access updated"],
+  ["user_deleted", "User deleted"],
+  ["user_password_reset", "Password reset"],
+  ["list_created", "List created"],
+  ["list_updated", "List updated"],
+  ["list_deleted", "List deleted"],
+  ["contact_created", "Contact created"],
+  ["contact_updated", "Contact updated"],
+  ["contact_deleted", "Contact deleted"],
+  ["contacts_imported", "Contacts imported"],
+  ["campaign_created", "Campaign created"],
+  ["campaign_updated", "Campaign updated"],
+  ["campaign_deleted", "Campaign deleted"],
+  ["campaign_attachment_added", "Attachment added"],
+  ["campaign_attachment_deleted", "Attachment removed"],
+  ["campaign_launched", "Campaign launched"],
+  ["campaign_test_sent", "Test send"],
+  ["campaign_paused", "Campaign paused"],
+  ["campaign_resumed", "Campaign resumed"],
+  ["suppression_created", "Suppression added"],
+  ["suppression_deleted", "Suppression removed"],
+  ["message_deleted", "Message deleted"],
+  ["resend_email.sent", "Sent"],
+  ["resend_email.delivered", "Delivered"],
+  ["resend_email.delivery_delayed", "Delayed"],
+  ["resend_email.bounced", "Bounced"],
+  ["resend_email.complained", "Complained"],
+  ["resend_email.opened", "Opened"],
+  ["resend_email.clicked", "Clicked"],
+];
+
+const AUDIT_ACTION_LABELS = Object.fromEntries(
+  AUDIT_ACTION_OPTIONS.filter(([value]) => value).map(([value, label]) => [value, label]),
+);
+
+function auditActionLabel(action) {
+  const key = String(action ?? "");
+  return AUDIT_ACTION_LABELS[key] || titleCase(key);
+}
+
+const AUDIT_ENTITY_OPTIONS = [
+  ["", "All entities"],
+  ["authentication", "Authentication"],
+  ["session", "Session"],
+  ["user", "User"],
+  ["list", "List"],
+  ["contact", "Contact"],
+  ["campaign", "Campaign"],
+  ["suppression", "Suppression"],
+  ["message", "Message"],
+  ["provider_event", "Provider event"],
+];
+
 async function renderAudit() {
-  const data = await api("/api/audit");
+  const filters = state.auditFilters;
+  const params = new URLSearchParams();
+  if (filters.action) params.set("action", filters.action);
+  if (filters.entityType) params.set("entity_type", filters.entityType);
+  if (filters.q) params.set("q", filters.q);
+  if (filters.from) params.set("from", filters.from);
+  if (filters.to) params.set("to", filters.to);
+  const queryString = params.toString();
+  const data = await api(`/api/audit${queryString ? `?${queryString}` : ""}`);
+  const filtering = Boolean(filters.action || filters.entityType || filters.q || filters.from || filters.to);
+  const count = data.events.length;
+  const actionOptions = AUDIT_ACTION_OPTIONS
+    .map(([value, label]) => `<option value="${escapeHtml(value)}" ${filters.action === value ? "selected" : ""}>${escapeHtml(label)}</option>`)
+    .join("");
+  const entityOptions = AUDIT_ENTITY_OPTIONS
+    .map(([value, label]) => `<option value="${escapeHtml(value)}" ${filters.entityType === value ? "selected" : ""}>${escapeHtml(label)}</option>`)
+    .join("");
+  const heading = filtering
+    ? `${count.toLocaleString()} match${count === 1 ? "" : "es"}`
+    : "Recent administrative activity";
+  const filterBits = [];
+  if (filters.q) filterBits.push(`“${escapeHtml(filters.q)}”`);
+  if (filters.action) {
+    filterBits.push(escapeHtml(AUDIT_ACTION_OPTIONS.find(([value]) => value === filters.action)?.[1] || titleCase(filters.action)));
+  }
+  if (filters.entityType) {
+    filterBits.push(escapeHtml(AUDIT_ENTITY_OPTIONS.find(([value]) => value === filters.entityType)?.[1] || titleCase(filters.entityType)));
+  }
+  if (filters.from || filters.to) {
+    filterBits.push(escapeHtml([filters.from || "…", filters.to || "…"].join(" → ")));
+  }
+  const filterNote = filterBits.length
+    ? `<p class="audit-filter-note">Filtered by ${filterBits.join(" · ")}.</p>`
+    : "";
+  const emptyMarkup = filtering
+    ? `<div class="empty-state"><div><div class="empty-mark">⌕</div><h2>No matching events</h2><p>Nothing matches these filters. Try clearing search, action, entity, or date range.</p><button class="button" id="clear-audit-filters">Clear filters</button></div></div>`
+    : `<div class="empty-state"><div><p>No audit events yet.</p></div></div>`;
+  const tableRows = data.events.map((event) => {
+    const detail = formatAuditDetail(event.detail);
+    const entityLabel = typeof event.entity_label === "string" ? event.entity_label.trim() : "";
+    return `<tr>
+      <td>${formatDate(event.created_at)}</td>
+      <td>${escapeHtml(event.actor_name || "System / recipient")}</td>
+      <td><strong>${escapeHtml(auditActionLabel(event.action))}</strong></td>
+      <td class="audit-entity"><span>${escapeHtml(titleCase(event.entity_type))}</span>${entityLabel ? `<span class="subtext">${escapeHtml(entityLabel)}</span>` : ""}</td>
+      <td class="audit-detail"><span>${escapeHtml(detail.primary)}</span>${detail.ip ? `<span class="subtext">from ${escapeHtml(detail.ip)}</span>` : ""}</td>
+    </tr>`;
+  }).join("");
+
+  const sectionActions = [
+    count ? `<button class="button" id="export-audit-csv">Export CSV</button>` : "",
+    filtering ? `<button class="button" id="clear-audit-filters">Clear filters</button>` : "",
+  ].filter(Boolean).join("");
+
   els.content.innerHTML = `
-    <div class="section-lead"><div><h2>Recent administrative activity</h2><p>Authentication, imports, campaigns, delivery feedback, and suppressions.</p></div></div>
-    <section class="panel">${data.events.length ? `<div class="table-wrap"><table><thead><tr><th>Time</th><th>Actor</th><th>Action</th><th>Entity</th><th>Detail</th></tr></thead><tbody>${data.events.map((event) => `<tr><td>${formatDate(event.created_at)}</td><td>${escapeHtml(event.actor_name || "System / recipient")}</td><td><strong>${escapeHtml(titleCase(event.action))}</strong></td><td>${escapeHtml(titleCase(event.entity_type))}${event.entity_id ? `<span class="subtext">${escapeHtml(event.entity_id)}</span>` : ""}</td><td><span class="subtext">${escapeHtml(Object.entries(event.detail || {}).map(([key, value]) => `${titleCase(key)}: ${value}`).join(" · ") || "—")}</span></td></tr>`).join("")}</tbody></table></div>` : `<div class="empty-state"><div><p>No audit events yet.</p></div></div>`}</section>`;
+    <div class="section-lead"><div><h2>${heading}</h2><p>Authentication, imports, campaigns, delivery feedback, and suppressions.</p></div><div class="section-actions">${sectionActions}</div></div>
+    ${filterNote}
+    <div class="toolbar audit-toolbar">
+      <div class="search"><input id="audit-search" type="search" placeholder="Search actor, action, entity, or detail" value="${escapeHtml(filters.q)}" aria-label="Search audit log" /></div>
+      <select id="audit-action-filter" aria-label="Filter by action">${actionOptions}</select>
+      <select id="audit-entity-filter" aria-label="Filter by entity type">${entityOptions}</select>
+      <label class="delivery-date"><span>From</span><input id="audit-from" type="date" value="${escapeHtml(filters.from)}" aria-label="From date" /></label>
+      <label class="delivery-date"><span>To</span><input id="audit-to" type="date" value="${escapeHtml(filters.to)}" aria-label="To date" /></label>
+    </div>
+    <section class="panel">${data.events.length ? `<div class="table-wrap"><table><thead><tr><th>Time</th><th>Actor</th><th>Action</th><th>Entity</th><th>Detail</th></tr></thead><tbody>${tableRows}</tbody></table></div>` : emptyMarkup}</section>`;
+
+  const search = document.querySelector("#audit-search");
+  const fromInput = document.querySelector("#audit-from");
+  const toInput = document.querySelector("#audit-to");
+  let searchTimer;
+
+  const applyFilters = (next = {}) => {
+    state.auditFilters = {
+      ...state.auditFilters,
+      ...next,
+    };
+    if ("q" in next) state.auditFilters._focusSearch = true;
+    renderAudit();
+  };
+  const clearFilters = () => {
+    state.auditFilters = { action: "", entityType: "", q: "", from: "", to: "" };
+    renderAudit();
+  };
+
+  search?.addEventListener("input", () => {
+    clearTimeout(searchTimer);
+    searchTimer = setTimeout(() => applyFilters({ q: search.value.trim() }), 280);
+  });
+  document.querySelector("#audit-action-filter")?.addEventListener("change", (event) => {
+    applyFilters({ action: event.target.value || "" });
+  });
+  document.querySelector("#audit-entity-filter")?.addEventListener("change", (event) => {
+    applyFilters({ entityType: event.target.value || "" });
+  });
+  fromInput?.addEventListener("change", () => {
+    const from = fromInput.value || "";
+    if (from && filters.to && from > filters.to) {
+      toast("Start date must be on or before end date.", "error");
+      fromInput.value = filters.from;
+      return;
+    }
+    applyFilters({ from });
+  });
+  toInput?.addEventListener("change", () => {
+    const to = toInput.value || "";
+    if (filters.from && to && filters.from > to) {
+      toast("End date must be on or after start date.", "error");
+      toInput.value = filters.to;
+      return;
+    }
+    applyFilters({ to });
+  });
+  document.querySelectorAll("#clear-audit-filters").forEach((button) => {
+    button.addEventListener("click", clearFilters);
+  });
+  document.querySelector("#export-audit-csv")?.addEventListener("click", () => {
+    exportAuditCsv(data.events);
+  });
+
+  if (state.auditFilters._focusSearch) {
+    delete state.auditFilters._focusSearch;
+    search?.focus();
+    const len = search?.value.length || 0;
+    search?.setSelectionRange(len, len);
+  }
+}
+
+function csvEscape(value) {
+  const text = String(value ?? "");
+  if (/[",\n\r]/.test(text)) return `"${text.replaceAll('"', '""')}"`;
+  return text;
+}
+
+function exportAuditCsv(events) {
+  const headers = ["created_at", "actor", "action", "entity_type", "entity_label", "entity_id", "detail", "ip"];
+  const rows = events.map((event) => {
+    const detail = formatAuditDetail(event.detail);
+    return [
+      event.created_at,
+      event.actor_name || "System / recipient",
+      event.action,
+      event.entity_type,
+      event.entity_label || "",
+      event.entity_id || "",
+      detail.primary === "—" ? "" : detail.primary,
+      detail.ip || "",
+    ].map(csvEscape).join(",");
+  });
+  const csv = [headers.join(","), ...rows].join("\n");
+  const stamp = new Date().toISOString().slice(0, 10);
+  const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = `audit-${stamp}.csv`;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
+  toast(`Exported ${events.length.toLocaleString()} audit event${events.length === 1 ? "" : "s"}`);
 }
 
 function openModal(title, kicker, content, compact = false) {
