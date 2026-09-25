@@ -628,7 +628,13 @@ export async function handleApi(request: Request, path: string[]) {
   if (request.method === "GET" && route === "/contacts") {
     const auth = await requirePermission(request, "contacts.view");
     if (auth.response) return auth.response;
-    const search = new URL(request.url).searchParams.get("q")?.trim() ?? "";
+    const params = new URL(request.url).searchParams;
+    const search = params.get("q")?.trim() ?? "";
+    const listId = params.get("list_id")?.trim() ?? "";
+    if (listId) {
+      const list = await query(`SELECT id FROM lists WHERE id = $1`, [listId]);
+      if (!list.rows[0]) return json(400, { error: "The selected list does not exist." });
+    }
     const contacts = await query(
       `SELECT c.id, c.email, c.first_name, c.last_name, c.status, c.consent_source,
               c.created_at,
@@ -638,10 +644,14 @@ export async function handleApi(request: Request, path: string[]) {
          LEFT JOIN list_contacts lc ON lc.contact_id = c.id
          LEFT JOIN lists l ON l.id = lc.list_id
         WHERE ($1 = '' OR c.email ILIKE '%' || $1 || '%' OR c.first_name ILIKE '%' || $1 || '%' OR c.last_name ILIKE '%' || $1 || '%')
+          AND ($2 = '' OR EXISTS (
+                SELECT 1 FROM list_contacts membership
+                 WHERE membership.contact_id = c.id AND membership.list_id = $2
+              ))
         GROUP BY c.id ORDER BY c.created_at DESC LIMIT 500`,
-      [search],
+      [search, listId],
     );
-    return json(200, { contacts: contacts.rows });
+    return json(200, { contacts: contacts.rows, list_id: listId || null });
   }
   if (request.method === "POST" && route === "/contacts/import") {
     const auth = await requirePermission(request, "contacts.manage");

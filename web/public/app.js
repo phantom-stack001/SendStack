@@ -561,20 +561,31 @@ function renderRecentMessages(messages) {
   return `<div class="activity-list">${messages.map((message) => `<div class="activity-item"><div class="activity-icon">↗</div><div><strong>${escapeHtml(message.to_email)}</strong><p>${escapeHtml(message.subject)} · ${formatDate(message.created_at)}</p></div></div>`).join("")}</div>`;
 }
 
-async function renderContacts(query = "") {
+async function renderContacts(query = "", listId = "") {
+  const params = new URLSearchParams();
+  if (query) params.set("q", query);
+  if (listId) params.set("list_id", listId);
+  const queryString = params.toString();
   const [data, lists] = await Promise.all([
-    api(`/api/contacts${query ? `?q=${encodeURIComponent(query)}` : ""}`),
+    api(`/api/contacts${queryString ? `?${queryString}` : ""}`),
     getLists(),
   ]);
   const canManage = can("contacts.manage");
   const canEdit = can("contacts.edit");
   const contacts = data.contacts || [];
+  const activeListId = data.list_id || listId || "";
   const activeCount = contacts.filter((contact) => contact.status === "active").length;
   const suppressedCount = contacts.filter((contact) => contact.status === "suppressed").length;
   const searching = Boolean(query);
+  const filtering = Boolean(activeListId);
+  const activeList = lists.find((list) => list.id === activeListId);
   const listSummary = lists.length
     ? lists.slice(0, 6).map((list) => `<span class="list-chip">${escapeHtml(list.name)}<em>${Number(list.contact_count || 0)}</em></span>`).join("")
     : `<span class="list-chip muted">No lists yet</span>`;
+  const listFilterOptions = [
+    `<option value="">All lists</option>`,
+    ...lists.map((list) => `<option value="${escapeHtml(list.id)}" ${list.id === activeListId ? "selected" : ""}>${escapeHtml(list.name)} (${Number(list.contact_count || 0)})</option>`),
+  ].join("");
 
   const tableRows = contacts.map((contact) => {
     const displayName = [contact.first_name, contact.last_name].filter(Boolean).join(" ") || "Unnamed contact";
@@ -600,16 +611,25 @@ async function renderContacts(query = "") {
     </tr>`;
   }).join("");
 
-  const emptyMarkup = searching
-    ? `<div class="empty-state contacts-empty"><div><div class="empty-mark">⌕</div><h2>No matches for “${escapeHtml(query)}”</h2><p>Try another email or name, or clear the search to see everyone.</p><button class="button" id="clear-contact-search">Clear search</button></div></div>`
-    : `<div class="empty-state contacts-empty"><div><div class="empty-mark">◎</div><h2>No contacts yet</h2><p>Add someone manually or import a consented CSV audience to get started.</p>${canManage ? `<div class="empty-actions"><button class="button" id="empty-import-contacts">Import CSV</button><button class="button primary" id="empty-add-contact">Add contact</button></div>` : ""}</div></div>`;
+  let emptyMarkup;
+  if (searching || filtering) {
+    emptyMarkup = `<div class="empty-state contacts-empty"><div><div class="empty-mark">⌕</div><h2>${searching ? `No matches for “${escapeHtml(query)}”` : "No contacts in this list"}</h2><p>${filtering && searching ? `Nothing found in ${escapeHtml(activeList?.name || "this list")}.` : filtering ? "Try another list, or clear the filter to see everyone." : "Try another email or name, or clear the search to see everyone."}</p><button class="button" id="clear-contact-filters">Clear filters</button></div></div>`;
+  } else {
+    emptyMarkup = `<div class="empty-state contacts-empty"><div><div class="empty-mark">◎</div><h2>No contacts yet</h2><p>Add someone manually or import a consented CSV audience to get started.</p>${canManage ? `<div class="empty-actions"><button class="button" id="empty-import-contacts">Import CSV</button><button class="button primary" id="empty-add-contact">Add contact</button></div>` : ""}</div></div>`;
+  }
+
+  const subtitle = searching
+    ? `${contacts.length.toLocaleString()} match${contacts.length === 1 ? "" : "es"} for “${escapeHtml(query)}”${activeList ? ` in ${escapeHtml(activeList.name)}` : ""}`
+    : filtering
+      ? `${contacts.length.toLocaleString()} contact${contacts.length === 1 ? "" : "s"} in ${escapeHtml(activeList?.name || "this list")}`
+      : `${contacts.length.toLocaleString()} contact${contacts.length === 1 ? "" : "s"} across ${lists.length.toLocaleString()} list${lists.length === 1 ? "" : "s"}`;
 
   els.content.innerHTML = `
     <div class="contacts-view">
       <div class="section-lead contacts-lead">
         <div>
           <h2>${searching ? "Search results" : "Audience"}</h2>
-          <p>${searching ? `${contacts.length.toLocaleString()} match${contacts.length === 1 ? "" : "es"} for “${escapeHtml(query)}”` : `${contacts.length.toLocaleString()} contact${contacts.length === 1 ? "" : "s"} across ${lists.length.toLocaleString()} list${lists.length === 1 ? "" : "s"}`}</p>
+          <p>${subtitle}</p>
         </div>
         ${canManage ? `<div class="section-actions"><button class="button" id="import-contacts">Import CSV</button><button class="button primary" id="add-contact">Add contact</button></div>` : ""}
       </div>
@@ -623,6 +643,7 @@ async function renderContacts(query = "") {
 
       <div class="toolbar contacts-toolbar">
         <div class="search"><input id="contact-search" type="search" placeholder="Search by email or name" value="${escapeHtml(query)}" aria-label="Search contacts" /></div>
+        <select id="contact-list-filter" aria-label="Filter by list">${listFilterOptions}</select>
         <div class="toolbar-group">
           ${can("lists.manage") ? `<button class="button small ghost" id="create-list">+ New list</button>` : ""}
         </div>
@@ -634,21 +655,26 @@ async function renderContacts(query = "") {
     </div>`;
 
   const search = document.querySelector("#contact-search");
+  const listFilter = document.querySelector("#contact-list-filter");
   let searchTimer;
+  const currentListId = () => listFilter?.value || "";
+  const refresh = (nextQuery = search?.value.trim() || "", nextListId = currentListId()) => renderContacts(nextQuery, nextListId);
+
   search?.addEventListener("input", () => {
     clearTimeout(searchTimer);
-    searchTimer = setTimeout(() => renderContacts(search.value.trim()), 280);
+    searchTimer = setTimeout(() => refresh(search.value.trim(), currentListId()), 280);
   });
-  document.querySelector("#clear-contact-search")?.addEventListener("click", () => renderContacts(""));
-  document.querySelector("#add-contact")?.addEventListener("click", () => openContactModal());
-  document.querySelector("#empty-add-contact")?.addEventListener("click", () => openContactModal());
-  document.querySelector("#import-contacts")?.addEventListener("click", openImportModal);
-  document.querySelector("#empty-import-contacts")?.addEventListener("click", openImportModal);
+  listFilter?.addEventListener("change", () => refresh(search?.value.trim() || "", currentListId()));
+  document.querySelector("#clear-contact-filters")?.addEventListener("click", () => renderContacts("", ""));
+  document.querySelector("#add-contact")?.addEventListener("click", () => openContactModal(null, currentListId()));
+  document.querySelector("#empty-add-contact")?.addEventListener("click", () => openContactModal(null, currentListId()));
+  document.querySelector("#import-contacts")?.addEventListener("click", () => openImportModal(currentListId()));
+  document.querySelector("#empty-import-contacts")?.addEventListener("click", () => openImportModal(currentListId()));
   document.querySelector("#create-list")?.addEventListener("click", openListModal);
   els.content.querySelectorAll("[data-contact-edit]").forEach((button) => {
     button.addEventListener("click", () => {
       const contact = contacts.find((row) => row.id === button.getAttribute("data-contact-edit"));
-      if (contact) openContactModal(contact);
+      if (contact) openContactModal(contact, currentListId());
     });
   });
   els.content.querySelectorAll("[data-contact-delete]").forEach((button) => {
@@ -660,7 +686,7 @@ async function renderContacts(query = "") {
       try {
         await api(`/api/contacts/${contact.id}`, { method: "DELETE" });
         toast("Contact deleted");
-        await renderContacts(query);
+        await refresh(query, currentListId());
       } catch (error) {
         toast(error.message, "error");
       }
@@ -673,12 +699,13 @@ function listOptions(lists, selected = "") {
   return lists.map((list) => `<option value="${escapeHtml(list.id)}" ${list.id === selected ? "selected" : ""}>${escapeHtml(list.name)} (${Number(list.contact_count || 0)})</option>`).join("");
 }
 
-async function openContactModal(contact = null) {
+async function openContactModal(contact = null, preferredListId = "") {
   const lists = await getLists();
   const editing = Boolean(contact?.id);
   const selectedListId = Array.isArray(contact?.list_ids) && contact.list_ids.length
     ? contact.list_ids[0]
-    : lists[0]?.id || "";
+    : preferredListId || lists[0]?.id || "";
+  const filterListId = preferredListId || "";
   openModal(editing ? "Edit contact" : "Add contact", "Audience", `
     <form id="contact-form" class="stack">
       <div class="form-grid"><label>First name<input name="first_name" maxlength="120" value="${escapeHtml(contact?.first_name || "")}" /></label><label>Last name<input name="last_name" maxlength="120" value="${escapeHtml(contact?.last_name || "")}" /></label></div>
@@ -699,7 +726,7 @@ async function openContactModal(contact = null) {
     await submitForm(form, () => api(path, { method, body: data }), editing ? "Contact updated" : "Contact added");
     if (!form.querySelector(".form-error").textContent) {
       closeModal();
-      await renderContacts();
+      await renderContacts(document.querySelector("#contact-search")?.value.trim() || "", filterListId);
     }
   });
 }
@@ -719,12 +746,12 @@ async function openListModal() {
   });
 }
 
-async function openImportModal() {
+async function openImportModal(preferredListId = "") {
   const lists = await getLists();
   openModal("Import contacts", "CSV audience", `
     <form id="import-form" class="stack">
       <div class="notice"><span>i</span><div>The CSV must include an <strong>email</strong> column. Optional fields: <strong>first_name</strong> and <strong>last_name</strong>. Import only permission-based contacts.</div></div>
-      <label>Destination list<select name="list_id" required>${listOptions(lists)}</select></label>
+      <label>Destination list<select name="list_id" required>${listOptions(lists, preferredListId)}</select></label>
       <label>CSV file<input name="file" type="file" accept=".csv,text/csv" required /></label>
       <p class="form-error" role="alert"></p>
       <div id="import-result"></div>
@@ -743,7 +770,7 @@ async function openImportModal() {
       document.querySelector("#import-result").innerHTML = `<div class="notice"><span>✓</span><div><strong>${result.imported} imported, ${result.updated} updated.</strong><br>${result.duplicates} duplicates and ${result.invalid} invalid rows skipped.</div></div>`;
       state.lists = [];
       toast("CSV import complete");
-      await renderContacts();
+      await renderContacts(document.querySelector("#contact-search")?.value.trim() || "", preferredListId || form.elements.list_id.value);
     } catch (requestError) {
       error.textContent = requestError.message;
     }
