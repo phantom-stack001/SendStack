@@ -63,7 +63,7 @@ describe("rbac", () => {
     expect(requiredPermission("POST", "/api/campaigns/cam_1/launch")).toBe("campaigns.send");
     expect(requiredPermission("POST", "/api/campaigns/cam_1/pause")).toBe("campaigns.send");
     expect(requiredPermission("POST", "/api/campaigns/cam_1/resume")).toBe("campaigns.send");
-    expect(requiredPermission("POST", "/api/campaigns/cam_1/test-send")).toBe("campaigns.manage");
+    expect(requiredPermission("POST", "/api/campaigns/cam_1/test-send")).toBe("campaigns.send");
     expect(requiredPermission("POST", "/api/campaigns")).toBe("campaigns.manage");
   });
 

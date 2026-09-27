@@ -76,7 +76,7 @@ const defaultTemplate = `<!doctype html>
           <tr><td style="padding:34px 30px">
             <p style="margin:0 0 14px;font-size:16px">Hello {{first_name}},</p>
             <h1 style="margin:0 0 16px;font-size:28px;line-height:1.2">A useful update from CTN.</h1>
-            <p style="margin:0 0 22px;color:#53627a;line-height:1.65">Replace this text with the message you want your audience to receive. Preview shows the fully personalized result.</p>
+            <p style="margin:0 0 22px;color:#53627a;line-height:1.65">Hello {{first_name}}, here is your update. Preview shows the fully personalized result.</p>
             <a href="#" style="display:inline-block;background:#0f7a72;color:white;text-decoration:none;padding:12px 18px;border-radius:8px;font-weight:bold">Learn more</a>
           </td></tr>
           <tr><td style="padding:21px 30px;background:#f7f9fc;color:#718097;font-size:12px;line-height:1.6">You are receiving this because you opted in to updates.<br><a href="{{unsubscribe_url}}" style="color:#0f7a72">Unsubscribe</a></td></tr>
@@ -285,13 +285,16 @@ function statusPill(status, { title } = {}) {
     captured: "Captured",
     submitted: "Submitted",
     delivered: "Delivered",
+    delayed: "Delayed",
     bounced: "Bounced",
     complained: "Complained",
     suppressed: "Suppressed",
     unsubscribed: "Unsubscribed",
     queued: "Queued",
+    processing: "Processing",
     sending: "Sending",
     paused: "Paused",
+    cancelled: "Cancelled",
     completed: "Completed",
     draft: "Draft",
     failed: "Failed",
@@ -313,6 +316,8 @@ function deliveryStatusMeaning(status) {
       return "Accepted by the delivery service — not proof it reached the inbox";
     case "delivered":
       return "Delivery provider confirmed handoff to the recipient mailbox";
+    case "delayed":
+      return "Provider reported a temporary delivery delay";
     case "failed":
       return "Send attempt failed before the provider accepted it";
     case "bounced":
@@ -323,6 +328,10 @@ function deliveryStatusMeaning(status) {
       return "Recipient opted out via unsubscribe";
     case "suppressed":
       return "Skipped because the address is on the suppression list";
+    case "cancelled":
+      return "Provider broadcast cancelled for remaining recipients";
+    case "paused":
+      return "Local sandbox pause — live broadcasts must be cancelled at the provider";
     default:
       return "";
   }
@@ -679,7 +688,9 @@ async function renderSendingSetup() {
   const vercel = checkById(data.checks, "vercel_runtime");
   const postgres = checkById(data.checks, "postgres_database");
   const resend = checkById(data.checks, "resend_broadcasts");
+  const health = data.delivery_health || {};
   const liveReady = Boolean(data.ready_for_live_sending);
+  const healthReady = Boolean(health.healthy);
   els.content.innerHTML = `
     <section class="production-hero">
       <div>
@@ -687,6 +698,7 @@ async function renderSendingSetup() {
         <p class="eyebrow">DELIVERY ARCHITECTURE</p>
         <h2>${escapeHtml(target.platform)} + ${escapeHtml(target.database)} + ${escapeHtml(target.provider)}</h2>
         <p>Current runtime: ${escapeHtml(data.current.runtime)}. Database: ${escapeHtml(data.current.database)}. Transport: ${escapeHtml(deliveryModeLabel(data.current.transport))}.</p>
+        <p>From: ${escapeHtml(data.current.from_email || "not configured")} · Reply-To: ${escapeHtml(data.current.reply_to_email || "not configured")}</p>
       </div>
       <div class="readiness-score"><strong>${readyCount}/${data.checks.length}</strong><span>setup checks complete</span></div>
     </section>
@@ -695,6 +707,22 @@ async function renderSendingSetup() {
       <article class="target-card"><span class="target-card-index">01</span><h3>Vercel</h3><p>${escapeHtml(vercel.detail)}</p><span class="readiness-status ${vercel.status === "ready" ? "ready" : "pending"}">${escapeHtml(readinessStatusLabel(vercel.status))}</span></article>
       <article class="target-card"><span class="target-card-index">02</span><h3>PostgreSQL</h3><p>${escapeHtml(postgres.detail)}</p><span class="readiness-status ${postgres.status === "ready" ? "ready" : "pending"}">${escapeHtml(readinessStatusLabel(postgres.status))}</span></article>
       <article class="target-card"><span class="target-card-index">03</span><h3>Resend Broadcasts</h3><p>${escapeHtml(resend.detail)}</p><span class="readiness-status ${resend.status === "ready" ? "ready" : "pending"}">${escapeHtml(readinessStatusLabel(resend.status))}</span></article>
+    </section>
+
+    <section class="panel" style="margin-bottom:18px">
+      <div class="panel-head"><div><h2>Delivery health (7 days)</h2><p>Aggregate outcomes without recipient addresses</p></div><span class="readiness-status ${healthReady ? "ready" : "pending"}">${healthReady ? "Healthy" : "Not healthy"}</span></div>
+      <div class="panel-body">
+        <div class="stat-grid" style="margin:0">
+          <article class="stat-card"><span class="stat-label">Submitted</span><strong class="stat-value">${Number(health.submitted || 0).toLocaleString()}</strong></article>
+          <article class="stat-card"><span class="stat-label">Delivered</span><strong class="stat-value">${Number(health.delivered || 0).toLocaleString()}</strong></article>
+          <article class="stat-card"><span class="stat-label">Delayed</span><strong class="stat-value">${Number(health.delayed || 0).toLocaleString()}</strong></article>
+          <article class="stat-card"><span class="stat-label">Bounced</span><strong class="stat-value">${Number(health.bounced || 0).toLocaleString()}</strong></article>
+          <article class="stat-card"><span class="stat-label">Complained</span><strong class="stat-value">${Number(health.complained || 0).toLocaleString()}</strong></article>
+          <article class="stat-card"><span class="stat-label">Suppressed</span><strong class="stat-value">${Number(health.suppressed || 0).toLocaleString()}</strong></article>
+          <article class="stat-card"><span class="stat-label">Unsubscribed</span><strong class="stat-value">${Number(health.unsubscribed || 0).toLocaleString()}</strong></article>
+        </div>
+        ${(health.issues || []).length ? `<div class="notice warning" style="margin-top:14px"><span>!</span><div>${(health.issues || []).map((issue) => escapeHtml(issue)).join("<br>")}</div></div>` : `<div class="notice" style="margin-top:14px"><span>i</span><div>Webhook correlation and suppression synchronization look complete.</div></div>`}
+      </div>
     </section>
 
     <div class="readiness-layout">
@@ -715,7 +743,7 @@ async function renderSendingSetup() {
         </section>
         <section class="panel volume-plan">
           <div class="panel-head"><div><h2>Volume goal</h2><p>Operating target after a careful ramp</p></div></div>
-          <div class="panel-body"><strong class="volume-goal">${escapeHtml(data.volume_plan.goal)}</strong><p>${escapeHtml(data.volume_plan.launch_policy)}</p><div class="notice warning"><span>!</span><div>Bounce, complaint, and unsubscribe signals must remain healthy before volume increases.</div></div></div>
+          <div class="panel-body"><strong class="volume-goal">${escapeHtml(data.volume_plan.goal)}</strong><p>${escapeHtml(data.volume_plan.launch_policy)}</p><div class="notice warning"><span>!</span><div>Bounce, complaint, and unsubscribe signals must remain healthy before volume increases. The UI never reports healthy when webhook correlation is incomplete.</div></div></div>
         </section>
       </div>
     </div>
@@ -1119,7 +1147,7 @@ function renderCampaignCard(campaign) {
     || (campaign.status === "paused" && can("campaigns.send"))
   );
   const launchable = can("campaigns.send") && ["draft", "paused"].includes(campaign.status);
-  const canPreview = can("campaigns.manage");
+  const canPreview = can("campaigns.send");
   return `<article class="campaign-card" data-campaign-id="${escapeHtml(campaign.id)}">
     <div class="campaign-card-top"><span class="subtext">${escapeHtml(campaign.list_name)} · ${escapeHtml(titleCase(campaign.content_mode || "custom_html"))}</span>${statusPill(campaign.status)}</div>
     <h3>${escapeHtml(campaign.name)}</h3><p>${escapeHtml(campaign.subject)}</p>
@@ -1129,8 +1157,8 @@ function renderCampaignCard(campaign) {
       <button class="button small" data-action="view" data-id="${escapeHtml(campaign.id)}">Details</button>
       ${editable ? `<button class="button small ghost" data-action="edit" data-id="${escapeHtml(campaign.id)}">Edit</button>` : ""}
       ${canPreview ? `<button class="button small ghost" data-action="test" data-id="${escapeHtml(campaign.id)}">Preview</button>` : ""}
-      ${can("campaigns.send") && campaign.status === "sending" ? `<button class="button small" data-action="pause" data-id="${escapeHtml(campaign.id)}">Pause</button>` : ""}
-      ${launchable ? `<button class="button small primary" data-action="${campaign.status === "paused" ? "resume" : "launch"}" data-id="${escapeHtml(campaign.id)}">${campaign.status === "paused" ? "Resume delivery" : (isLiveDelivery() ? "Start delivery" : "Send in Dev Mode")}</button>` : ""}
+      ${can("campaigns.send") && campaign.status === "sending" ? `<button class="button small" data-action="pause" data-id="${escapeHtml(campaign.id)}">${isLiveDelivery() ? "Cancel at provider" : "Pause"}</button>` : ""}
+      ${launchable ? `<button class="button small primary" data-action="${campaign.status === "paused" ? "resume" : "launch"}" data-id="${escapeHtml(campaign.id)}">${campaign.status === "paused" ? "Return to draft" : (isLiveDelivery() ? "Start delivery" : "Send in Dev Mode")}</button>` : ""}
     </div>
   </article>`;
 }
@@ -1205,7 +1233,9 @@ async function openCampaignComposer(campaignId = null) {
     custom_html: { schema_version: 1, html_body: campaign.html_body || defaultTemplate, text_body: campaign.text_body || defaultPlainContent },
     plain_text: selectedMode === "plain_text" ? { schema_version: 1, plain_text: storedContent.plain_text || campaign.text_body || defaultPlainContent } : { schema_version: 1, plain_text: defaultPlainContent },
   };
-  const defaultFromName = campaign.from_name || state.session?.user?.name || "CTN";
+  const defaultFromName = campaign.from_name || state.session?.user?.name || state.session?.company_name || "Sender";
+  const enforcedFrom = state.session?.enforced_from_email || "";
+  const defaultFromEmail = campaign.from_email || enforcedFrom || "";
   const defaultCampaignName = campaign.name || (campaignId ? "" : "Untitled campaign");
   const totalAttachmentCount = () => attachments.length + pendingFiles.length;
   const totalAttachmentBytes = () => (
@@ -1217,7 +1247,8 @@ async function openCampaignComposer(campaignId = null) {
       <div class="composer-fields">
         <label>Internal campaign name<input name="name" maxlength="160" value="${escapeHtml(defaultCampaignName)}" placeholder="Untitled campaign" required /></label>
         <label>Audience<select name="list_id" required>${listOptions(lists, campaign.list_id || lists[0]?.id)}</select><span class="help">Suppression is checked again immediately before delivery.</span></label>
-        <div class="form-grid"><label>From name<input name="from_name" value="${escapeHtml(defaultFromName)}" placeholder="Name the receiver will see" required /></label><label>From email<input name="from_email" type="email" value="${escapeHtml(campaign.from_email || "noreply@ctn-sk.com")}" required /></label></div>
+        <div class="form-grid"><label>From name<input name="from_name" value="${escapeHtml(defaultFromName)}" placeholder="Name the receiver will see" required /></label><label>From email<input name="from_email" type="email" value="${escapeHtml(defaultFromEmail)}" ${enforcedFrom ? "readonly" : ""} required /><span class="help">${enforcedFrom ? `Enforced sender: ${escapeHtml(enforcedFrom)}` : "Set SENDSTACK_FROM_EMAIL to lock the production From address."}</span></label></div>
+        ${state.session?.reply_to_email ? `<p class="help">Reply-To: ${escapeHtml(state.session.reply_to_email)}</p>` : `<p class="help">Configure SENDSTACK_REPLY_TO_EMAIL before live sending.</p>`}
         <label>Subject<input name="subject" maxlength="250" value="${escapeHtml(campaign.subject || "An update from CTN")}" required /></label>
         ${contentModePicker(selectedMode)}
         <div id="mode-editor-host">${modeEditorMarkup(selectedMode, modeDrafts[selectedMode])}</div>
@@ -1485,11 +1516,15 @@ async function openCampaignDetails(campaignId) {
 }
 
 async function openTestSend(campaignId) {
+  if (!can("campaigns.send")) {
+    toast("Only administrators can send live or counted test previews.", true);
+    return;
+  }
   const { campaign } = await api(`/api/campaigns/${campaignId}`);
   const live = isLiveDelivery();
   const defaultEmail = live
     ? (state.session?.user?.email || "")
-    : (state.session?.user?.email || "owner@example.test");
+    : (state.session?.user?.email || "");
   const noticeClass = live ? "notice warning" : "notice";
   const submitLabel = live ? "Send live preview" : "Capture preview";
   openModal("Send a preview", "Before you send", `
@@ -1498,7 +1533,7 @@ async function openTestSend(campaignId) {
       <div class="metric-line"><span>Campaign</span><strong>${escapeHtml(campaign.name)}</strong></div>
       <div class="metric-line"><span>Subject</span><strong>${escapeHtml(campaign.subject)}</strong></div>
       <div class="metric-line"><span>Status</span><strong>${escapeHtml(deliveryStatusLabel())}</strong></div>
-      <label>Preview recipient<input name="email" type="email" value="${escapeHtml(defaultEmail)}" placeholder="name@example.com" required autocomplete="email" /></label>
+      <label>Preview recipient<input name="email" type="email" value="${escapeHtml(defaultEmail)}" placeholder="name@example.com" required autocomplete="email" /><span class="help">${live ? "Must be on SENDSTACK_TEST_RECIPIENT_ALLOWLIST and counts toward the daily limit." : "Counts toward the daily limit. Special-use domains are rejected."}</span></label>
       ${live ? `<label class="confirm-ack"><input type="checkbox" name="ack_live" required /><span>I understand this sends a real email to the address above.</span></label>` : `<p class="help">Result appears in Deliveries as Captured — nothing is mailed externally.</p>`}
       <p class="form-error" role="alert"></p>
       <div class="form-actions">
@@ -1604,7 +1639,7 @@ async function executeCampaignAction(action, id) {
   try {
     const result = await api(`/api/campaigns/${id}/${action}`, { method: "POST", body: {} });
     if (action === "launch") toast(launchOutcomeMessage(result));
-    else if (action === "pause") toast("Delivery paused");
+    else if (action === "pause") toast(isLiveDelivery() ? "Provider cancel requested" : "Delivery paused");
     else if (action === "resume") toast("Delivery resumed");
     else toast(`Campaign ${action}d`);
     await renderCampaigns();

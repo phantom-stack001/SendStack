@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import { Fraunces, Manrope } from "next/font/google";
 import Link from "next/link";
+import { getPublicSiteCopy } from "@/lib/site-identity";
 import styles from "./page.module.css";
 
 const display = Fraunces({
@@ -41,6 +42,7 @@ const services = [
 ];
 
 export default function LandingPage() {
+  const site = getPublicSiteCopy();
   return (
     <div className={`${styles.page} ${display.variable} ${sans.variable}`}>
       <div className={styles.atmosphere} aria-hidden="true">
@@ -143,9 +145,9 @@ export default function LandingPage() {
               </div>
               <div className={styles.aboutCopy}>
                 <p>
-                  Communication &amp; Technology Network is building accountable delivery for teams
-                  that care about inbox placement, consent, and clear ownership. Replace this copy
-                  with your market, geography, and proof points.
+                  {site.displayCompany
+                    ? `${site.displayCompany} builds accountable delivery for teams that care about inbox placement, consent, and clear ownership.`
+                    : "Business identity is not configured yet. Set SENDSTACK_COMPANY_NAME before publishing operator details."}
                 </p>
                 <p>
                   A public site, working contact details, and published policies help recipients and
@@ -163,18 +165,23 @@ export default function LandingPage() {
                 <p className={styles.kickerLight}>Contact</p>
                 <h2 id="contact-heading">Start a conversation</h2>
                 <p className={styles.contactLead}>
-                  Reach a monitored inbox. Update the postal line with your registered address before
-                  launch.
+                  {site.setupRequired
+                    ? "Contact details are unavailable until company name, postal address, and a monitored inbox are configured."
+                    : "Reach a monitored inbox. Postal details below come from the configured operator identity."}
                 </p>
               </div>
               <ul className={styles.contactList}>
                 <li>
                   <span>Email</span>
-                  <a href="mailto:hello@ctn-sk.com">hello@ctn-sk.com</a>
+                  {site.displayEmail ? (
+                    <a href={`mailto:${site.displayEmail}`}>{site.displayEmail}</a>
+                  ) : (
+                    <span>Not configured</span>
+                  )}
                 </li>
                 <li>
                   <span>Postal</span>
-                  <span>[Street], [City], [Country]</span>
+                  <span>{site.displayPostal || "Not configured"}</span>
                 </li>
                 <li>
                   <span>Workspace</span>
@@ -189,7 +196,7 @@ export default function LandingPage() {
       <footer className={styles.footer}>
         <div className={styles.shell}>
           <div className={styles.footerRow}>
-            <p>&copy; {new Date().getFullYear()} Communication &amp; Technology Network</p>
+            <p>&copy; {new Date().getFullYear()} {site.displayCompany || "SendStack operator"}</p>
             <div className={styles.footerLinks}>
               <Link href="/privacy">Privacy</Link>
               <Link href="/terms">Terms</Link>

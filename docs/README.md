@@ -7,3 +7,4 @@ Living project docs for the current architecture. Run instructions live in the r
 | [Product](product.md) | Goals, roles, modules, and MVP boundaries |
 | [Architecture](architecture.md) | Production and local test stacks, delivery contract |
 | [Deployment](deployment.md) | Vercel + PostgreSQL + Resend handover, gates, and env vars |
+| [Post-remediation](post-remediation.md) | Operator-only checklist after deliverability hardening |

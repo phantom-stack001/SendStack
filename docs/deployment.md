@@ -75,8 +75,16 @@ The production implementation should consume these Vercel environment variables.
 | `RESEND_WEBHOOK_SECRET` | Signature verification for the raw webhook request |
 | `SENDSTACK_PUBLIC_URL` | HTTPS production origin used in links and callbacks |
 | `SENDSTACK_SESSION_SECRET` | Production session signing/encryption secret |
-| `SENDSTACK_FROM_EMAIL` | Verified production sender address |
+| `SENDSTACK_FROM_EMAIL` | Enforced verified/monitored From address (not a readiness hint only) |
+| `SENDSTACK_REPLY_TO_EMAIL` | Enforced monitored Reply-To address |
+| `SENDSTACK_COMPANY_NAME` | Legal/trading name for compliance footers and public pages |
+| `SENDSTACK_POSTAL_ADDRESS` | Real postal address for compliance footers and public pages |
+| `SENDSTACK_ALLOWED_LINK_DOMAINS` | Comma-separated HTTP(S) link host allowlist for campaign content |
+| `SENDSTACK_TEST_RECIPIENT_ALLOWLIST` | Exact addresses permitted for administrator live test sends |
+| `SENDSTACK_DAILY_LIMIT` | Daily volume cap across direct, test, and broadcast recipient paths |
 | `SENDSTACK_LIVE_SEND_ENABLED` | Explicit kill switch; default must be `false` |
+
+See also [post-remediation.md](post-remediation.md) for operator-only DNS, DKIM, DMARC, Spamhaus, and warm-up steps.
 
 ## Launch gates
 

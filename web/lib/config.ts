@@ -15,6 +15,12 @@ const deliveryMode =
   process.env.SENDSTACK_DELIVERY_MODE?.trim().toLowerCase() ||
   (liveSendEnabled && process.env.RESEND_API_KEY ? "resend" : "sandbox");
 
+const publicUrl = (process.env.SENDSTACK_PUBLIC_URL ?? "").trim();
+const cookieSecure =
+  booleanEnv("SENDSTACK_COOKIE_SECURE", false) ||
+  vercelEnv === "production" ||
+  publicUrl.startsWith("https://");
+
 export const config = {
   nodeEnv,
   isVercelProduction: vercelEnv === "production",
@@ -25,5 +31,7 @@ export const config = {
   adminEmail: process.env.SENDSTACK_ADMIN_EMAIL ?? "admin@sendstack.local",
   adminPassword: process.env.SENDSTACK_ADMIN_PASSWORD ?? "ChangeMe123!",
   defaultAdminPassword: "ChangeMe123!",
-  cookieSecure: booleanEnv("SENDSTACK_COOKIE_SECURE", false),
+  cookieSecure,
+  publicUrl: publicUrl || "http://localhost:3000",
+  dailyLimit: Number(process.env.SENDSTACK_DAILY_LIMIT ?? 50) || 50,
 };
