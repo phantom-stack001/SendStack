@@ -18,6 +18,9 @@ export async function POST(request: Request) {
   }
 
   const result = await processResendWebhookEvent(eventId, event, body);
+  if (result.retryable) {
+    return Response.json({ received: false, retryable: true }, { status: 503 });
+  }
   if (result.duplicate) {
     return Response.json({ received: true, duplicate: true });
   }

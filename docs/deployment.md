@@ -84,6 +84,8 @@ The production implementation should consume these Vercel environment variables.
 | `SENDSTACK_DAILY_LIMIT` | Daily volume cap across direct, test, and broadcast recipient paths |
 | `SENDSTACK_LIVE_SEND_ENABLED` | Explicit kill switch; default must be `false` |
 
+If live send is enabled but identity/provider settings are incomplete, the app still boots (login and session keep working). Issues are logged at startup; readiness and send APIs keep live mail blocked until the gaps are fixed.
+
 See also [post-remediation.md](post-remediation.md) for operator-only DNS, DKIM, DMARC, Spamhaus, and warm-up steps.
 
 ## Launch gates

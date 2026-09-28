@@ -10,10 +10,11 @@ import {
   statusFromResendEvent,
 } from "../lib/delivery-status";
 import { identityComplianceGaps, isTestRecipientAllowed, loadSendingIdentity } from "../lib/sending-identity";
+import { applyComplianceFooter } from "../lib/compliance-footer";
 import { runCampaignPreflight } from "../lib/preflight";
 import { isSpecialUseRecipientDomain, validateLiveRecipient } from "../lib/recipients";
 import { requiredPermission } from "../lib/rbac";
-import { validateProductionEnv } from "../lib/env";
+import { liveSendBootIssues, validateProductionEnv } from "../lib/env";
 import { buildIdempotencyKey } from "../lib/providers/resend";
 
 const originalEnv = { ...process.env };
@@ -30,6 +31,13 @@ function setIdentityEnv(overrides: Record<string, string> = {}) {
   process.env.SENDSTACK_POSTAL_ADDRESS = "1 Example Street, Example City, EX1 1AA";
   process.env.SENDSTACK_ALLOWED_LINK_DOMAINS = "example.com,www.example.com";
   process.env.SENDSTACK_TEST_RECIPIENT_ALLOWLIST = "ops@example.com,qa@example.com";
+  process.env.SENDSTACK_PUBLIC_URL = "https://app.example.com";
+  process.env.SENDSTACK_HEALTH_MIN_SAMPLE = "50";
+  process.env.SENDSTACK_HEALTH_MAX_BOUNCE_RATE = "0.05";
+  process.env.SENDSTACK_HEALTH_MAX_COMPLAINT_RATE = "0.001";
+  process.env.SENDSTACK_HEALTH_MAX_UNSUBSCRIBE_RATE = "0.02";
+  process.env.SENDSTACK_HEALTH_MAX_DELAY_RATE = "0.2";
+  process.env.SENDSTACK_HEALTH_MAX_FAILURE_RATE = "0.05";
   Object.assign(process.env, overrides);
 }
 
@@ -99,13 +107,17 @@ describe("campaign preflight", () => {
       expect(bad.errors.join(" ")).toMatch(/RE:|FW:|placeholder|not in SENDSTACK_ALLOWED_LINK_DOMAINS|archive/i);
     }
 
+    const footered = applyComplianceFooter(
+      '<p>Hello {{first_name}}</p><p><a href="https://www.example.com/updates">Read more</a></p><p><a href="{{unsubscribe_url}}">Unsubscribe</a></p>',
+      "Hello {{first_name}}\nRead more: https://www.example.com/updates\nUnsubscribe: {{unsubscribe_url}}",
+      loadSendingIdentity(),
+    );
     const good = runCampaignPreflight({
       subject: "March product update",
       fromName: "Example Operator",
       fromEmail: "news@example.com",
-      htmlBody:
-        '<p>Hello {{first_name}}</p><p><a href="https://www.example.com/updates">Read more</a></p><p><a href="{{unsubscribe_url}}">Unsubscribe</a></p>',
-      textBody: "Hello {{first_name}}\nRead more: https://www.example.com/updates\nUnsubscribe: {{unsubscribe_url}}",
+      htmlBody: footered.html,
+      textBody: footered.text,
       attachmentExtensions: ["pdf"],
     });
     expect(good.ok).toBe(true);
@@ -197,19 +209,27 @@ describe("rbac for test sends and delivery health", () => {
 });
 
 describe("production readiness identity gate", () => {
-  it("fails when live sending is enabled without identity settings", () => {
+  it("logs live-send gaps without crashing boot when identity settings are missing", () => {
     process.env.VERCEL_ENV = "production";
     process.env.DATABASE_URL = "postgres://example";
     process.env.SENDSTACK_SESSION_SECRET = "x".repeat(40);
     process.env.SENDSTACK_LIVE_SEND_ENABLED = "true";
     process.env.RESEND_API_KEY = "re_test";
     process.env.RESEND_WEBHOOK_SECRET = "whsec_test";
+    process.env.CRON_SECRET = "cron_test_secret";
     delete process.env.SENDSTACK_FROM_EMAIL;
     delete process.env.SENDSTACK_REPLY_TO_EMAIL;
     delete process.env.SENDSTACK_COMPANY_NAME;
     delete process.env.SENDSTACK_POSTAL_ADDRESS;
     delete process.env.SENDSTACK_ALLOWED_LINK_DOMAINS;
-    expect(() => validateProductionEnv()).toThrow(/identity\/compliance/i);
+    const issues = liveSendBootIssues();
+    expect(issues.some((issue) => /identity\/compliance/i.test(issue))).toBe(true);
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    expect(() => validateProductionEnv()).not.toThrow();
+    expect(errorSpy.mock.calls.some((call) => String(call[0]).includes("identity/compliance"))).toBe(
+      true,
+    );
+    errorSpy.mockRestore();
   });
 
   it("passes when identity and provider settings are complete", () => {
@@ -220,6 +240,8 @@ describe("production readiness identity gate", () => {
     process.env.RESEND_API_KEY = "re_test";
     process.env.RESEND_WEBHOOK_SECRET = "whsec_test";
     setIdentityEnv();
+    process.env.CRON_SECRET = "cron_test_secret";
+    expect(liveSendBootIssues()).toEqual([]);
     expect(() => validateProductionEnv()).not.toThrow();
   });
 });

@@ -25,7 +25,9 @@ export const config = {
   nodeEnv,
   isVercelProduction: vercelEnv === "production",
   isVercelPreview: vercelEnv === "preview",
-  databaseUrl: process.env.DATABASE_URL ?? "",
+  get databaseUrl() {
+    return process.env.DATABASE_URL ?? "";
+  },
   deliveryMode,
   liveSendEnabled,
   adminEmail: process.env.SENDSTACK_ADMIN_EMAIL ?? "admin@sendstack.local",
@@ -33,5 +35,7 @@ export const config = {
   defaultAdminPassword: "ChangeMe123!",
   cookieSecure,
   publicUrl: publicUrl || "http://localhost:3000",
-  dailyLimit: Number(process.env.SENDSTACK_DAILY_LIMIT ?? 50) || 50,
+  get dailyLimit() {
+    return Number(process.env.SENDSTACK_DAILY_LIMIT ?? 50) || 50;
+  },
 };

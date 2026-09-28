@@ -39,7 +39,7 @@ Open http://localhost:3000 and sign in. Default local seed credentials (when use
 ## Delivery modes
 
 - **Sandbox (default):** campaign launch processes recipients inside the request and writes local `messages` rows. No external email is sent.
-- **Live Resend:** requires `RESEND_API_KEY`, `RESEND_WEBHOOK_SECRET`, enforced identity settings (`SENDSTACK_FROM_EMAIL`, `SENDSTACK_REPLY_TO_EMAIL`, `SENDSTACK_COMPANY_NAME`, `SENDSTACK_POSTAL_ADDRESS`, `SENDSTACK_ALLOWED_LINK_DOMAINS`), and `SENDSTACK_LIVE_SEND_ENABLED=true`. Keep live send locked until launch gates pass. Vercel **preview** deployments cannot live-send even if those vars are present. Apply migration `0005_deliverability_hardening.sql` before relying on cancel/health/idempotency columns.
+- **Live Resend:** requires `RESEND_API_KEY`, `RESEND_WEBHOOK_SECRET`, enforced identity settings (`SENDSTACK_FROM_EMAIL`, `SENDSTACK_REPLY_TO_EMAIL`, `SENDSTACK_COMPANY_NAME`, `SENDSTACK_POSTAL_ADDRESS`, `SENDSTACK_ALLOWED_LINK_DOMAINS`), and `SENDSTACK_LIVE_SEND_ENABLED=true`. Keep live send locked until launch gates pass. Incomplete live-send config is logged at boot and blocks send/readiness APIs; it does **not** crash login or other routes. Vercel **preview** deployments cannot live-send even if those vars are present. Apply migration `0005_deliverability_hardening.sql` before relying on cancel/health/idempotency columns.
 
 Webhook endpoint: `POST /api/webhooks/resend`
 
@@ -62,7 +62,7 @@ Cloudflare remains DNS-only for the app hostname and Resend SPF/DKIM/DMARC recor
 
 ## Production guards built into this app
 
-- Startup env validation fails loudly in production on missing DB/session secret
+- Startup env validation fails loudly in production on missing DB/session secret; incomplete live-send identity/provider settings are logged only (send paths stay locked)
 - Secure cookies auto-enable on Vercel production / HTTPS public URL
 - Preview environments cannot unlock live send
 - Default admin password requires change before mutating APIs

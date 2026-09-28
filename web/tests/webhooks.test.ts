@@ -1,71 +1,120 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const queryMock = vi.fn();
-const applySuppressionMock = vi.fn();
+const connectMock = vi.fn();
 
 vi.mock("../lib/db", () => ({
   query: (...args: unknown[]) => queryMock(...args),
+  getPool: () => ({ connect: connectMock }),
 }));
 
+const applySuppressionMock = vi.fn();
 vi.mock("../lib/suppressions", () => ({
   applySuppression: (...args: unknown[]) => applySuppressionMock(...args),
 }));
 
+vi.mock("../lib/launch-jobs", () => ({
+  reconcileCampaignAfterCancel: vi.fn(async () => undefined),
+}));
+
 import { processResendWebhookEvent } from "../lib/providers/webhook-processor";
+
+function setupClient(handler: (sql: string) => { rows: unknown[] }) {
+  const client = {
+    query: vi.fn(async (sql: string) => handler(String(sql))),
+    release: vi.fn(),
+  };
+  connectMock.mockResolvedValue(client);
+  queryMock.mockImplementation(async (sql: string) => {
+    const text = String(sql);
+    if (text.includes("SET processed_at = NOW()") && text.includes("claim_token")) {
+      return { rows: [{ id: "evt" }] };
+    }
+    if (text.includes("SET claim_owner = NULL") && text.includes("claim_token")) {
+      return { rows: [] };
+    }
+    return handler(text);
+  });
+  applySuppressionMock.mockResolvedValue(undefined);
+  return client;
+}
 
 describe("resend webhook processor", () => {
   beforeEach(() => {
     queryMock.mockReset();
+    connectMock.mockReset();
     applySuppressionMock.mockReset();
-    applySuppressionMock.mockResolvedValue(undefined);
   });
 
   it("stops on duplicate event ids without reprocessing", async () => {
-    queryMock
-      .mockResolvedValueOnce({ rows: [] }) // insert conflict / no return
-      .mockResolvedValueOnce({ rows: [{ processed_at: "2026-01-01T00:00:00Z" }] }); // already processed
+    setupClient((sql) => {
+      if (sql.startsWith("BEGIN") || sql.startsWith("COMMIT") || sql.startsWith("INSERT INTO provider_events")) {
+        return { rows: [] };
+      }
+      if (sql.includes("SET claim_owner")) {
+        return { rows: [] }; // claim fails
+      }
+      if (sql.includes("SELECT processed_at")) {
+        return { rows: [{ processed_at: "2026-01-01T00:00:00Z" }] };
+      }
+      return { rows: [] };
+    });
+
     const result = await processResendWebhookEvent(
       "evt_dup",
       { type: "email.delivered", data: { email_id: "email_1", to: ["a@contoso.com"] } },
       "{}",
     );
     expect(result.duplicate).toBe(true);
-    expect(result.processed).toBe(false);
+    expect(result.processed).toBe(true);
     expect(applySuppressionMock).not.toHaveBeenCalled();
   });
 
+  it("returns retryable when claim fails but event is still unprocessed", async () => {
+    setupClient((sql) => {
+      if (sql.includes("SET claim_owner")) return { rows: [] };
+      if (sql.includes("SELECT processed_at")) return { rows: [{ processed_at: null }] };
+      return { rows: [] };
+    });
+
+    const result = await processResendWebhookEvent(
+      "evt_busy",
+      { type: "email.delivered", data: { email_id: "email_1", to: ["a@contoso.com"] } },
+      "{}",
+    );
+    expect(result.duplicate).toBe(false);
+    expect(result.processed).toBe(false);
+    expect(result.retryable).toBe(true);
+  });
+
   it("processes contact.updated unsubscribe into local suppression", async () => {
-    queryMock
-      .mockResolvedValueOnce({ rows: [{ id: "evt_1" }] }) // insert event
-      .mockResolvedValueOnce({ rows: [] }) // resolve by provider id
-      .mockResolvedValueOnce({ rows: [] }) // audit
-      .mockResolvedValueOnce({ rows: [] }) // mark processed
-      ;
-    // The processor has additional queries; provide permissive defaults after the first few.
-    queryMock.mockResolvedValue({ rows: [] });
+    setupClient((sql) => {
+      if (sql.includes("SET claim_owner")) return { rows: [{ id: "evt_1" }] };
+      if (sql.includes("INSERT INTO audit_events")) return { rows: [] };
+      return { rows: [] };
+    });
 
     const result = await processResendWebhookEvent(
       "evt_1",
-      {
-        type: "contact.updated",
-        data: { email: "user@contoso.com", unsubscribed: true },
-      },
+      { type: "contact.updated", data: { email: "user@contoso.com", unsubscribed: true } },
       '{"type":"contact.updated"}',
     );
     expect(result.duplicate).toBe(false);
     expect(applySuppressionMock).toHaveBeenCalledWith("user@contoso.com", "unsubscribe", "resend_webhook");
   });
 
-  it("applies suppressions for bounce complaint suppressed and failed paths", async () => {
+  it("applies suppressions for bounce complaint suppressed paths", async () => {
     for (const [type, reason] of [
       ["email.bounced", "hard_bounce"],
       ["email.complained", "complaint"],
       ["email.suppressed", "provider_suppression"],
     ] as const) {
-      queryMock.mockReset();
-      applySuppressionMock.mockReset();
-      applySuppressionMock.mockResolvedValue(undefined);
-      queryMock.mockResolvedValue({ rows: [{ id: "evt" }, { id: "msg", status: "submitted" }, { campaign_id: "cam_1" }] });
+      applySuppressionMock.mockClear();
+      setupClient((sql) => {
+        if (sql.includes("SET claim_owner")) return { rows: [{ id: "evt" }] };
+        return { rows: [] };
+      });
+      queryMock.mockResolvedValue({ rows: [{ id: "msg", status: "submitted" }] });
 
       await processResendWebhookEvent(
         `evt_${type}`,
@@ -78,20 +127,18 @@ describe("resend webhook processor", () => {
 
   it("handles delayed sent and delivered without suppressing", async () => {
     for (const type of ["email.sent", "email.delivered", "email.delivery_delayed", "email.failed"]) {
-      queryMock.mockReset();
-      applySuppressionMock.mockReset();
-      queryMock.mockResolvedValue({ rows: [{ id: "evt" }, { id: "msg", status: "submitted" }] });
+      applySuppressionMock.mockClear();
+      setupClient((sql) => {
+        if (sql.includes("SET claim_owner")) return { rows: [{ id: "evt" }] };
+        return { rows: [] };
+      });
+      queryMock.mockResolvedValue({ rows: [{ id: "msg", status: "submitted" }] });
       await processResendWebhookEvent(
         `evt_${type}`,
         { type, data: { email_id: "email_y", to: ["ok@contoso.com"] } },
         `{"type":"${type}"}`,
       );
-      if (type === "email.failed") {
-        // failed does not auto-suppress unless provider marks suppressed
-        expect(applySuppressionMock).not.toHaveBeenCalled();
-      } else {
-        expect(applySuppressionMock).not.toHaveBeenCalled();
-      }
+      expect(applySuppressionMock).not.toHaveBeenCalled();
     }
   });
 });

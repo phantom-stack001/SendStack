@@ -299,6 +299,7 @@ function statusPill(status, { title } = {}) {
     draft: "Draft",
     failed: "Failed",
     active: "Active",
+    pending_consent: "Pending consent",
     inactive: "Inactive",
   };
   const label = labels[safe] || titleCase(safe);
@@ -454,7 +455,7 @@ async function api(path, options = {}) {
   return data;
 }
 
-const ATTACHMENT_ACCEPT = ".png,.jpg,.jpeg,.gif,.webp,.pdf,.zip";
+const ATTACHMENT_ACCEPT = ".png,.jpg,.jpeg,.gif,.webp,.pdf";
 const ATTACHMENT_MAX_FILE_BYTES = 5 * 1024 * 1024;
 const ATTACHMENT_MAX_COUNT = 3;
 const ATTACHMENT_MAX_TOTAL_BYTES = 10 * 1024 * 1024;
@@ -989,16 +990,29 @@ async function openContactModal(contact = null, preferredListId = "") {
     ? contact.list_ids[0]
     : preferredListId || lists[0]?.id || "";
   const filterListId = preferredListId || "";
+  const statusValue = contact?.status === "suppressed"
+    ? "suppressed"
+    : contact?.status === "active"
+      ? ""
+      : "pending_consent";
   openModal(editing ? "Edit contact" : "Add contact", "Audience", `
     <form id="contact-form" class="stack">
       <div class="form-grid"><label>First name<input name="first_name" maxlength="120" value="${escapeHtml(contact?.first_name || "")}" /></label><label>Last name<input name="last_name" maxlength="120" value="${escapeHtml(contact?.last_name || "")}" /></label></div>
       <label>Email address<input name="email" type="email" value="${escapeHtml(contact?.email || "")}" required /></label>
       <label>List<select name="list_id" required>${listOptions(lists, selectedListId)}</select></label>
-      ${editing ? `<label>Status<select name="status"><option value="active" ${contact?.status === "active" ? "selected" : ""}>Active</option><option value="suppressed" ${contact?.status === "suppressed" ? "selected" : ""}>Suppressed</option></select></label>` : ""}
+      ${editing ? `<label>Status<select name="status">
+        ${contact?.status === "active" ? `<option value="" selected>Keep Active</option>` : ""}
+        <option value="pending_consent" ${statusValue === "pending_consent" ? "selected" : ""}>Pending consent</option>
+        <option value="suppressed" ${statusValue === "suppressed" ? "selected" : ""}>Suppressed</option>
+      </select><span class="help">Active cannot be set here. Use “Activate with consent evidence” for activation.</span></label>
+      <button type="button" class="button" id="open-activate-contact">Activate with consent evidence…</button>` : ""}
       <label>Consent source<input name="consent_source" value="${escapeHtml(contact?.consent_source || "manual_entry")}" maxlength="120" required /><span class="help">Use only permission-based contacts with documented consent.</span></label>
       <p class="form-error" role="alert"></p>
       <div class="form-actions"><button type="button" class="button" data-close-modal>Cancel</button><button class="button primary" type="submit">${editing ? "Save changes" : "Add contact"}</button></div>
     </form>`, true);
+  document.querySelector("#open-activate-contact")?.addEventListener("click", () => {
+    openActivateContactModal(contact);
+  });
   document.querySelector("#contact-form").addEventListener("submit", async (event) => {
     event.preventDefault();
     const form = event.currentTarget;
@@ -1006,10 +1020,38 @@ async function openContactModal(contact = null, preferredListId = "") {
     const path = editing ? `/api/contacts/${contact.id}` : "/api/contacts";
     const method = editing ? "PATCH" : "POST";
     if (!editing) delete data.status;
+    if (editing && !data.status) delete data.status;
     await submitForm(form, () => api(path, { method, body: data }), editing ? "Contact updated" : "Contact added");
     if (!form.querySelector(".form-error").textContent) {
       closeModal();
       await renderContacts(document.querySelector("#contact-search")?.value.trim() || "", filterListId);
+    }
+  });
+}
+
+async function openActivateContactModal(contact) {
+  if (!contact?.id) return;
+  openModal("Activate contact", "Consent evidence", `
+    <form id="activate-contact-form" class="stack">
+      <div class="notice"><span>i</span><div>Activation sets status to <strong>Active</strong> only when there is no suppression. Provide how permission was obtained and durable evidence/attestation.</div></div>
+      <p class="subtext">Contact: <strong class="email">${escapeHtml(contact.email || "")}</strong> · Current status: ${statusPill(contact.status || "pending_consent")}</p>
+      <label>Consent source<input name="consent_source" value="${escapeHtml(contact.consent_source || "")}" maxlength="200" required /><span class="help">e.g. double_opt_in_form, written_agreement, in_person_signup</span></label>
+      <label>Consent evidence / attestation<textarea name="consent_evidence" rows="5" maxlength="4000" required placeholder="Describe the evidence (form URL + timestamp, ticket id, signed note, etc.). Minimum 20 characters."></textarea></label>
+      <p class="form-error" role="alert"></p>
+      <div class="form-actions"><button type="button" class="button" data-close-modal>Cancel</button><button class="button primary" type="submit">Activate</button></div>
+    </form>`, true);
+  document.querySelector("#activate-contact-form").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const form = event.currentTarget;
+    const data = Object.fromEntries(new FormData(form));
+    await submitForm(
+      form,
+      () => api(`/api/contacts/${contact.id}/activate`, { method: "POST", body: data }),
+      "Contact activation recorded",
+    );
+    if (!form.querySelector(".form-error").textContent) {
+      closeModal();
+      await renderContacts(document.querySelector("#contact-search")?.value.trim() || "", "");
     }
   });
 }

@@ -1,3 +1,4 @@
+import { assertComplianceFooterPresent } from "./compliance-footer";
 import { loadSendingIdentity, type SendingIdentity } from "./sending-identity";
 import { validateEmailContent } from "./templates";
 
@@ -14,27 +15,212 @@ const PLACEHOLDER_PATTERNS: Array<{ pattern: RegExp; label: string }> = [
 
 const FAKE_THREAD_SUBJECT = /^(re|fw|fwd)\s*:/i;
 
-function extractHttpLinks(html: string, text: string): string[] {
-  const combined = `${html}\n${text}`;
-  const hrefs = [...combined.matchAll(/href\s*=\s*["']([^"']+)["']/gi)].map((match) => match[1]);
-  const bare = [...combined.matchAll(/https?:\/\/[^\s"'<>]+/gi)].map((match) => match[0]);
-  return [...new Set([...hrefs, ...bare])];
+/**
+ * Maintained multi-part and single-label public suffixes that must never be allowlisted alone.
+ * Exact matches on this list (or any single-label TLD) are rejected.
+ */
+export const PUBLIC_SUFFIX_LIST = new Set([
+  "com",
+  "net",
+  "org",
+  "io",
+  "co",
+  "uk",
+  "edu",
+  "gov",
+  "info",
+  "biz",
+  "example",
+  "localhost",
+  "local",
+  "test",
+  "invalid",
+  "co.uk",
+  "com.au",
+  "co.nz",
+  "org.uk",
+  "ac.uk",
+  "gov.uk",
+  "com.br",
+  "co.jp",
+  "com.mx",
+  "co.za",
+  "com.sg",
+  "com.hk",
+  "co.in",
+  "com.cn",
+  "net.au",
+  "org.au",
+  "gov.au",
+  "me.uk",
+  "ltd.uk",
+  "plc.uk",
+]);
+
+/** Only these merge tokens are permitted inside href / URL fields. */
+const SAFE_URL_MERGE_TOKENS = new Set(["{{unsubscribe_url}}", "{{{RESEND_UNSUBSCRIBE_URL}}}"]);
+
+export function validateAllowedLinkDomains(domains: string[]): string[] {
+  const errors: string[] = [];
+  for (const raw of domains) {
+    const domain = raw.trim().toLowerCase().replace(/^\.+/, "");
+    if (!domain) {
+      errors.push("Allowed link domain entries cannot be empty.");
+      continue;
+    }
+    if (domain.includes("/") || domain.includes(":") || domain.includes(" ")) {
+      errors.push(`Allowed link domain “${raw}” must be a hostname only.`);
+      continue;
+    }
+    const labelCount = domain.split(".").filter(Boolean).length;
+    if (PUBLIC_SUFFIX_LIST.has(domain) || labelCount < 2) {
+      errors.push(`Allowed link domain “${raw}” is a public suffix or dangerously broad hostname.`);
+    }
+  }
+  return errors;
 }
 
-function hostFromUrl(raw: string): string | null {
-  const trimmed = raw.trim();
-  if (!trimmed || trimmed.startsWith("{{") || trimmed.startsWith("mailto:") || trimmed.startsWith("#")) {
-    return null;
+/**
+ * Parse SENDSTACK_PUBLIC_URL as a strict https origin.
+ * Rejects credentials, query, fragment, and non-root paths.
+ */
+export function parsePublicOrigin(url: string): string {
+  const trimmed = (url ?? "").trim();
+  if (!trimmed) {
+    throw new Error("SENDSTACK_PUBLIC_URL is required.");
   }
+  let parsed: URL;
   try {
-    const url = new URL(trimmed);
-    if (url.protocol !== "http:" && url.protocol !== "https:") {
-      return null;
-    }
-    return url.hostname.toLowerCase();
+    parsed = new URL(trimmed);
   } catch {
-    return null;
+    throw new Error("SENDSTACK_PUBLIC_URL must be a valid URL.");
   }
+  if (parsed.protocol !== "https:") {
+    throw new Error("SENDSTACK_PUBLIC_URL must use https.");
+  }
+  if (parsed.username || parsed.password) {
+    throw new Error("SENDSTACK_PUBLIC_URL must not include credentials.");
+  }
+  if (parsed.search) {
+    throw new Error("SENDSTACK_PUBLIC_URL must not include a query string.");
+  }
+  if (parsed.hash) {
+    throw new Error("SENDSTACK_PUBLIC_URL must not include a fragment.");
+  }
+  const path = parsed.pathname || "/";
+  if (path !== "/" && path !== "") {
+    throw new Error("SENDSTACK_PUBLIC_URL path must be empty or `/` only.");
+  }
+  if (!parsed.hostname) {
+    throw new Error("SENDSTACK_PUBLIC_URL must include a hostname.");
+  }
+  return parsed.origin;
+}
+
+type ExtractedLink = { raw: string; kind: "href" | "bare" };
+
+function extractLinks(html: string, text: string): ExtractedLink[] {
+  const links: ExtractedLink[] = [];
+  // Quoted and unquoted hrefs.
+  for (const match of html.matchAll(/href\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))/gi)) {
+    const raw = (match[1] ?? match[2] ?? match[3] ?? "").trim();
+    if (raw) links.push({ raw, kind: "href" });
+  }
+  for (const match of `${html}\n${text}`.matchAll(/https?:\/\/[^\s"'<>]+/gi)) {
+    links.push({ raw: match[0], kind: "bare" });
+  }
+  // Protocol-relative links.
+  for (const match of `${html}\n${text}`.matchAll(/(?:^|[\s"'=(])(\/\/[^\s"'<>]+)/gi)) {
+    links.push({ raw: match[1], kind: "bare" });
+  }
+  return links;
+}
+
+function decodeBasicEntities(value: string): string {
+  return value
+    .replace(/&amp;/gi, "&")
+    .replace(/&quot;/gi, '"')
+    .replace(/&#39;/gi, "'")
+    .replace(/&lt;/gi, "<")
+    .replace(/&gt;/gi, ">");
+}
+
+export type LinkValidation =
+  | { ok: true; host: string | null; skipped?: "merge" | "mailto" | "anchor" }
+  | { ok: false; error: string };
+
+export function validateCampaignLink(raw: string, allowedDomains: string[]): LinkValidation {
+  const trimmed = decodeBasicEntities(raw.trim());
+  if (!trimmed) return { ok: false, error: "Empty href is not allowed." };
+
+  if (trimmed.startsWith("{{") || trimmed.startsWith("{{{")) {
+    if (SAFE_URL_MERGE_TOKENS.has(trimmed)) {
+      return { ok: true, host: null, skipped: "merge" };
+    }
+    return {
+      ok: false,
+      error: `Merge token “${raw}” is not permitted in URLs/hrefs. Only {{unsubscribe_url}} or {{{RESEND_UNSUBSCRIBE_URL}}} are allowed.`,
+    };
+  }
+  if (trimmed.startsWith("#")) return { ok: true, host: null, skipped: "anchor" };
+  if (/^mailto:/i.test(trimmed)) return { ok: true, host: null, skipped: "mailto" };
+
+  // Reject mixed merge tokens inside otherwise absolute URLs/hrefs.
+  if (/\{\{|\}\}/.test(trimmed)) {
+    const onlySafe =
+      SAFE_URL_MERGE_TOKENS.has(trimmed) ||
+      [...SAFE_URL_MERGE_TOKENS].some((token) => trimmed === token);
+    if (!onlySafe) {
+      return {
+        ok: false,
+        error: `Unsafe merge token in link href: ${raw}`,
+      };
+    }
+  }
+
+  let candidate = trimmed;
+  if (candidate.startsWith("//")) candidate = `https:${candidate}`;
+
+  let parsed: URL;
+  try {
+    parsed = new URL(candidate);
+  } catch {
+    // Try decoding once for encoded URLs.
+    try {
+      parsed = new URL(decodeURIComponent(candidate));
+    } catch {
+      return { ok: false, error: `Malformed or unclassifiable link: ${raw}` };
+    }
+  }
+
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+    return { ok: false, error: `Disallowed link protocol in ${raw}` };
+  }
+
+  const host = parsed.hostname.toLowerCase();
+  if (!host) return { ok: false, error: `Link is missing a hostname: ${raw}` };
+
+  const allowed = allowedDomains.map((domain) => domain.toLowerCase());
+  const permitted = allowed.some((domain) => host === domain || host.endsWith(`.${domain}`));
+  if (!permitted) {
+    return { ok: false, error: `Link host “${host}” is not in SENDSTACK_ALLOWED_LINK_DOMAINS.` };
+  }
+  return { ok: true, host };
+}
+
+/** Require unsubscribe token in visible body content (not only HTML comments). */
+export function hasVisibleUnsubscribe(html: string, text: string): boolean {
+  const withoutComments = html.replace(/<!--[\s\S]*?-->/g, "");
+  const hiddenStripped = withoutComments
+    .replace(/<script[\s\S]*?<\/script>/gi, "")
+    .replace(/<style[\s\S]*?<\/style>/gi, "")
+    .replace(/<[^>]+hidden[^>]*>[\s\S]*?<\/[^>]+>/gi, "")
+    .replace(/style\s*=\s*["'][^"']*display\s*:\s*none[^"']*["'][^>]*>[\s\S]*?<\/[^>]+>/gi, "");
+  const htmlVisible =
+    /<a\b[^>]*href\s*=\s*["']?\{\{\{?RESEND_UNSUBSCRIBE_URL\}?\}\}["']?[^>]*>[\s\S]*?<\/a>/i.test(hiddenStripped) ||
+    /<a\b[^>]*href\s*=\s*["']?\{\{unsubscribe_url\}\}["']?[^>]*>[\s\S]*?<\/a>/i.test(hiddenStripped);
+  const textVisible = /\{\{\{?RESEND_UNSUBSCRIBE_URL\}?\}\}/.test(text) || /\{\{unsubscribe_url\}\}/.test(text);
+  return htmlVisible && textVisible;
 }
 
 export type PreflightInput = {
@@ -44,12 +230,13 @@ export type PreflightInput = {
   fromEmail: string;
   fromName: string;
   attachmentExtensions?: string[];
+  attachmentCount?: number;
+  forBroadcast?: boolean;
   identity?: SendingIdentity;
+  requirePublicHttps?: boolean;
 };
 
-export type PreflightResult =
-  | { ok: true }
-  | { ok: false; errors: string[] };
+export type PreflightResult = { ok: true } | { ok: false; errors: string[] };
 
 export function runCampaignPreflight(input: PreflightInput): PreflightResult {
   const identity = input.identity ?? loadSendingIdentity();
@@ -79,43 +266,60 @@ export function runCampaignPreflight(input: PreflightInput): PreflightResult {
     errors.push(error instanceof Error ? error.message : "Campaign content is invalid.");
   }
 
+  if (!hasVisibleUnsubscribe(htmlBody, textBody)) {
+    errors.push("A visible unsubscribe link is required in HTML and plain text (not hidden or commented).");
+  }
+
   if (!identity.fromEmail) {
     errors.push("SENDSTACK_FROM_EMAIL must be configured before launch.");
   } else if (input.fromEmail && input.fromEmail !== identity.fromEmail) {
     errors.push(`From address must be the enforced sender (${identity.fromEmail}).`);
   }
-
-  if (!identity.replyToEmail) {
-    errors.push("SENDSTACK_REPLY_TO_EMAIL must be configured before launch.");
-  }
-  if (!identity.companyName) {
-    errors.push("SENDSTACK_COMPANY_NAME must be configured before launch.");
-  }
-  if (!identity.postalAddress) {
-    errors.push("SENDSTACK_POSTAL_ADDRESS must be configured before launch.");
-  }
+  if (!identity.replyToEmail) errors.push("SENDSTACK_REPLY_TO_EMAIL must be configured before launch.");
+  if (!identity.companyName) errors.push("SENDSTACK_COMPANY_NAME must be configured before launch.");
+  if (!identity.postalAddress) errors.push("SENDSTACK_POSTAL_ADDRESS must be configured before launch.");
   if (!identity.allowedLinkDomains.length) {
     errors.push("SENDSTACK_ALLOWED_LINK_DOMAINS must be configured before launch.");
+  } else {
+    errors.push(...validateAllowedLinkDomains(identity.allowedLinkDomains));
   }
 
-  const allowed = new Set(identity.allowedLinkDomains.map((domain) => domain.toLowerCase()));
-  for (const link of extractHttpLinks(htmlBody, textBody)) {
-    const host = hostFromUrl(link);
-    if (!host) continue;
-    const permitted = [...allowed].some((domain) => host === domain || host.endsWith(`.${domain}`));
-    if (!permitted) {
-      errors.push(`Link host “${host}” is not in SENDSTACK_ALLOWED_LINK_DOMAINS.`);
+  if (input.requirePublicHttps) {
+    try {
+      parsePublicOrigin(process.env.SENDSTACK_PUBLIC_URL ?? "");
+    } catch (error) {
+      errors.push(
+        error instanceof Error
+          ? error.message
+          : "SENDSTACK_PUBLIC_URL must be a valid HTTPS origin before live direct/test email.",
+      );
     }
   }
 
+  for (const link of extractLinks(htmlBody, textBody)) {
+    const result = validateCampaignLink(link.raw, identity.allowedLinkDomains);
+    if (!result.ok) errors.push(result.error);
+  }
+
   for (const extension of input.attachmentExtensions ?? []) {
-    if (extension === "zip" || extension === "rar" || extension === "7z" || extension === "gz") {
+    if (["zip", "rar", "7z", "gz", "tgz", "tar"].includes(extension)) {
       errors.push("Archive attachments are not allowed. Remove ZIP/archive files before launch.");
     }
   }
 
-  if (!htmlBody.includes("{{unsubscribe_url}}") && !htmlBody.includes("{{{RESEND_UNSUBSCRIBE_URL}}}")) {
-    // validateEmailContent already covers merge token; keep explicit for clarity when HTML empty
+  if (input.forBroadcast && (input.attachmentCount ?? 0) > 0) {
+    errors.push(
+      "Resend Broadcasts do not support campaign attachments. Remove all attachments before live broadcast launch, or use a direct/test send for PDF/image attachments.",
+    );
+  }
+
+  // After footer application, verify compliance fields are actually present.
+  if (identity.companyName && identity.postalAddress) {
+    try {
+      assertComplianceFooterPresent(htmlBody, textBody, identity);
+    } catch (error) {
+      errors.push(error instanceof Error ? error.message : "Compliance footer verification failed.");
+    }
   }
 
   return errors.length ? { ok: false, errors: [...new Set(errors)] } : { ok: true };

@@ -20,18 +20,20 @@ export function validateEmailContent(htmlBody: string, textBody: string): void {
   if (UNSAFE_EMAIL_HTML.some((pattern) => pattern.test(htmlBody))) {
     throw new Error("Message HTML contains active or unsafe content");
   }
+  // Ignore Resend triple-brace placeholders before scanning SendStack {{merge}} fields.
+  const withoutResendPlaceholders = `${htmlBody}\n${textBody}`.replace(/\{\{\{[a-zA-Z0-9_.|]+\}\}\}/g, "");
   const mergeFields = new Set(
-    [...`${htmlBody}\n${textBody}`.matchAll(/{{\s*([a-zA-Z0-9_]+)\s*}}/g)].map((match) => match[1]),
+    [...withoutResendPlaceholders.matchAll(/{{\s*([a-zA-Z0-9_]+)\s*}}/g)].map((match) => match[1]),
   );
   for (const field of mergeFields) {
     if (!ALLOWED_MERGE_FIELDS.has(field)) {
       throw new Error(`Unknown personalization field: ${field}`);
     }
   }
-  if (!htmlBody.includes("{{unsubscribe_url}}")) {
+  if (!htmlBody.includes("{{unsubscribe_url}}") && !htmlBody.includes("{{{RESEND_UNSUBSCRIBE_URL}}}")) {
     throw new Error("Every message must include a visible unsubscribe link");
   }
-  if (!textBody.includes("{{unsubscribe_url}}")) {
+  if (!textBody.includes("{{unsubscribe_url}}") && !textBody.includes("{{{RESEND_UNSUBSCRIBE_URL}}}")) {
     throw new Error("The plain-text version must include the unsubscribe link");
   }
 }

@@ -45,7 +45,9 @@ describe("rbac", () => {
     expect(permissionsForRole("marketer").has("contacts.edit")).toBe(false);
     expect(requiredPermission("PATCH", "/api/contacts/ct_1")).toBe("contacts.edit");
     expect(requiredPermission("DELETE", "/api/contacts/ct_1")).toBe("contacts.edit");
+    expect(requiredPermission("POST", "/api/contacts/ct_1/activate")).toBe("contacts.edit");
     expect(requiredPermission("POST", "/api/contacts")).toBe("contacts.manage");
+    expect(requiredPermission("POST", "/api/launch-jobs/tick")).toBe("campaigns.send");
   });
 
   it("reserves sending setup for administrators", () => {

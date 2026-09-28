@@ -127,10 +127,16 @@ export function requiredPermission(method: string, path: string): string | null 
   if (/^\/api\/delivery-health$/.test(normalized)) {
     return method === "GET" ? "sending.view" : null;
   }
+  if (/^\/api\/contacts\/[^/]+\/activate$/.test(normalized)) {
+    return method === "POST" ? "contacts.edit" : null;
+  }
   if (/^\/api\/contacts\/[^/]+$/.test(normalized)) {
     if (method === "GET") return "contacts.view";
     if (method === "PATCH" || method === "DELETE") return "contacts.edit";
     return null;
+  }
+  if (/^\/api\/launch-jobs\/tick$/.test(normalized)) {
+    return method === "POST" ? "campaigns.send" : null;
   }
   if (/^\/api\/messages\/[^/]+$/.test(normalized)) {
     return method === "GET" ? "deliveries.view" : null;

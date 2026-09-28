@@ -2,24 +2,28 @@ import { createHash, randomBytes } from "crypto";
 import { json } from "./http";
 import { config } from "./config";
 import { query } from "./db";
-import { getDeliveryHealthSnapshot } from "./delivery-health";
-import { DAILY_LIMIT_MESSAGE_STATUSES } from "./delivery-status";
+import { applyComplianceFooter } from "./compliance-footer";
+import { activateContactWithConsent, createPendingContact, importContactStatus } from "./consent";
+import {
+  consumeDailyReservation,
+  releaseDailyReservation,
+  reserveDailyVolume,
+  usedDailyVolume,
+  utcDayString,
+} from "./daily-volume";
+import { assertLaunchAllowedByHealth, getDeliveryHealthSnapshot } from "./delivery-health";
 import { hashPassword, makeId, normalizeEmail, validEmail, verifyPassword } from "./ids";
+import {
+  claimAndPrepareCampaignLaunch,
+  requestLaunchCancel,
+  runLaunchWorkerTick,
+} from "./launch-jobs";
 import { runCampaignPreflight } from "./preflight";
 import {
-  addContactToSegment,
   buildIdempotencyKey,
-  cancelResendBroadcast,
-  createResendBroadcastDraft,
-  createResendSegment,
   liveSendAllowed,
-  sendResendBroadcast,
   sendResendEmail,
-  toResendBroadcastHtml,
-  toResendBroadcastText,
-  upsertResendContact,
 } from "./providers/resend";
-import { shouldReuseExistingBroadcast } from "./providers/webhook";
 import { isSpecialUseRecipientDomain, validateLiveRecipient } from "./recipients";
 import {
   enforcedFromEmail,
@@ -88,13 +92,15 @@ async function currentSession(request: Request) {
   return session ? { ...session, token } : null;
 }
 
-function sessionPayload(session: NonNullable<Awaited<ReturnType<typeof currentSession>>>) {
+async function sessionPayload(session: NonNullable<Awaited<ReturnType<typeof currentSession>>>) {
   const identity = loadSendingIdentity();
+  const sentToday = await usedDailyVolume();
   return {
     csrf_token: session.csrf_token,
     permissions: [...permissionsForRole(session.role)],
     delivery_mode: config.deliveryMode,
     daily_limit: config.dailyLimit,
+    sent_today: sentToday,
     must_change_password: session.must_change_password,
     enforced_from_email: identity.fromEmail || null,
     reply_to_email: identity.replyToEmail || null,
@@ -281,26 +287,6 @@ async function enrichAuditEvents(events: Array<{
   }));
 }
 
-async function countTowardDailyLimit(): Promise<number> {
-  const statusList = DAILY_LIMIT_MESSAGE_STATUSES.map((status) => `'${status}'`).join(", ");
-  const messages = await query<{ count: string }>(
-    `SELECT COUNT(*)::int AS count
-       FROM messages
-      WHERE created_at >= CURRENT_DATE
-        AND status IN (${statusList})`,
-  );
-  // Broadcast recipients that were snapshotted today but may not yet have message rows.
-  const broadcastRecipients = await query<{ count: string }>(
-    `SELECT COUNT(*)::int AS count
-       FROM campaign_recipients cr
-       JOIN campaigns c ON c.id = cr.campaign_id
-      WHERE cr.queued_at >= CURRENT_DATE
-        AND c.provider_broadcast_id IS NOT NULL
-        AND NOT EXISTS (SELECT 1 FROM messages m WHERE m.recipient_id = cr.id)`,
-  );
-  return Number(messages.rows[0]?.count ?? 0) + Number(broadcastRecipients.rows[0]?.count ?? 0);
-}
-
 async function summaryResponse() {
   const counts = await query<{
     contacts: string;
@@ -310,7 +296,7 @@ async function summaryResponse() {
       (SELECT COUNT(*) FROM contacts WHERE status = 'active') AS contacts,
       (SELECT COUNT(*) FROM suppressions) AS suppressed,
       (SELECT COUNT(*) FROM campaign_recipients WHERE status IN ('queued', 'processing', 'delayed')) AS queued`);
-  const sentToday = await countTowardDailyLimit();
+  const sentToday = await usedDailyVolume();
   const recentCampaigns = await query(
     `SELECT c.id, c.name, c.subject, c.status,
             COUNT(cr.id)::int AS recipients,
@@ -356,11 +342,6 @@ async function campaignById(id: string) {
   return result.rows[0] ?? null;
 }
 
-async function withinDailyLimit(additional = 0): Promise<boolean> {
-  const used = await countTowardDailyLimit();
-  return used + additional <= config.dailyLimit;
-}
-
 async function completeCampaignIfIdle(campaignId: string) {
   await query(
     `UPDATE campaigns
@@ -376,148 +357,68 @@ async function completeCampaignIfIdle(campaignId: string) {
   );
 }
 
-async function launchResendBroadcast(
-  campaign: NonNullable<Awaited<ReturnType<typeof campaignById>>>,
-  contacts: Array<{ id: string; email: string; first_name: string; last_name: string }>,
-) {
-  if (!liveSendAllowed()) {
-    throw new Error("Live Resend sending is not enabled.");
-  }
-  if (!identityConfigured()) {
-    throw new Error("Identity and compliance settings are incomplete. Live launch is blocked.");
-  }
-  const fromEmail = enforcedFromEmail(campaign.from_email);
-  const replyTo = enforcedReplyTo();
-
-  for (const contact of contacts) {
-    const live = validateLiveRecipient(contact.email);
-    if (!live.ok) {
-      throw new Error(`Recipient ${contact.email}: ${live.error}`);
-    }
-  }
-
-  const lockToken = `lock_${randomBytes(16).toString("hex")}`;
-  const locked = await query<{ id: string; provider_broadcast_id: string | null; provider_segment_id: string | null }>(
-    `UPDATE campaigns
-        SET launch_lock_token = $1,
-            status = 'sending',
-            from_email = $3,
-            reply_to_email = $4,
-            launched_at = COALESCE(launched_at, NOW()),
-            updated_at = NOW(),
-            cancellable = TRUE,
-            provider_status = 'launching'
-      WHERE id = $2
-        AND status IN ('draft', 'paused')
-        AND (launch_lock_token IS NULL OR launch_lock_token = $1)
-      RETURNING id, provider_broadcast_id, provider_segment_id`,
-    [lockToken, campaign.id, fromEmail, replyTo],
+async function persistLaunchRecipientIntent(input: {
+  campaign: NonNullable<Awaited<ReturnType<typeof campaignById>>>;
+  contact: { id: string; email: string; first_name: string; last_name: string };
+  fromEmail: string;
+  replyTo: string | null;
+  htmlBody: string;
+  textBody: string;
+  reservationId: string;
+  intent: "broadcast" | "direct";
+}) {
+  const recipientId = makeId("rec");
+  const messageId = makeId("msg");
+  const unsubscribeToken = randomBytes(24).toString("base64url");
+  const idempotencyKey = buildIdempotencyKey([input.intent, input.campaign.id, input.contact.id]);
+  const inserted = await query<{ id: string; message_id: string }>(
+    `INSERT INTO campaign_recipients
+       (id, campaign_id, contact_id, email, status, message_id, provider_email_id, queued_at, sent_at)
+     VALUES ($1, $2, $3, $4, 'queued', $5, NULL, NOW(), NULL)
+     ON CONFLICT (campaign_id, contact_id) DO UPDATE
+       SET email = EXCLUDED.email,
+           message_id = COALESCE(campaign_recipients.message_id, EXCLUDED.message_id)
+     RETURNING id, message_id`,
+    [recipientId, input.campaign.id, input.contact.id, input.contact.email, messageId],
   );
-  if (!locked.rows[0]) {
-    throw new Error("Could not acquire launch lock. Another launch may already be in progress.");
-  }
-
-  let segmentId = locked.rows[0].provider_segment_id;
-  let broadcastId = locked.rows[0].provider_broadcast_id;
-
-  // Persist recipient + message intent before any provider submission.
-  for (const contact of contacts) {
-    const recipientId = makeId("rec");
-    const messageId = makeId("msg");
-    const unsubscribeToken = randomBytes(24).toString("base64url");
-    const idempotencyKey = buildIdempotencyKey(["broadcast", campaign.id, contact.id]);
-    const inserted = await query<{ id: string; message_id: string }>(
-      `INSERT INTO campaign_recipients
-         (id, campaign_id, contact_id, email, status, message_id, provider_email_id, queued_at, sent_at)
-       VALUES ($1, $2, $3, $4, 'queued', $5, NULL, NOW(), NULL)
-       ON CONFLICT (campaign_id, contact_id) DO UPDATE
-         SET email = EXCLUDED.email
-       RETURNING id, message_id`,
-      [recipientId, campaign.id, contact.id, contact.email, messageId],
-    );
-    const recipientRow = inserted.rows[0];
-    const existingMessage = await query<{ id: string }>(
-      `SELECT id FROM messages WHERE recipient_id = $1 LIMIT 1`,
-      [recipientRow.id],
-    );
-    if (!existingMessage.rows[0]) {
-      await query(
-        `INSERT INTO messages
-           (id, campaign_id, recipient_id, contact_id, to_email, subject, from_email, reply_to_email,
-            html_body, text_body, status, unsubscribe_token, created_at, idempotency_key, diagnostic_json, is_test)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'submitted', $11, NOW(), $12, $13, FALSE)
-         ON CONFLICT (idempotency_key) DO NOTHING`,
-        [
-          recipientRow.message_id || messageId,
-          campaign.id,
-          recipientRow.id,
-          contact.id,
-          contact.email,
-          campaign.subject,
-          fromEmail,
-          replyTo,
-          campaign.html_body,
-          campaign.text_body,
-          unsubscribeToken,
-          idempotencyKey,
-          JSON.stringify({ intent: "broadcast", campaign_id: campaign.id }),
-        ],
-      );
-    }
-  }
-
-  if (!segmentId) {
-    const segment = await createResendSegment(`SendStack ${campaign.id}`);
-    segmentId = segment.id;
-    await query(`UPDATE campaigns SET provider_segment_id = $1, updated_at = NOW() WHERE id = $2`, [segmentId, campaign.id]);
-  }
-
-  for (const contact of contacts) {
-    const providerContact = await upsertResendContact({
-      email: contact.email,
-      firstName: contact.first_name,
-      lastName: contact.last_name,
-    });
-    await addContactToSegment(providerContact.id, segmentId);
-    await query(`UPDATE contacts SET provider_contact_id = $1, updated_at = NOW() WHERE id = $2`, [providerContact.id, contact.id]);
-  }
-
-  if (!shouldReuseExistingBroadcast(broadcastId)) {
-    const draft = await createResendBroadcastDraft({
-      segmentId,
-      fromName: campaign.from_name,
-      fromEmail,
-      replyTo,
-      subject: campaign.subject,
-      html: toResendBroadcastHtml(campaign.html_body),
-      text: toResendBroadcastText(campaign.text_body),
-      name: `campaign:${campaign.id}`,
-    });
-    broadcastId = draft.id;
+  const recipientRow = inserted.rows[0];
+  const resolvedMessageId = recipientRow.message_id || messageId;
+  const existingMessage = await query<{ id: string }>(
+    `SELECT id FROM messages WHERE recipient_id = $1 LIMIT 1`,
+    [recipientRow.id],
+  );
+  if (!existingMessage.rows[0]) {
     await query(
-      `UPDATE campaigns
-          SET provider_broadcast_id = $1, provider_status = 'draft', cancellable = TRUE, updated_at = NOW()
-        WHERE id = $2`,
-      [broadcastId, campaign.id],
+      `INSERT INTO messages
+         (id, campaign_id, recipient_id, contact_id, to_email, subject, from_email, reply_to_email,
+          html_body, text_body, status, unsubscribe_token, created_at, idempotency_key, diagnostic_json,
+          is_test, volume_reservation_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'captured', $11, NOW(), $12, $13, FALSE, $14)
+       ON CONFLICT (idempotency_key) DO NOTHING`,
+      [
+        resolvedMessageId,
+        input.campaign.id,
+        recipientRow.id,
+        input.contact.id,
+        input.contact.email,
+        input.campaign.subject,
+        input.fromEmail,
+        input.replyTo,
+        input.htmlBody,
+        input.textBody,
+        unsubscribeToken,
+        idempotencyKey,
+        JSON.stringify({ intent: input.intent, campaign_id: input.campaign.id }),
+        input.reservationId,
+      ],
+    );
+  } else {
+    await query(
+      `UPDATE messages SET volume_reservation_id = COALESCE(volume_reservation_id, $1) WHERE id = $2`,
+      [input.reservationId, existingMessage.rows[0].id],
     );
   }
-
-  const sendKey = buildIdempotencyKey(["broadcast-send", campaign.id, broadcastId!]);
-  await sendResendBroadcast(broadcastId!, sendKey);
-  await query(
-    `UPDATE campaign_recipients SET status = 'processing' WHERE campaign_id = $1 AND status = 'queued'`,
-    [campaign.id],
-  );
-  await query(
-    `UPDATE campaigns
-        SET launch_lock_token = NULL,
-            provider_status = 'queued',
-            cancellable = TRUE,
-            updated_at = NOW()
-      WHERE id = $1`,
-    [campaign.id],
-  );
-  return { queued: contacts.length, broadcastId, segmentId };
+  return { recipientId: recipientRow.id, messageId: resolvedMessageId };
 }
 
 async function listCampaignAttachmentMeta(campaignId: string) {
@@ -571,7 +472,8 @@ async function readinessResponse() {
     config.deliveryMode === "resend" &&
     config.liveSendEnabled &&
     resendConfigured &&
-    health.healthy;
+    health.thresholds_configured &&
+    !health.launch_blocked;
 
   return json(200, {
     target: { platform: "Vercel", database: "Managed PostgreSQL", provider: "Resend Broadcasts" },
@@ -584,6 +486,9 @@ async function readinessResponse() {
       company_name: identity.companyName || null,
     },
     ready_for_live_sending: readyForLive,
+    health_thresholds_configured: health.thresholds_configured,
+    launch_blocked: health.launch_blocked,
+    blocking_reasons: health.blocking_reasons,
     checks: [
       {
         id: "vercel_runtime",
@@ -622,10 +527,10 @@ async function readinessResponse() {
       {
         id: "delivery_health",
         label: "Webhook & suppression health",
-        status: health.healthy ? "ready" : "pending",
-        detail: health.healthy
+        status: !health.launch_blocked && health.thresholds_configured ? "ready" : "pending",
+        detail: !health.launch_blocked && health.thresholds_configured
           ? "Webhook correlation and suppression synchronization look complete."
-          : health.issues.join(" ") || "Delivery health checks are incomplete.",
+          : health.blocking_reasons.join(" ") || health.issues.join(" ") || "Delivery health checks are incomplete.",
       },
     ],
     delivery_health: health,
@@ -670,14 +575,14 @@ export async function handleApi(request: Request, path: string[]) {
        VALUES ($1, $2, $3, NOW() + ($4 * INTERVAL '1 hour'), NOW())`,
       [tokenHash(token), user.id, csrfToken, hours],
     );
-    const response = json(200, sessionPayload({ ...user, user_id: user.id, token_hash: tokenHash(token), csrf_token: csrfToken, token } as never));
+    const response = json(200, await sessionPayload({ ...user, user_id: user.id, token_hash: tokenHash(token), csrf_token: csrfToken, token } as never));
     response.headers.set("Set-Cookie", cookieHeader(token, hours * 3600));
     await recordRequestAudit(request, user.id, "login_succeeded", "session", tokenHash(token), { role: user.role });
     return response;
   }
   if (request.method === "GET" && route === "/session") {
     const session = await currentSession(request);
-    return session ? json(200, sessionPayload(session)) : json(401, { error: "Not signed in." });
+    return session ? json(200, await sessionPayload(session)) : json(401, { error: "Not signed in." });
   }
   if (request.method === "GET" && route === "/summary") {
     const auth = await requirePermission(request, "overview.view");
@@ -865,14 +770,16 @@ export async function handleApi(request: Request, path: string[]) {
         consentNote: body.consent_note ?? "",
       });
       if (!result.removed) return json(404, { error: "Suppression not found." });
+      return json(200, {
+        ok: true,
+        provider_reactivated: false,
+        resulting_status: "pending_consent",
+        previous_reason: result.previousReason ?? null,
+        previous_source: result.previousSource ?? null,
+      });
     } catch (error) {
       return json(400, { error: error instanceof Error ? error.message : "Re-consent is required." });
     }
-    await recordRequestAudit(request, auth.session.user_id, "suppression_reconsent_removed", "suppression", email, {
-      consent_note: (body.consent_note ?? "").trim(),
-      provider_reactivation: false,
-    });
-    return json(200, { ok: true, provider_reactivated: false });
   }
   if (request.method === "POST" && route === "/users") {
     const auth = await requireAdmin(request);
@@ -1071,11 +978,12 @@ export async function handleApi(request: Request, path: string[]) {
 
       const id = `con_${randomBytes(16).toString("hex")}`;
       const suppressed = await query(`SELECT 1 FROM suppressions WHERE email = $1`, [email]);
+      const status = importContactStatus(Boolean(suppressed.rows[0]));
       await query(
         `INSERT INTO contacts
            (id, email, first_name, last_name, status, consent_source, consent_at, created_at, updated_at)
          VALUES ($1, $2, $3, $4, $5, 'csv_import', NOW(), NOW(), NOW())`,
-        [id, email, firstName, lastName, suppressed.rows[0] ? "suppressed" : "active"],
+        [id, email, firstName, lastName, status],
       );
       await query(
         `INSERT INTO list_contacts (list_id, contact_id, added_at) VALUES ($1, $2, NOW())`,
@@ -1091,6 +999,30 @@ export async function handleApi(request: Request, path: string[]) {
       invalid,
     });
     return json(200, { imported, updated, duplicates, invalid, issues, issues_truncated: issuesTruncated });
+  }
+  const contactActivateMatch = route.match(/^\/contacts\/([^/]+)\/activate$/);
+  if (request.method === "POST" && contactActivateMatch) {
+    const auth = await requirePermission(request, "contacts.edit");
+    if (auth.response) return auth.response;
+    if (!hasValidCsrf(request, auth.session.csrf_token)) return json(403, { error: "CSRF validation failed." });
+    const body = await request.json().catch(() => ({})) as {
+      consent_source?: string;
+      consent_evidence?: string;
+    };
+    try {
+      const result = await activateContactWithConsent({
+        contactId: contactActivateMatch[1],
+        actorUserId: auth.session.user_id,
+        consentSource: body.consent_source ?? "",
+        consentEvidence: body.consent_evidence ?? "",
+      });
+      // Audit row is written inside activateContactWithConsent's transaction.
+      return json(200, { contact: { id: contactActivateMatch[1], status: result.status, activated: result.activated } });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Activation failed.";
+      if (message === "Contact not found.") return json(404, { error: message });
+      return json(400, { error: message });
+    }
   }
   const contactMatch = route.match(/^\/contacts\/([^/]+)$/);
   if (request.method === "GET" && contactMatch) {
@@ -1159,7 +1091,15 @@ export async function handleApi(request: Request, path: string[]) {
     };
     const email = normalizeEmail(body.email ?? "");
     if (!validEmail(email)) return json(400, { error: "Enter a valid email address." });
-    if (!body.status || !["active", "suppressed"].includes(body.status)) return json(400, { error: "Select a valid contact status." });
+    if (body.status === "active") {
+      return json(400, {
+        error: "Cannot set status to active via PATCH. Use POST /contacts/:id/activate with consent evidence.",
+      });
+    }
+    const nextStatus = body.status?.trim() || undefined;
+    if (nextStatus && !["pending_consent", "suppressed"].includes(nextStatus)) {
+      return json(400, { error: "Select a valid contact status (pending_consent or suppressed)." });
+    }
     const consentSource = (body.consent_source ?? "").trim();
     if (!consentSource) return json(400, { error: "Consent source is required." });
 
@@ -1175,9 +1115,23 @@ export async function handleApi(request: Request, path: string[]) {
     }
 
     const updated = await query(
-      `UPDATE contacts SET email = $1, first_name = $2, last_name = $3, status = $4, consent_source = $5, updated_at = NOW()
-       WHERE id = $6 RETURNING id, email, first_name, last_name, status, consent_source, created_at`,
-      [email, (body.first_name ?? "").trim(), (body.last_name ?? "").trim(), body.status, consentSource, contactMatch[1]],
+      `UPDATE contacts
+          SET email = $1,
+              first_name = $2,
+              last_name = $3,
+              status = COALESCE($4, status),
+              consent_source = $5,
+              updated_at = NOW()
+        WHERE id = $6
+        RETURNING id, email, first_name, last_name, status, consent_source, created_at`,
+      [
+        email,
+        (body.first_name ?? "").trim(),
+        (body.last_name ?? "").trim(),
+        nextStatus ?? null,
+        consentSource,
+        contactMatch[1],
+      ],
     );
     if (!updated.rows[0]) return json(404, { error: "Contact not found." });
 
@@ -1191,7 +1145,7 @@ export async function handleApi(request: Request, path: string[]) {
 
     await recordRequestAudit(request, auth.session.user_id, "contact_updated", "contact", contactMatch[1], {
       email,
-      status: body.status,
+      status: updated.rows[0].status,
       list_id: body.list_id ?? null,
     });
     return json(200, { contact: updated.rows[0] });
@@ -1484,64 +1438,40 @@ export async function handleApi(request: Request, path: string[]) {
     if (!hasValidCsrf(request, auth.session.csrf_token)) return json(403, { error: "CSRF validation failed." });
     const campaign = await campaignById(campaignAction[1]);
     if (!campaign) return json(404, { error: "Campaign not found." });
-    const body = await request.json().catch(() => ({})) as { email?: string };
+    const body = await request.json().catch(() => ({})) as { email?: string; attempt_id?: string };
     const targetEmail = normalizeEmail(body.email ?? "");
     const identity = loadSendingIdentity();
     const isTestSend = campaignAction[2] === "test-send";
     const isLive = config.deliveryMode === "resend" && liveSendAllowed();
+    const isBroadcastLaunch = campaignAction[2] === "launch" && config.deliveryMode === "resend";
 
     if (campaignAction[2] === "pause") {
-      if (campaign.status !== "sending") {
+      if (!["sending", "submission_unknown", "cancel_requested"].includes(campaign.status)) {
         return json(409, { error: "Only sending campaigns can be paused or cancelled." });
       }
-      if (campaign.provider_broadcast_id && isLive) {
-        try {
-          await cancelResendBroadcast(campaign.provider_broadcast_id);
-          await query(
-            `UPDATE campaigns
-                SET status = 'cancelled',
-                    provider_status = 'cancelled',
-                    cancellable = FALSE,
-                    updated_at = NOW()
-              WHERE id = $1`,
-            [campaign.id],
-          );
-          await query(
-            `UPDATE campaign_recipients
-                SET status = 'cancelled'
-              WHERE campaign_id = $1 AND status IN ('queued', 'processing')`,
-            [campaign.id],
-          );
-          await recordRequestAudit(request, auth.session.user_id, "campaign_cancelled", "campaign", campaign.id, {
-            provider_broadcast_id: campaign.provider_broadcast_id,
-            provider_cancelled: true,
-          });
-          return json(200, { ok: true, status: "cancelled", provider_cancelled: true });
-        } catch (error) {
-          await query(
-            `UPDATE campaigns
-                SET provider_status = 'cancel_failed',
-                    cancellable = FALSE,
-                    updated_at = NOW()
-              WHERE id = $1`,
-            [campaign.id],
-          );
+      try {
+        const cancel = await requestLaunchCancel(campaign.id);
+        await recordRequestAudit(request, auth.session.user_id, "campaign_cancel_requested", "campaign", campaign.id, {
+          status: cancel.campaignStatus,
+          provider_cancelled: cancel.providerCancelled,
+          error: cancel.error ?? null,
+        });
+        if (cancel.error && cancel.providerCancelled === false) {
           return json(409, {
-            error:
-              error instanceof Error
-                ? `Provider can no longer stop this broadcast: ${error.message}`
-                : "Provider can no longer stop this broadcast.",
-            status: campaign.status,
+            error: `Provider can no longer stop this broadcast: ${cancel.error}`,
+            status: cancel.campaignStatus,
+            provider_cancelled: false,
             cancellable: false,
           });
         }
+        return json(200, {
+          ok: true,
+          status: cancel.campaignStatus,
+          provider_cancelled: cancel.providerCancelled,
+        });
+      } catch (error) {
+        return json(400, { error: error instanceof Error ? error.message : "Cancel request failed." });
       }
-      await query(`UPDATE campaigns SET status = 'paused', cancellable = FALSE, updated_at = NOW() WHERE id = $1`, [campaign.id]);
-      await recordRequestAudit(request, auth.session.user_id, "campaign_paused", "campaign", campaign.id, {
-        status: "paused",
-        local_only: true,
-      });
-      return json(200, { ok: true, status: "paused", provider_cancelled: false });
     }
 
     if (campaignAction[2] === "resume") {
@@ -1574,214 +1504,94 @@ export async function handleApi(request: Request, path: string[]) {
       if (await isEmailSuppressed(targetEmail)) {
         return json(403, { error: "That address is suppressed and cannot receive test email." });
       }
-      if (!await withinDailyLimit(1)) {
-        return json(429, { error: "Daily delivery limit reached." });
-      }
-    }
 
-    const contacts = isTestSend
-      ? [{ id: null as string | null, email: targetEmail, first_name: "Test", last_name: "Recipient" }]
-      : (await query<{ id: string; email: string; first_name: string; last_name: string }>(
-          `SELECT c.id, c.email, c.first_name, c.last_name
-             FROM contacts c JOIN list_contacts lc ON lc.contact_id = c.id
-            WHERE lc.list_id = $1 AND c.status = 'active'
-              AND NOT EXISTS (SELECT 1 FROM suppressions s WHERE s.email = c.email)`,
-          [campaign.list_id],
-        )).rows;
-
-    if (campaignAction[2] === "launch") {
-      if (campaign.status !== "draft" && campaign.status !== "paused") {
-        return json(400, { error: "Only draft or paused campaigns can be launched." });
-      }
       const attachmentRows = await query<{ filename: string }>(
         `SELECT filename FROM campaign_attachments WHERE campaign_id = $1 AND blocked = FALSE`,
         [campaign.id],
       );
-      const blockedArchives = await query<{ filename: string }>(
-        `SELECT filename FROM campaign_attachments WHERE campaign_id = $1 AND (blocked = TRUE OR lower(filename) LIKE '%.zip')`,
-        [campaign.id],
-      );
-      if (blockedArchives.rows.length) {
-        return json(400, {
-          error: "This campaign has archive attachments that cannot be sent. Remove or leave them blocked before launch.",
-        });
+
+      let fromEmail = campaign.from_email;
+      let replyTo = identity.replyToEmail || undefined;
+      if (isLive) {
+        try {
+          fromEmail = enforcedFromEmail(campaign.from_email, identity);
+          replyTo = enforcedReplyTo(identity);
+        } catch (error) {
+          return json(403, { error: error instanceof Error ? error.message : "Sender identity is not configured." });
+        }
       }
+
+      let footered: { html: string; text: string };
+      try {
+        footered = applyComplianceFooter(campaign.html_body, campaign.text_body, identity);
+      } catch (error) {
+        return json(400, { error: error instanceof Error ? error.message : "Compliance footer could not be applied." });
+      }
+
       const preflight = runCampaignPreflight({
         subject: campaign.subject,
-        htmlBody: campaign.html_body,
-        textBody: campaign.text_body,
+        htmlBody: footered.html,
+        textBody: footered.text,
         fromEmail: campaign.from_email,
         fromName: campaign.from_name,
         attachmentExtensions: attachmentRows.rows.map((row) => row.filename.split(".").pop()?.toLowerCase() || ""),
+        attachmentCount: attachmentRows.rows.length,
         identity,
+        requirePublicHttps: isLive,
       });
       if (!preflight.ok) {
         return json(400, { error: preflight.errors[0], errors: preflight.errors });
       }
-      if (isLive && contacts.some((contact) => isSpecialUseRecipientDomain(contact.email))) {
-        return json(400, { error: "Audience contains special-use domains that cannot receive live email." });
-      }
-      if (!await withinDailyLimit(contacts.length)) {
-        return json(429, { error: "Daily delivery limit reached." });
-      }
-    }
 
-    if (campaignAction[2] === "launch" && config.deliveryMode === "resend") {
-      try {
-        const result = await launchResendBroadcast(
-          campaign,
-          contacts.filter((contact): contact is { id: string; email: string; first_name: string; last_name: string } => Boolean(contact.id)),
-        );
-        await recordRequestAudit(request, auth.session.user_id, "campaign_launched", "campaign", campaign.id, {
-          recipients: result.queued,
-          delivery_mode: "resend",
-          provider_broadcast_id: result.broadcastId,
-          provider_segment_id: result.segmentId,
-        });
-        return json(200, { queued: result.queued, sent: 0, provider_broadcast_id: result.broadcastId });
-      } catch (error) {
-        await query(
-          `UPDATE campaigns
-              SET launch_lock_token = NULL,
-                  status = CASE WHEN status = 'sending' THEN 'failed' ELSE status END,
-                  provider_status = 'launch_failed',
-                  cancellable = FALSE,
-                  updated_at = NOW()
-            WHERE id = $1`,
-          [campaign.id],
-        );
-        await query(
-          `UPDATE campaign_recipients
-              SET status = 'failed', error = $2
-            WHERE campaign_id = $1 AND status IN ('queued', 'processing')`,
-          [campaign.id, (error instanceof Error ? error.message : "Broadcast launch failed.").slice(0, 500)],
-        );
-        await query(
-          `UPDATE messages
-              SET status = 'failed', error = $2
-            WHERE campaign_id = $1
-              AND status = 'submitted'
-              AND provider_id IS NULL`,
-          [campaign.id, (error instanceof Error ? error.message : "Broadcast launch failed.").slice(0, 500)],
-        );
-        return json(500, { error: error instanceof Error ? error.message : "Broadcast launch failed." });
+      // Distinct test sends each get a new attempt id (and capacity unit).
+      // Retries of an ambiguous attempt must pass the same attempt_id to reuse reservation + idempotency key.
+      const bodyAttempt = body.attempt_id?.trim();
+      const existingUnknown = bodyAttempt
+        ? (
+            await query<{ id: string; idempotency_key: string | null; volume_reservation_id: string | null; status: string }>(
+              `SELECT id, idempotency_key, volume_reservation_id, status FROM messages
+                WHERE campaign_id = $1 AND lower(to_email) = $2 AND COALESCE(is_test, FALSE) = TRUE
+                  AND status = 'submission_unknown'
+                  AND idempotency_key LIKE $3
+                ORDER BY created_at DESC LIMIT 1`,
+              [campaign.id, targetEmail, `%:${bodyAttempt}`],
+            )
+          ).rows[0]
+        : null;
+      const attemptId = bodyAttempt || makeId("tatt");
+      const reservationKey = `test:${campaign.id}:${targetEmail}:${attemptId}`;
+      const reserved = await reserveDailyVolume({
+        reservationKey,
+        campaignId: campaign.id,
+      });
+      if (!reserved.ok) {
+        return json(429, { error: reserved.error, used: reserved.used, limit: reserved.limit });
       }
-    }
 
-    if (campaignAction[2] === "launch") {
-      await query(
-        `UPDATE campaigns
-            SET status = 'sending', launched_at = COALESCE(launched_at, NOW()), updated_at = NOW()
-          WHERE id = $1`,
-        [campaign.id],
+      const sendAttachments = (await loadCampaignAttachmentsForSend(campaign.id)).filter(
+        (file) => !isArchiveAttachmentFilename(file.filename),
       );
-    }
-
-    // Development/tests and sandbox mode never call Resend; live mode uses sendResendEmail below.
-    const sendAttachments = (await loadCampaignAttachmentsForSend(campaign.id)).filter(
-      (file) => !isArchiveAttachmentFilename(file.filename),
-    );
-    let sentCount = 0;
-    let failedCount = 0;
-    let fromEmail = campaign.from_email;
-    let replyTo = identity.replyToEmail || undefined;
-    if (isLive) {
-      try {
-        fromEmail = enforcedFromEmail(campaign.from_email, identity);
-        replyTo = enforcedReplyTo(identity);
-      } catch (error) {
-        return json(403, { error: error instanceof Error ? error.message : "Sender identity is not configured." });
-      }
-    }
-
-    for (const contact of contacts) {
-      let linkedRecipientId: string | null = null;
-      const idempotencyKey = buildIdempotencyKey([
-        isTestSend ? "test" : "direct",
-        campaign.id,
-        contact.id || contact.email,
-        isTestSend ? String(Date.now()) : "launch",
-      ]);
-      // For launch retries, reuse an existing intent row with the same idempotency key.
-      const priorIntent = !isTestSend
-        ? await query<{ id: string; status: string; provider_id: string | null }>(
-            `SELECT id, status, provider_id FROM messages WHERE idempotency_key = $1 LIMIT 1`,
-            [idempotencyKey],
-          )
-        : { rows: [] as Array<{ id: string; status: string; provider_id: string | null }> };
-      if (priorIntent.rows[0]?.provider_id) {
-        sentCount += 1;
-        continue;
-      }
-      const messageId = priorIntent.rows[0]?.id || makeId("msg");
-
-      if (contact.id) {
-        const existing = await query<{ id: string; status: string }>(
-          `SELECT id, status FROM campaign_recipients WHERE campaign_id = $1 AND contact_id = $2`,
-          [campaign.id, contact.id],
-        );
-        if (existing.rows[0]) {
-          const prior = existing.rows[0];
-          const alreadyMessaged = await query<{ id: string }>(
-            `SELECT id FROM messages WHERE recipient_id = $1 LIMIT 1`,
-            [prior.id],
-          );
-          if (alreadyMessaged.rows[0] && prior.status !== "queued" && prior.status !== "processing") {
-            continue;
-          }
-          linkedRecipientId = prior.id;
-        } else {
-          const recipientId = makeId("rec");
-          const inserted = await query<{ id: string }>(
-            `INSERT INTO campaign_recipients
-               (id, campaign_id, contact_id, email, status, message_id, provider_email_id, queued_at, sent_at)
-             VALUES ($1, $2, $3, $4, 'processing', $5, NULL, NOW(), NULL)
-             ON CONFLICT (campaign_id, contact_id) DO NOTHING
-             RETURNING id`,
-            [recipientId, campaign.id, contact.id, contact.email, messageId],
-          );
-          linkedRecipientId = inserted.rows[0]?.id ?? null;
-          if (!linkedRecipientId) {
-            const raced = await query<{ id: string; status: string }>(
-              `SELECT id, status FROM campaign_recipients WHERE campaign_id = $1 AND contact_id = $2`,
-              [campaign.id, contact.id],
-            );
-            if (!raced.rows[0]) continue;
-            const racedMessage = await query<{ id: string }>(
-              `SELECT id FROM messages WHERE recipient_id = $1 LIMIT 1`,
-              [raced.rows[0].id],
-            );
-            if (racedMessage.rows[0] && raced.rows[0].status !== "queued" && raced.rows[0].status !== "processing") {
-              continue;
-            }
-            linkedRecipientId = raced.rows[0].id;
-          }
-        }
-      }
-
+      const contact = { id: null as string | null, email: targetEmail, first_name: "Test", last_name: "Recipient" };
+      const messageId = existingUnknown?.id || makeId("msg");
       const unsubscribeToken = randomBytes(24).toString("base64url");
       const unsubscribeUrl = `${config.publicUrl}/u/${unsubscribeToken}`;
-      const htmlBody = renderContactTemplate(campaign.html_body, contact, unsubscribeUrl);
-      const textBody = renderContactTemplate(campaign.text_body, contact, unsubscribeUrl);
-      const subject = renderContactTemplate(
-        isTestSend ? `[TEST] ${campaign.subject}` : campaign.subject,
-        contact,
-        unsubscribeUrl,
-      );
+      const htmlBody = renderContactTemplate(footered.html, contact, unsubscribeUrl);
+      const textBody = renderContactTemplate(footered.text, contact, unsubscribeUrl);
+      const subject = renderContactTemplate(`[TEST] ${campaign.subject}`, contact, unsubscribeUrl);
+      const idempotencyKey =
+        existingUnknown?.idempotency_key || buildIdempotencyKey(["test", campaign.id, targetEmail, attemptId]);
 
-      // Persist delivery intent before calling the provider.
       await query(
         `INSERT INTO messages
            (id, campaign_id, recipient_id, contact_id, to_email, subject, from_email, reply_to_email,
-            html_body, text_body, status, unsubscribe_token, created_at, idempotency_key, diagnostic_json, is_test)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'captured', $11, NOW(), $12, $13, $14)
+            html_body, text_body, status, unsubscribe_token, created_at, idempotency_key, diagnostic_json,
+            is_test, volume_reservation_id)
+         VALUES ($1, $2, NULL, NULL, $3, $4, $5, $6, $7, $8, 'captured', $9, NOW(), $10, $11, TRUE, $12)
          ON CONFLICT (idempotency_key) DO NOTHING`,
         [
           messageId,
           campaign.id,
-          linkedRecipientId,
-          contact.id,
-          contact.email,
+          targetEmail,
           subject,
           fromEmail,
           replyTo ?? null,
@@ -1789,16 +1599,18 @@ export async function handleApi(request: Request, path: string[]) {
           textBody,
           unsubscribeToken,
           idempotencyKey,
-          JSON.stringify({ intent: isTestSend ? "test-send" : "direct", list_unsubscribe: unsubscribeUrl }),
-          isTestSend,
+          JSON.stringify({ intent: "test-send", list_unsubscribe: unsubscribeUrl }),
+          reserved.reservationId,
         ],
       );
 
       let providerEmail: { id: string } | null = null;
+      let providerAttempted = false;
       try {
         if (isLive) {
+          providerAttempted = true;
           providerEmail = await sendResendEmail({
-            to: contact.email,
+            to: targetEmail,
             subject,
             html: htmlBody,
             text: textBody,
@@ -1810,53 +1622,209 @@ export async function handleApi(request: Request, path: string[]) {
             idempotencyKey,
             tags: [
               { name: "campaign_id", value: campaign.id.slice(0, 256) },
-              { name: "send_type", value: isTestSend ? "test" : "direct" },
+              { name: "send_type", value: "test" },
             ],
           });
         }
       } catch (error) {
-        failedCount += 1;
         const errorMessage = error instanceof Error ? error.message : "Delivery failed.";
-        if (linkedRecipientId) {
+        const ambiguous =
+          providerAttempted &&
+          /timeout|network|ECONNRESET|fetch failed|aborted|socket|503|504|ambiguous/i.test(errorMessage);
+        if (ambiguous) {
           await query(
-            `UPDATE campaign_recipients SET status = 'failed', error = $1 WHERE id = $2`,
-            [errorMessage.slice(0, 500), linkedRecipientId],
+            `UPDATE messages
+                SET status = 'submission_unknown',
+                    error = $1,
+                    diagnostic_json = $2
+              WHERE id = $3`,
+            [errorMessage.slice(0, 500), JSON.stringify({ error: errorMessage, attempt_id: attemptId }), messageId],
           );
+          return json(202, {
+            queued: 1,
+            sent: 0,
+            failed: 0,
+            status: "submission_unknown",
+            attempt_id: attemptId,
+            error: errorMessage,
+          });
         }
         await query(
           `UPDATE messages SET status = 'failed', error = $1, diagnostic_json = $2 WHERE id = $3`,
           [errorMessage.slice(0, 500), JSON.stringify({ error: errorMessage }), messageId],
         );
-        continue;
+        // Release only when no provider submission could have occurred.
+        if (!providerAttempted) {
+          await releaseDailyReservation(reserved.reservationId, true);
+        }
+        return json(500, { error: errorMessage });
       }
 
       if (providerEmail) {
         await query(
           `UPDATE messages SET status = 'submitted', provider_id = $1, diagnostic_json = $2 WHERE id = $3`,
-          [providerEmail.id, JSON.stringify({ provider_id: providerEmail.id, list_unsubscribe: unsubscribeUrl }), messageId],
+          [providerEmail.id, JSON.stringify({ provider_id: providerEmail.id, list_unsubscribe: unsubscribeUrl, attempt_id: attemptId }), messageId],
         );
       }
-      if (linkedRecipientId) {
-        await query(
-          `UPDATE campaign_recipients
-              SET status = 'sent', message_id = $1, provider_email_id = $2, sent_at = NOW(), error = NULL
-            WHERE id = $3`,
-          [messageId, providerEmail?.id ?? null, linkedRecipientId],
-        );
-      }
-      sentCount += 1;
+      await consumeDailyReservation(reserved.reservationId);
+      await recordRequestAudit(request, auth.session.user_id, "campaign_test_sent", "campaign", campaign.id, {
+        recipients: 1,
+        delivery_mode: config.deliveryMode,
+        is_test: true,
+        attempt_id: attemptId,
+      });
+      return json(200, { queued: 1, sent: 1, failed: 0, attempt_id: attemptId });
     }
 
-    if (campaignAction[2] === "launch") {
-      await completeCampaignIfIdle(campaign.id);
+    // --- Launch path ---
+    if (campaign.status !== "draft" && campaign.status !== "paused") {
+      return json(400, { error: "Only draft or paused campaigns can be launched." });
     }
-    await recordRequestAudit(request, auth.session.user_id, isTestSend ? "campaign_test_sent" : "campaign_launched", "campaign", campaign.id, {
-      recipients: sentCount,
-      failed: failedCount,
-      delivery_mode: config.deliveryMode,
-      is_test: isTestSend,
+
+    const contacts = (await query<{ id: string; email: string; first_name: string; last_name: string }>(
+      `SELECT c.id, c.email, c.first_name, c.last_name
+         FROM contacts c JOIN list_contacts lc ON lc.contact_id = c.id
+        WHERE lc.list_id = $1 AND c.status = 'active'
+          AND NOT EXISTS (SELECT 1 FROM suppressions s WHERE s.email = c.email)`,
+      [campaign.list_id],
+    )).rows;
+
+    if (!contacts.length) {
+      return json(400, { error: "No active, non-suppressed contacts are available to launch." });
+    }
+
+    const attachmentRows = await query<{ filename: string }>(
+      `SELECT filename FROM campaign_attachments WHERE campaign_id = $1 AND blocked = FALSE`,
+      [campaign.id],
+    );
+    const blockedArchives = await query<{ filename: string }>(
+      `SELECT filename FROM campaign_attachments WHERE campaign_id = $1 AND (blocked = TRUE OR lower(filename) LIKE '%.zip')`,
+      [campaign.id],
+    );
+    if (blockedArchives.rows.length) {
+      return json(400, {
+        error: "This campaign has archive attachments that cannot be sent. Remove or leave them blocked before launch.",
+      });
+    }
+    if (isBroadcastLaunch && attachmentRows.rows.length > 0) {
+      return json(400, {
+        error:
+          "Resend Broadcasts do not support campaign attachments. Remove all attachments before live broadcast launch, or use a direct/test send for PDF/image attachments.",
+      });
+    }
+
+    let fromEmail = campaign.from_email;
+    let replyTo: string | null = identity.replyToEmail || null;
+    if (isLive || isBroadcastLaunch) {
+      try {
+        fromEmail = enforcedFromEmail(campaign.from_email, identity);
+        replyTo = enforcedReplyTo(identity);
+      } catch (error) {
+        return json(403, { error: error instanceof Error ? error.message : "Sender identity is not configured." });
+      }
+    }
+
+    let footered: { html: string; text: string };
+    try {
+      footered = applyComplianceFooter(campaign.html_body, campaign.text_body, identity, {
+        broadcast: isBroadcastLaunch,
+      });
+    } catch (error) {
+      return json(400, { error: error instanceof Error ? error.message : "Compliance footer could not be applied." });
+    }
+
+    const preflight = runCampaignPreflight({
+      subject: campaign.subject,
+      htmlBody: footered.html,
+      textBody: footered.text,
+      fromEmail: campaign.from_email,
+      fromName: campaign.from_name,
+      attachmentExtensions: attachmentRows.rows.map((row) => row.filename.split(".").pop()?.toLowerCase() || ""),
+      attachmentCount: attachmentRows.rows.length,
+      forBroadcast: isBroadcastLaunch,
+      identity,
+      requirePublicHttps: isLive && !isBroadcastLaunch,
     });
-    return json(200, { queued: sentCount, sent: sentCount, failed: failedCount });
+    if (!preflight.ok) {
+      return json(400, { error: preflight.errors[0], errors: preflight.errors });
+    }
+
+    const health = await getDeliveryHealthSnapshot();
+    try {
+      assertLaunchAllowedByHealth(health, { requireThresholds: isLive });
+    } catch (error) {
+      return json(403, {
+        error: error instanceof Error ? error.message : "Delivery health gate blocked launch.",
+        blocking_reasons: health.blocking_reasons,
+        launch_blocked: true,
+      });
+    }
+
+    if (isLive && contacts.some((contact) => isSpecialUseRecipientDomain(contact.email))) {
+      return json(400, { error: "Audience contains special-use domains that cannot receive live email." });
+    }
+    if (isBroadcastLaunch && isLive) {
+      if (!identityConfigured(identity)) {
+        return json(403, { error: "Identity and compliance settings are incomplete. Live launch is blocked." });
+      }
+      for (const contact of contacts) {
+        const live = validateLiveRecipient(contact.email);
+        if (!live.ok) {
+          return json(400, { error: `Recipient ${contact.email}: ${live.error}` });
+        }
+      }
+    }
+
+    // Atomic CAS prepare: freeze snapshot, one active job, set-based recipients/messages/volume.
+    // HTTP path never calls Resend and never loops per recipient.
+    try {
+      const prepared = await claimAndPrepareCampaignLaunch({
+        campaignId: campaign.id,
+        liveMode: Boolean(isBroadcastLaunch && isLive),
+        fromEmail,
+        replyToEmail: replyTo,
+        htmlBody: footered.html,
+        textBody: footered.text,
+      });
+      await recordRequestAudit(request, auth.session.user_id, "campaign_launched", "campaign", campaign.id, {
+        recipients: prepared.totalRecipients,
+        delivery_mode: config.deliveryMode,
+        launch_job_id: prepared.job.id,
+        queued: true,
+        idempotent: prepared.idempotent,
+        live_mode: prepared.job.live_mode,
+      });
+      return json(200, {
+        queued: prepared.totalRecipients,
+        launch_job_id: prepared.job.id,
+        status: "sending",
+        sent: 0,
+        idempotent: prepared.idempotent,
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Launch prepare failed.";
+      if (/Daily delivery limit/i.test(message)) {
+        return json(429, { error: message });
+      }
+      return json(400, { error: message });
+    }
+  }
+
+  if (request.method === "POST" && route === "/launch-jobs/tick") {
+    const auth = await requirePermission(request, "campaigns.send");
+    if (auth.response) return auth.response;
+    if (!hasValidCsrf(request, auth.session.csrf_token)) return json(403, { error: "CSRF validation failed." });
+    const workerId = `tick_${auth.session.user_id.slice(0, 12)}_${randomBytes(4).toString("hex")}`;
+    const result = await runLaunchWorkerTick({
+      workerId,
+      timeBudgetMs: 15_000,
+      live: liveSendAllowed(),
+    });
+    await recordRequestAudit(request, auth.session.user_id, "launch_job_ticked", "launch_jobs", result.launch_job_id, {
+      worker_id: workerId,
+      ...result,
+    });
+    return json(200, result);
   }
   if (request.method === "GET" && route === "/messages") {
     const auth = await requirePermission(request, "deliveries.view");
@@ -1979,20 +1947,33 @@ export async function handleApi(request: Request, path: string[]) {
     const existing = await query(`SELECT id FROM contacts WHERE email = $1`, [email]);
     if (existing.rows[0]) return json(409, { error: "That email address already exists." });
 
-    const id = `con_${randomBytes(16).toString("hex")}`;
-    const suppressed = await query(`SELECT 1 FROM suppressions WHERE email = $1`, [email]);
-    await query(
-      `INSERT INTO contacts
-         (id, email, first_name, last_name, status, consent_source, consent_at, created_at, updated_at)
-       VALUES ($1, $2, $3, $4, $5, $6, NOW(), NOW(), NOW())`,
-      [id, email, firstName, lastName, suppressed.rows[0] ? "suppressed" : "active", consentSource],
-    );
-    await query(
-      `INSERT INTO list_contacts (list_id, contact_id, added_at) VALUES ($1, $2, NOW())`,
-      [body.list_id, id],
-    );
-    await recordRequestAudit(request, auth.session.user_id, "contact_created", "contact", id, { email, list_id: body.list_id, consent_source: consentSource });
-    return json(201, { contact: { id, email, first_name: firstName, last_name: lastName } });
+    let created: { id: string; status: string };
+    try {
+      created = await createPendingContact({
+        email,
+        firstName,
+        lastName,
+        listId: body.list_id,
+        consentSource,
+      });
+    } catch (error) {
+      return json(400, { error: error instanceof Error ? error.message : "Could not create contact." });
+    }
+    await recordRequestAudit(request, auth.session.user_id, "contact_created", "contact", created.id, {
+      email,
+      list_id: body.list_id,
+      consent_source: consentSource,
+      status: created.status,
+    });
+    return json(201, {
+      contact: {
+        id: created.id,
+        email,
+        first_name: firstName,
+        last_name: lastName,
+        status: created.status,
+      },
+    });
   }
   if (request.method === "POST" && route === "/auth/change-password") {
     const session = await currentSession(request);
@@ -2019,7 +2000,7 @@ export async function handleApi(request: Request, path: string[]) {
       [hashPassword(body.new_password), session.user_id],
     );
     await recordRequestAudit(request, session.user_id, "password_changed", "user", session.user_id);
-    return json(200, sessionPayload({ ...session, must_change_password: false }));
+    return json(200, await sessionPayload({ ...session, must_change_password: false }));
   }
   if (request.method === "POST" && route === "/auth/logout") {
     const token = cookieValue(request, "sendstack_session");
