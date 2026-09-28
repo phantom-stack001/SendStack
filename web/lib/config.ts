@@ -1,5 +1,12 @@
 import { loadEnvConfig } from "@next/env";
 
+// Local scripts (migrate/seed/tsx) often leave NODE_ENV unset. Next then treats the
+// environment as production and loads `.env.production`, which can point at a remote
+// DB that is missing local migrations (e.g. daily_volume_counters from 0006).
+if (!process.env.NODE_ENV) {
+  process.env.NODE_ENV = "development";
+}
+
 loadEnvConfig(process.cwd());
 
 function booleanEnv(name: string, fallback: boolean): boolean {
