@@ -1,0 +1,27 @@
+# Disposable PostgreSQL for SendStack web integration/migration tests only.
+# Never point application DATABASE_URL at this service.
+#
+#   docker compose -f docker-compose.test.yml up -d
+#   export SENDSTACK_TEST_DATABASE_URL='postgresql://sendstack:sendstack@127.0.0.1:55432/sendstack_test'
+#   cd web && pnpm test:pg
+#
+# Database name includes `_test` so destructive helpers accept it.
+# Ordinary `pnpm test` must not set SENDSTACK_TEST_DATABASE_URL.
+
+services:
+  sendstack-pg-test:
+    image: postgres:16-alpine
+    container_name: sendstack-pg-test
+    ports:
+      - "55432:5432"
+    environment:
+      POSTGRES_USER: sendstack
+      POSTGRES_PASSWORD: sendstack
+      POSTGRES_DB: sendstack_test
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sendstack -d sendstack_test"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+    tmpfs:
+      - /var/lib/postgresql/data

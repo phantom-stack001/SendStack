@@ -92,15 +92,17 @@ function rate(numerator: number, denominator: number): number {
   return numerator / denominator;
 }
 
+export type DeliveryHealthBlockKind =
+  | "unprocessed_webhook"
+  | "submission_unknown"
+  | "unresolved_launch_job"
+  | "manual_review"
+  | "stuck_captured"
+  | "other";
+
 /** Record an open health block that cannot age healthy without explicit resolve/waiver. */
 export async function recordDeliveryHealthBlock(input: {
-  kind:
-    | "unprocessed_webhook"
-    | "submission_unknown"
-    | "unresolved_launch_job"
-    | "manual_review"
-    | "stuck_captured"
-    | "other";
+  kind: DeliveryHealthBlockKind;
   detail: string;
   relatedEntityType?: string | null;
   relatedEntityId?: string | null;
@@ -119,6 +121,111 @@ export async function recordDeliveryHealthBlock(input: {
     ],
   );
   return id;
+}
+
+/**
+ * Idempotent block for a related entity: reuses an open block of the same kind
+ * instead of flooding the table on every worker tick.
+ */
+export async function ensureDeliveryHealthBlock(input: {
+  kind: DeliveryHealthBlockKind;
+  detail: string;
+  relatedEntityType?: string | null;
+  relatedEntityId?: string | null;
+}): Promise<string> {
+  if (input.relatedEntityId) {
+    const existing = await query<{ id: string }>(
+      `SELECT id FROM delivery_health_blocks
+        WHERE kind = $1
+          AND related_entity_id = $2
+          AND resolved_at IS NULL
+          AND waived_at IS NULL
+        ORDER BY created_at DESC
+        LIMIT 1`,
+      [input.kind, input.relatedEntityId],
+    );
+    if (existing.rows[0]) return existing.rows[0].id;
+  }
+  return recordDeliveryHealthBlock(input);
+}
+
+export async function resolveDeliveryHealthBlock(input: {
+  blockId: string;
+  actorUserId: string;
+  note: string;
+}): Promise<{ ok: true } | { ok: false; error: string }> {
+  const note = input.note.trim();
+  if (note.length < 8) {
+    return { ok: false, error: "Resolution note must be at least 8 characters." };
+  }
+  const updated = await query<{ id: string }>(
+    `UPDATE delivery_health_blocks
+        SET resolved_at = NOW(),
+            waiver_note = COALESCE(waiver_note, $2)
+      WHERE id = $1
+        AND resolved_at IS NULL
+        AND waived_at IS NULL
+      RETURNING id`,
+    [input.blockId, note.slice(0, 500)],
+  );
+  if (!updated.rows[0]) {
+    return { ok: false, error: "Health block not found or already closed." };
+  }
+  await query(
+    `INSERT INTO audit_events (actor_user_id, action, entity_type, entity_id, detail_json, created_at)
+     VALUES ($1, 'delivery_health_block_resolved', 'delivery_health_block', $2, $3, NOW())`,
+    [input.actorUserId, input.blockId, JSON.stringify({ note: note.slice(0, 500) })],
+  );
+  return { ok: true };
+}
+
+export async function waiveDeliveryHealthBlock(input: {
+  blockId: string;
+  actorUserId: string;
+  note: string;
+}): Promise<{ ok: true } | { ok: false; error: string }> {
+  const note = input.note.trim();
+  if (note.length < 20) {
+    return { ok: false, error: "Waiver note must be at least 20 characters of audit evidence." };
+  }
+  const updated = await query<{ id: string }>(
+    `UPDATE delivery_health_blocks
+        SET waived_at = NOW(),
+            waived_by = $2,
+            waiver_note = $3
+      WHERE id = $1
+        AND resolved_at IS NULL
+        AND waived_at IS NULL
+      RETURNING id`,
+    [input.blockId, input.actorUserId, note.slice(0, 500)],
+  );
+  if (!updated.rows[0]) {
+    return { ok: false, error: "Health block not found or already closed." };
+  }
+  await query(
+    `INSERT INTO audit_events (actor_user_id, action, entity_type, entity_id, detail_json, created_at)
+     VALUES ($1, 'delivery_health_block_waived', 'delivery_health_block', $2, $3, NOW())`,
+    [input.actorUserId, input.blockId, JSON.stringify({ note: note.slice(0, 500) })],
+  );
+  return { ok: true };
+}
+
+export async function listOpenDeliveryHealthBlocks() {
+  const result = await query<{
+    id: string;
+    kind: string;
+    detail: string;
+    related_entity_type: string | null;
+    related_entity_id: string | null;
+    created_at: string;
+  }>(
+    `SELECT id, kind, detail, related_entity_type, related_entity_id, created_at
+       FROM delivery_health_blocks
+      WHERE resolved_at IS NULL AND waived_at IS NULL
+      ORDER BY created_at ASC
+      LIMIT 200`,
+  );
+  return result.rows;
 }
 
 export async function getDeliveryHealthSnapshot(
@@ -248,6 +355,29 @@ export async function getDeliveryHealthSnapshot(
       WHERE resolved_at IS NULL AND waived_at IS NULL`,
   );
 
+  // Cancel/outcome stalls must not sit indefinitely without a health blocker.
+  const cancelStalls = await query<{ count: string }>(
+    `SELECT COUNT(*)::int AS count FROM (
+        SELECT id FROM campaigns
+         WHERE status IN ('cancel_requested', 'partially_sent')
+           AND updated_at < NOW() - INTERVAL '15 minutes'
+           AND ($1::text IS NULL OR id <> $1)
+        UNION ALL
+        SELECT DISTINCT campaign_id AS id FROM campaign_recipients
+         WHERE status IN ('outcome_pending', 'cancel_requested')
+           AND queued_at < NOW() - INTERVAL '15 minutes'
+           AND ($1::text IS NULL OR campaign_id <> $1)
+        UNION ALL
+        SELECT id FROM launch_jobs
+         WHERE cancel_requested_at IS NOT NULL
+           AND status NOT IN ('completed', 'failed', 'cancelled', 'manual_review')
+           AND cancel_requested_at < NOW() - INTERVAL '15 minutes'
+           AND ($2::text IS NULL OR id <> $2)
+           AND ($1::text IS NULL OR campaign_id <> $1)
+      ) stalls`,
+    [ignoreCampaignId, ignoreJobId],
+  );
+
   const stuckCaptured = await query<{ count: string }>(
     `SELECT COUNT(*)::int AS count
        FROM messages
@@ -294,6 +424,7 @@ export async function getDeliveryHealthSnapshot(
   const staleEventCount = Number(staleProviderEvents.rows[0]?.count ?? 0);
   const stuckCapturedCount = Number(stuckCaptured.rows[0]?.count ?? 0);
   const openBlockCount = Number(openBlocks.rows[0]?.count ?? 0);
+  const cancelStallCount = Number(cancelStalls.rows[0]?.count ?? 0);
 
   const issues: string[] = [];
   const blockingReasons: string[] = [];
@@ -344,6 +475,11 @@ export async function getDeliveryHealthSnapshot(
   }
   if (openBlockCount > 0) {
     const reason = `${openBlockCount} durable delivery health block(s) require explicit resolution or waiver.`;
+    issues.push(reason);
+    blockingReasons.push(reason);
+  }
+  if (cancelStallCount > 0) {
+    const reason = `${cancelStallCount} cancel/outcome_pending stall(s) require reconciliation or manual review.`;
     issues.push(reason);
     blockingReasons.push(reason);
   }

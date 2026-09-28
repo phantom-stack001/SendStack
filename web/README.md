@@ -50,10 +50,21 @@ cd web && pnpm test:pg
 
 Ordinary `pnpm test` skips PG suites when `SENDSTACK_TEST_DATABASE_URL` is unset and will not wipe or migrate the application database from `.env`.
 
+To provision the documented disposable database locally:
+
+```bash
+# from repository root
+docker compose -f docker-compose.test.yml up -d
+export SENDSTACK_TEST_DATABASE_URL='postgresql://sendstack:sendstack@127.0.0.1:55432/sendstack_test'
+cd web && pnpm test:pg
+```
+
+Never set application `DATABASE_URL` to the disposable test database.
+
 ## Delivery modes
 
 - **Sandbox (default):** campaign launch processes recipients inside the request and writes local `messages` rows. No external email is sent.
-- **Live Resend:** requires `RESEND_API_KEY`, `RESEND_WEBHOOK_SECRET`, enforced identity settings (`SENDSTACK_FROM_EMAIL`, `SENDSTACK_REPLY_TO_EMAIL`, `SENDSTACK_COMPANY_NAME`, `SENDSTACK_POSTAL_ADDRESS`, `SENDSTACK_ALLOWED_LINK_DOMAINS`), and `SENDSTACK_LIVE_SEND_ENABLED=true`. Keep live send locked until launch gates pass. Incomplete live-send config is logged at boot and blocks send/readiness APIs; it does **not** crash login or other routes. Vercel **preview** deployments cannot live-send even if those vars are present. Apply migration `0005_deliverability_hardening.sql` before relying on cancel/health/idempotency columns.
+- **Live Resend:** requires `RESEND_API_KEY`, `RESEND_WEBHOOK_SECRET`, enforced identity settings (`SENDSTACK_FROM_EMAIL`, `SENDSTACK_REPLY_TO_EMAIL`, `SENDSTACK_COMPANY_NAME`, `SENDSTACK_POSTAL_ADDRESS`, `SENDSTACK_ALLOWED_LINK_DOMAINS`), and `SENDSTACK_LIVE_SEND_ENABLED=true`. Keep live send locked until launch gates pass. Incomplete live-send config is logged at boot and blocks send/readiness APIs; it does **not** crash login or other routes. Vercel **preview** deployments cannot live-send even if those vars are present. Apply migrations through `0006_consent_volume_launch_hardening.sql` before live send (consent evidence, daily volume, durable launch jobs, webhook claims, health blocks). `0005_deliverability_hardening.sql` alone is not sufficient.
 
 Webhook endpoint: `POST /api/webhooks/resend`
 

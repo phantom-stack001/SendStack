@@ -20,7 +20,11 @@ import {
   assertDeliveryHealthAllowsSubmit,
   assertLaunchAllowedByHealth,
   getDeliveryHealthSnapshot,
+  listOpenDeliveryHealthBlocks,
+  resolveDeliveryHealthBlock,
+  waiveDeliveryHealthBlock,
 } from "./delivery-health";
+import { canTransitionMessageStatus, messageStatusRank } from "./delivery-status";
 import { hashPassword, makeId, normalizeEmail, validEmail, verifyPassword } from "./ids";
 import {
   claimAndPrepareCampaignLaunch,
@@ -566,6 +570,21 @@ export async function handleApi(request: Request, path: string[]) {
     }
   }
   if (request.method === "POST" && route === "/auth/login") {
+    const clientIp =
+      request.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ||
+      request.headers.get("x-real-ip")?.trim() ||
+      "unknown";
+    const recentAttempts = await query<{ count: string }>(
+      `SELECT COUNT(*)::int AS count
+         FROM login_attempts
+        WHERE client_ip = $1
+          AND attempted_at > NOW() - INTERVAL '5 minutes'`,
+      [clientIp],
+    );
+    if (Number(recentAttempts.rows[0]?.count ?? 0) >= 10) {
+      return json(429, { error: "Too many login attempts. Try again shortly." });
+    }
+
     const body = await request.json().catch(() => ({})) as { email?: string; password?: string };
     const result = await query<{ id: string; email: string; name: string; role: "admin" | "marketer" | "analyst"; password_hash: string; must_change_password: boolean }>(
       `SELECT id, email, name, role, password_hash, must_change_password FROM users WHERE email = $1 AND active = TRUE`,
@@ -573,9 +592,14 @@ export async function handleApi(request: Request, path: string[]) {
     );
     const user = result.rows[0];
     if (!user || !body.password || !verifyPassword(body.password, user.password_hash)) {
-      await recordRequestAudit(request, user?.id ?? null, "login_failed", "authentication", user?.id ?? null, { email: normalizeEmail(body.email ?? "") });
+      await query(`INSERT INTO login_attempts (client_ip, attempted_at) VALUES ($1, NOW())`, [clientIp]);
+      await recordRequestAudit(request, user?.id ?? null, "login_failed", "authentication", user?.id ?? null, {
+        email: normalizeEmail(body.email ?? ""),
+      });
       return json(401, { error: "Invalid email or password." });
     }
+    // Successful login: prune old attempts for this IP so a good password clears the window.
+    await query(`DELETE FROM login_attempts WHERE client_ip = $1`, [clientIp]);
     const token = randomBytes(32).toString("base64url");
     const csrfToken = randomBytes(24).toString("base64url");
     const hours = Number(process.env.SENDSTACK_SESSION_HOURS ?? 12);
@@ -607,7 +631,29 @@ export async function handleApi(request: Request, path: string[]) {
     const auth = await requirePermission(request, "sending.view");
     if (auth.response) return auth.response;
     const health = await getDeliveryHealthSnapshot();
-    return json(200, { delivery_health: health });
+    const open_blocks = await listOpenDeliveryHealthBlocks();
+    return json(200, { delivery_health: health, open_blocks });
+  }
+  const healthBlockMatch = route.match(/^\/delivery-health\/blocks\/([^/]+)\/(resolve|waive)$/);
+  if (request.method === "POST" && healthBlockMatch) {
+    const auth = await requireAdmin(request);
+    if (auth.response) return auth.response;
+    if (!hasValidCsrf(request, auth.session.csrf_token)) {
+      return json(403, { error: "CSRF validation failed." });
+    }
+    const blockId = healthBlockMatch[1];
+    const action = healthBlockMatch[2];
+    const body = await request.json().catch(() => ({})) as { note?: string };
+    const note = (body.note ?? "").trim();
+    const result =
+      action === "waive"
+        ? await waiveDeliveryHealthBlock({ blockId, actorUserId: auth.session.user_id, note })
+        : await resolveDeliveryHealthBlock({ blockId, actorUserId: auth.session.user_id, note });
+    if (!result.ok) return json(400, { error: result.error });
+    await recordRequestAudit(request, auth.session.user_id, `delivery_health_block_${action}`, "delivery_health_block", blockId, {
+      note: note.slice(0, 200),
+    });
+    return json(200, { ok: true, id: blockId, action });
   }
   if (request.method === "GET" && route === "/lists") {
     const auth = await requirePermission(request, "lists.view");
@@ -1936,6 +1982,79 @@ export async function handleApi(request: Request, path: string[]) {
     if (!deleted.rows[0]) return json(404, { error: "Message not found." });
     await recordRequestAudit(request, auth.session.user_id, "message_deleted", "message", messageMatch[1]);
     return json(200, { ok: true });
+  }
+  const messageEventMatch = route.match(/^\/messages\/([^/]+)\/event$/);
+  if (request.method === "POST" && messageEventMatch) {
+    const auth = await requirePermission(request, "deliveries.feedback");
+    if (auth.response) return auth.response;
+    if (!hasValidCsrf(request, auth.session.csrf_token)) {
+      return json(403, { error: "CSRF validation failed." });
+    }
+    const messageId = messageEventMatch[1];
+    const body = await request.json().catch(() => ({})) as { event?: string };
+    const event = (body.event ?? "").trim().toLowerCase();
+    const allowed: Record<string, { messageStatus: string; recipientStatus: string; reason: "hard_bounce" | "complaint" }> = {
+      hard_bounce: { messageStatus: "bounced", recipientStatus: "bounced", reason: "hard_bounce" },
+      bounce: { messageStatus: "bounced", recipientStatus: "bounced", reason: "hard_bounce" },
+      complaint: { messageStatus: "complained", recipientStatus: "complained", reason: "complaint" },
+    };
+    const mapped = allowed[event];
+    if (!mapped) {
+      return json(400, { error: "Supported events: hard_bounce, complaint." });
+    }
+
+    const message = await query<{
+      id: string;
+      to_email: string;
+      status: string;
+      campaign_id: string | null;
+      provider_id: string | null;
+    }>(`SELECT id, to_email, status, campaign_id, provider_id FROM messages WHERE id = $1`, [messageId]);
+    const row = message.rows[0];
+    if (!row) return json(404, { error: "Message not found." });
+    if (!canTransitionMessageStatus(row.status, mapped.messageStatus)) {
+      return json(409, {
+        error: `Cannot transition message from ${row.status} to ${mapped.messageStatus}.`,
+        status: row.status,
+      });
+    }
+
+    await applySuppression(row.to_email, mapped.reason, "admin_simulate");
+    const nextRank = messageStatusRank(mapped.messageStatus);
+    await query(
+      `UPDATE messages
+          SET status = $1,
+              status_rank = $2,
+              diagnostic_json = $3
+        WHERE id = $4
+          AND $2 >= status_rank`,
+      [
+        mapped.messageStatus,
+        nextRank,
+        JSON.stringify({ source: "admin_simulate", event, actor: auth.session.user_id }),
+        messageId,
+      ],
+    );
+    if (row.campaign_id) {
+      await query(
+        `UPDATE campaign_recipients
+            SET status = $1
+          WHERE campaign_id = $2
+            AND (
+              message_id = $3
+              OR (lower(email) = lower($4) AND ($5::text IS NULL OR provider_email_id = $5 OR provider_email_id IS NULL))
+            )
+            AND status <> ALL(ARRAY['complained','cancelled']::text[])`,
+        [mapped.recipientStatus, row.campaign_id, messageId, row.to_email, row.provider_id],
+      );
+    }
+    await recordRequestAudit(request, auth.session.user_id, "message_feedback_simulated", "message", messageId, {
+      event,
+      status: mapped.messageStatus,
+      email: row.to_email,
+      campaign_id: row.campaign_id,
+    });
+    return json(200, { ok: true, status: mapped.messageStatus });
   }
   if (request.method === "POST" && route === "/contacts") {
     const auth = await requirePermission(request, "contacts.manage");

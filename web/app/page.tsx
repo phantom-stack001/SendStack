@@ -1,20 +1,7 @@
 import type { Metadata } from "next";
-import { Fraunces, Manrope } from "next/font/google";
 import Link from "next/link";
 import { getPublicSiteCopy } from "@/lib/site-identity";
 import styles from "./page.module.css";
-
-const display = Fraunces({
-  subsets: ["latin"],
-  variable: "--font-display",
-  display: "swap",
-});
-
-const sans = Manrope({
-  subsets: ["latin"],
-  variable: "--font-sans",
-  display: "swap",
-});
 
 export const metadata: Metadata = {
   title: "CTN | Communication & Technology Network",
@@ -44,7 +31,7 @@ const services = [
 export default function LandingPage() {
   const site = getPublicSiteCopy();
   return (
-    <div className={`${styles.page} ${display.variable} ${sans.variable}`}>
+    <div className={styles.page}>
       <div className={styles.atmosphere} aria-hidden="true">
         <div className={styles.glowA} />
         <div className={styles.glowB} />

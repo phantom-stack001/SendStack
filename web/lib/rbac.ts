@@ -127,6 +127,9 @@ export function requiredPermission(method: string, path: string): string | null 
   if (/^\/api\/delivery-health$/.test(normalized)) {
     return method === "GET" ? "sending.view" : null;
   }
+  if (/^\/api\/delivery-health\/blocks\/[^/]+\/(resolve|waive)$/.test(normalized)) {
+    return method === "POST" ? "sending.view" : null;
+  }
   if (/^\/api\/contacts\/[^/]+\/activate$/.test(normalized)) {
     return method === "POST" ? "contacts.edit" : null;
   }

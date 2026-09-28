@@ -2,6 +2,8 @@
 
 This checklist is for humans after the SendStack deliverability/anti-abuse hardening code is deployed. The application does **not** perform these actions automatically.
 
+**Prefer the ordered handoff in [production-runbook.md](production-runbook.md)** for `ctn-sk.com` activation (backup → migrate `0006` → staging deploy → secrets → cron → webhooks → DNS → canary → warm-up → emergency stop).
+
 ## Do not skip
 
 1. **Credential rotation (if the phishing-like campaign was unauthorized)**

@@ -11,13 +11,16 @@
   --accent-strong: #0a5f59;
   --accent-warm: #c45c26;
   --shadow: 0 1px 0 rgba(255, 255, 255, 0.55) inset;
+  /* Build-time Google Fonts fetches fail closed on flaky networks; use local stacks. */
+  --font-display: "Iowan Old Style", "Palatino Linotype", Palatino, "Book Antiqua", Georgia, serif;
+  --font-sans: "Avenir Next", "Segoe UI", "Helvetica Neue", sans-serif;
   position: relative;
   isolation: isolate;
   min-height: 100vh;
   overflow-x: clip;
   color: var(--ink);
   background: var(--canvas);
-  font-family: var(--font-sans), ui-sans-serif, system-ui, sans-serif;
+  font-family: var(--font-sans);
   line-height: 1.6;
 }
 

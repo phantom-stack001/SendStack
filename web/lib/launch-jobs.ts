@@ -5,7 +5,7 @@ import {
   reserveDailyVolumeBatch,
 } from "./daily-volume";
 import { getPool, query } from "./db";
-import { assertDeliveryHealthAllowsSubmit } from "./delivery-health";
+import { assertDeliveryHealthAllowsSubmit, ensureDeliveryHealthBlock } from "./delivery-health";
 import { makeId } from "./ids";
 import {
   addContactToSegment,
@@ -526,6 +526,12 @@ export async function claimLaunchJob(workerId: string): Promise<LaunchJobRow | n
           AND lease_generation = $3`,
       [job.id, workerId, job.lease_generation],
     );
+    await ensureDeliveryHealthBlock({
+      kind: "manual_review",
+      detail: "Launch job exceeded max attempts",
+      relatedEntityType: "launch_job",
+      relatedEntityId: job.id,
+    }).catch(() => undefined);
     return null;
   }
   return job;
@@ -586,6 +592,12 @@ async function scheduleRetry(job: LaunchJobRow, errorMessage: string): Promise<v
        lease_owner = NULL`,
       [errorMessage.slice(0, 500)],
     );
+    await ensureDeliveryHealthBlock({
+      kind: "manual_review",
+      detail: errorMessage,
+      relatedEntityType: "launch_job",
+      relatedEntityId: job.id,
+    }).catch(() => undefined);
     return;
   }
   const delay = retryBackoffSeconds(job.attempt_count);
@@ -626,6 +638,14 @@ async function failJob(
   );
   if (options?.releaseVolume && !job.provider_broadcast_id) {
     await releaseDailyReservationsForCampaign(job.campaign_id, true);
+  }
+  if (options?.manualReview || status === "failed") {
+    await ensureDeliveryHealthBlock({
+      kind: options?.manualReview ? "manual_review" : "unresolved_launch_job",
+      detail: reason,
+      relatedEntityType: "launch_job",
+      relatedEntityId: job.id,
+    }).catch(() => undefined);
   }
   return { done: true, advanced: 0, status };
 }
@@ -1251,6 +1271,12 @@ async function finalizeBroadcastSubmission(
          lease_expires_at = NOW()`,
         [error instanceof Error ? error.message : "Broadcast reconcile failed"],
       );
+      await ensureDeliveryHealthBlock({
+        kind: "submission_unknown",
+        detail: error instanceof Error ? error.message : "Broadcast reconcile failed",
+        relatedEntityType: "launch_job",
+        relatedEntityId: workingJob.id,
+      }).catch(() => undefined);
       return { done: false, advanced: 0, status: "submission_unknown" };
     }
   }
@@ -1331,6 +1357,12 @@ async function finalizeBroadcastSubmission(
         WHERE campaign_id = $1 AND status IN ('queued', 'processing')`,
       [campaign.id],
     );
+    await ensureDeliveryHealthBlock({
+      kind: "submission_unknown",
+      detail: error instanceof Error ? error.message : "Ambiguous broadcast submission",
+      relatedEntityType: "launch_job",
+      relatedEntityId: workingJob.id,
+    }).catch(() => undefined);
     return { done: false, advanced: 0, status: "submission_unknown" };
   }
 

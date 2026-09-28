@@ -261,6 +261,31 @@ export async function seedAdminUser(email = `admin_${makeId("u")}@example.com`):
   return id;
 }
 
+/** Create a session cookie + CSRF for authenticated handleApi tests. */
+export async function seedAdminSession(userId?: string): Promise<{
+  userId: string;
+  token: string;
+  csrfToken: string;
+  cookie: string;
+}> {
+  const id = userId ?? (await seedAdminUser());
+  const token = `tok_${makeId("s")}`;
+  const csrfToken = `csrf_${makeId("c")}`;
+  const { createHash } = await import("node:crypto");
+  const tokenHash = createHash("sha256").update(token).digest("hex");
+  await query(
+    `INSERT INTO sessions (token_hash, user_id, csrf_token, expires_at, created_at)
+     VALUES ($1, $2, $3, NOW() + INTERVAL '12 hours', NOW())`,
+    [tokenHash, id, csrfToken],
+  );
+  return {
+    userId: id,
+    token,
+    csrfToken,
+    cookie: `sendstack_session=${encodeURIComponent(token)}`,
+  };
+}
+
 export async function seedList(name?: string): Promise<string> {
   const id = makeId("lst");
   await query(`INSERT INTO lists (id, name, description, created_at) VALUES ($1, $2, '', NOW())`, [
