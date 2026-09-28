@@ -4,19 +4,90 @@ import { Client } from "pg";
 import { getPool, query, resetPool } from "../lib/db";
 import { hashPassword, makeId } from "../lib/ids";
 
-export const DEFAULT_TEST_DATABASE_URL =
-  "postgresql://sendstack:sendstack@127.0.0.1:55432/sendstack";
+/**
+ * Recommended disposable Postgres URL for explicit PG suites.
+ * Never used as an automatic fallback from DATABASE_URL.
+ */
+export const DOCUMENTED_TEST_DATABASE_URL =
+  "postgresql://sendstack:sendstack@127.0.0.1:55432/sendstack_test";
 
-export function resolveTestDatabaseUrl(): string {
-  return (
-    process.env.SENDSTACK_TEST_DATABASE_URL?.trim() ||
-    process.env.DATABASE_URL?.trim() ||
-    DEFAULT_TEST_DATABASE_URL
-  );
+const DISPOSABLE_DB_NAME = /(?:^|[_-])test(?:[_-]|$)/i;
+
+export class PgTestSafetyError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "PgTestSafetyError";
+  }
+}
+
+/** Parse a postgres URL and return the database name (pathname without leading /). */
+export function databaseNameFromUrl(url: string): string {
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    throw new PgTestSafetyError("SENDSTACK_TEST_DATABASE_URL is not a valid URL.");
+  }
+  const name = decodeURIComponent((parsed.pathname || "").replace(/^\//, "")).trim();
+  if (!name) {
+    throw new PgTestSafetyError("SENDSTACK_TEST_DATABASE_URL must include a database name.");
+  }
+  return name;
+}
+
+/**
+ * Positive disposable identification:
+ * - DB name must contain a deliberate `_test` / `-test` / `test_` marker, OR
+ * - URL query must include `sendstack_disposable=1`.
+ */
+export function isDisposableTestDatabaseUrl(url: string): boolean {
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return false;
+  }
+  if (parsed.searchParams.get("sendstack_disposable") === "1") return true;
+  const name = decodeURIComponent((parsed.pathname || "").replace(/^\//, "")).trim();
+  return DISPOSABLE_DB_NAME.test(name);
+}
+
+/**
+ * Resolve the dedicated test database URL.
+ * NEVER falls back to DATABASE_URL. Ordinary `pnpm test` must not mutate app DBs.
+ */
+export function resolveTestDatabaseUrl(options?: { required?: boolean }): string | null {
+  const explicit = process.env.SENDSTACK_TEST_DATABASE_URL?.trim() || "";
+  if (!explicit) {
+    if (options?.required) {
+      throw new PgTestSafetyError(
+        "SENDSTACK_TEST_DATABASE_URL is required for PostgreSQL integration/migration tests. " +
+          "It never falls back to DATABASE_URL. Example: " +
+          DOCUMENTED_TEST_DATABASE_URL,
+      );
+    }
+    return null;
+  }
+  if (!isDisposableTestDatabaseUrl(explicit)) {
+    throw new PgTestSafetyError(
+      `Refusing non-disposable test database “${databaseNameFromUrl(explicit)}”. ` +
+        "Name must include a _test marker (e.g. sendstack_test) or sendstack_disposable=1.",
+    );
+  }
+  return explicit;
+}
+
+export function assertDisposableTestDatabase(url: string): void {
+  if (!isDisposableTestDatabaseUrl(url)) {
+    throw new PgTestSafetyError(
+      `Refusing destructive PostgreSQL operation against non-disposable database “${databaseNameFromUrl(url)}”.`,
+    );
+  }
 }
 
 /** Probe connectivity; returns false when disposable Postgres is unavailable. */
-export async function canConnectToTestDatabase(url = resolveTestDatabaseUrl()): Promise<boolean> {
+export async function canConnectToTestDatabase(url: string): Promise<boolean> {
+  if (!isDisposableTestDatabaseUrl(url)) return false;
   const client = new Client({
     connectionString: url,
     connectionTimeoutMillis: 5_000,
@@ -32,11 +103,16 @@ export async function canConnectToTestDatabase(url = resolveTestDatabaseUrl()): 
   }
 }
 
-export function applyTestEnv(url = resolveTestDatabaseUrl()): void {
+/**
+ * Apply env for PG suites. Sets DATABASE_URL to the disposable test URL only after
+ * disposable identity is verified — never copies an ambient application DATABASE_URL into tests.
+ */
+export function applyTestEnv(url: string): void {
+  assertDisposableTestDatabase(url);
   process.env.DATABASE_URL = url;
   process.env.SENDSTACK_TEST_DATABASE_URL = url;
-  process.env.SENDSTACK_DAILY_LIMIT = process.env.SENDSTACK_DAILY_LIMIT || "100000";
-  process.env.SENDSTACK_DELIVERY_MODE = process.env.SENDSTACK_DELIVERY_MODE || "sandbox";
+  process.env.SENDSTACK_DAILY_LIMIT = "100000";
+  process.env.SENDSTACK_DELIVERY_MODE = "sandbox";
   process.env.SENDSTACK_FROM_EMAIL = "news@example.com";
   process.env.SENDSTACK_REPLY_TO_EMAIL = "hello@example.com";
   process.env.SENDSTACK_COMPANY_NAME = "Example Co";
@@ -44,12 +120,19 @@ export function applyTestEnv(url = resolveTestDatabaseUrl()): void {
   process.env.SENDSTACK_ALLOWED_LINK_DOMAINS = "example.com,www.example.com";
   process.env.SENDSTACK_PUBLIC_URL = "https://app.example.com";
   process.env.SENDSTACK_LIVE_SEND_ENABLED = "1";
+  process.env.SENDSTACK_HEALTH_MIN_SAMPLE = "1";
+  process.env.SENDSTACK_HEALTH_MAX_BOUNCE_RATE = "0.5";
+  process.env.SENDSTACK_HEALTH_MAX_COMPLAINT_RATE = "0.5";
+  process.env.SENDSTACK_HEALTH_MAX_UNSUBSCRIBE_RATE = "0.5";
+  process.env.SENDSTACK_HEALTH_MAX_DELAY_RATE = "0.5";
+  process.env.SENDSTACK_HEALTH_MAX_FAILURE_RATE = "0.5";
   process.env.RESEND_API_KEY = process.env.RESEND_API_KEY || "re_test_key_for_pg_tests";
   delete process.env.SENDSTACK_EMERGENCY_STOP;
 }
 
 /** Apply drizzle SQL migrations without ending the shared pool. */
 export async function applyMigrations(): Promise<string[]> {
+  assertDisposableTestDatabase(process.env.DATABASE_URL || "");
   const pool = getPool();
   const client = await pool.connect();
   const applied: string[] = [];
@@ -86,6 +169,7 @@ export async function applyMigrations(): Promise<string[]> {
 }
 
 export async function applyMigrationFile(fileName: string): Promise<void> {
+  assertDisposableTestDatabase(process.env.DATABASE_URL || "");
   const pool = getPool();
   const client = await pool.connect();
   try {
@@ -113,6 +197,7 @@ export async function applyMigrationFile(fileName: string): Promise<void> {
 }
 
 export async function wipePublicSchema(): Promise<void> {
+  assertDisposableTestDatabase(process.env.DATABASE_URL || "");
   await query(`DROP SCHEMA IF EXISTS public CASCADE`);
   await query(`CREATE SCHEMA public`);
   await query(`GRANT ALL ON SCHEMA public TO CURRENT_USER`);
@@ -120,6 +205,7 @@ export async function wipePublicSchema(): Promise<void> {
 }
 
 export async function truncateAppTables(): Promise<void> {
+  assertDisposableTestDatabase(process.env.DATABASE_URL || "");
   // Drop any leaked client locks from prior tests before truncating large row sets.
   await resetPool();
   const client = await getPool().connect();
@@ -130,6 +216,7 @@ export async function truncateAppTables(): Promise<void> {
         launch_jobs,
         daily_volume_reservations,
         daily_volume_counters,
+        delivery_health_blocks,
         provider_events,
         campaign_attachments,
         messages,
@@ -151,7 +238,8 @@ export async function truncateAppTables(): Promise<void> {
 }
 
 export async function ensurePgTestReady(): Promise<boolean> {
-  const url = resolveTestDatabaseUrl();
+  const url = resolveTestDatabaseUrl({ required: true });
+  if (!url) return false;
   const ok = await canConnectToTestDatabase(url);
   if (!ok) return false;
   applyTestEnv(url);

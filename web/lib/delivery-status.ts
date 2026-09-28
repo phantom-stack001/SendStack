@@ -1,4 +1,5 @@
-/** Ranked message statuses — higher ranks must never regress to lower ones. */
+/** Ranked message statuses — higher ranks must never regress to lower ones.
+ * Complaint is stronger than bounce/delivered; unsubscribe is stronger than delivered. */
 export const MESSAGE_STATUS_RANK: Record<string, number> = {
   captured: 10,
   submission_unknown: 20,
@@ -7,9 +8,9 @@ export const MESSAGE_STATUS_RANK: Record<string, number> = {
   delivered: 50,
   failed: 100,
   bounced: 100,
-  complained: 100,
   suppressed: 100,
-  unsubscribed: 100,
+  unsubscribed: 105,
+  complained: 110,
 };
 
 export const RECIPIENT_STATUS_RANK: Record<string, number> = {
@@ -22,9 +23,9 @@ export const RECIPIENT_STATUS_RANK: Record<string, number> = {
   sent: 40,
   failed: 100,
   bounced: 100,
-  complained: 100,
   suppressed: 100,
   cancelled: 100,
+  complained: 110,
 };
 
 export const TERMINAL_MESSAGE_STATUSES = new Set([
@@ -110,11 +111,12 @@ export function recipientStatusFromMessageStatus(status: WebhookDerivedStatus): 
 export function canTransitionMessageStatus(current: string | null | undefined, next: string): boolean {
   if (!current) return true;
   if (current === next) return true;
-  if (TERMINAL_MESSAGE_STATUSES.has(current)) return false;
   const currentRank = MESSAGE_STATUS_RANK[current] ?? 0;
   const nextRank = MESSAGE_STATUS_RANK[next] ?? 0;
-  // Allow moving into terminal from any non-terminal.
-  if (TERMINAL_MESSAGE_STATUSES.has(next)) return true;
+  // Complaint may overwrite bounce; unsubscribe may overwrite delivered.
+  if (next === "complained" && currentRank < MESSAGE_STATUS_RANK.complained) return true;
+  if (TERMINAL_MESSAGE_STATUSES.has(current) && nextRank <= currentRank) return false;
+  if (TERMINAL_MESSAGE_STATUSES.has(next)) return nextRank >= currentRank;
   // Monotonic: never regress (delivered -> submitted is rejected).
   return nextRank >= currentRank;
 }

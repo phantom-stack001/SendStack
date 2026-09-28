@@ -85,9 +85,9 @@ UPDATE messages
      WHEN 'delivered' THEN 50
      WHEN 'failed' THEN 100
      WHEN 'bounced' THEN 100
-     WHEN 'complained' THEN 100
+     WHEN 'complained' THEN 110
      WHEN 'suppressed' THEN 100
-     WHEN 'unsubscribed' THEN 100
+     WHEN 'unsubscribed' THEN 105
      ELSE status_rank
    END;
 
@@ -103,7 +103,7 @@ CREATE TABLE IF NOT EXISTS daily_volume_counters (
 
 CREATE TABLE IF NOT EXISTS daily_volume_reservations (
   id TEXT PRIMARY KEY,
-  reservation_key TEXT NOT NULL UNIQUE,
+  reservation_key TEXT NOT NULL,
   attempt_key TEXT,
   day_utc DATE NOT NULL REFERENCES daily_volume_counters(day_utc),
   units INTEGER NOT NULL DEFAULT 1 CHECK (units > 0),
@@ -117,6 +117,12 @@ CREATE TABLE IF NOT EXISTS daily_volume_reservations (
 -- Idempotent column add if table already existed without attempt_key.
 ALTER TABLE daily_volume_reservations
   ADD COLUMN IF NOT EXISTS attempt_key TEXT;
+
+-- Bind uniqueness to UTC day: a key from another day must never satisfy today's capacity.
+ALTER TABLE daily_volume_reservations DROP CONSTRAINT IF EXISTS daily_volume_reservations_reservation_key_key;
+DROP INDEX IF EXISTS daily_volume_reservations_reservation_key_key;
+CREATE UNIQUE INDEX IF NOT EXISTS daily_volume_reservations_day_key_uidx
+  ON daily_volume_reservations (day_utc, reservation_key);
 
 CREATE INDEX IF NOT EXISTS daily_volume_reservations_day_status_idx
   ON daily_volume_reservations (day_utc, status);
@@ -148,7 +154,7 @@ CREATE TABLE IF NOT EXISTS launch_jobs (
   id TEXT PRIMARY KEY,
   campaign_id TEXT NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
   status TEXT NOT NULL CHECK (status IN (
-    'pending', 'running', 'completed', 'failed', 'cancelled',
+    'pending', 'running', 'ready_to_submit', 'submitting', 'completed', 'failed', 'cancelled',
     'reconciling', 'submission_unknown', 'manual_review'
   )),
   cursor_offset INTEGER NOT NULL DEFAULT 0 CHECK (cursor_offset >= 0),
@@ -187,7 +193,7 @@ ALTER TABLE launch_jobs DROP CONSTRAINT IF EXISTS launch_jobs_status_check;
 ALTER TABLE launch_jobs
   ADD CONSTRAINT launch_jobs_status_check
   CHECK (status IN (
-    'pending', 'running', 'completed', 'failed', 'cancelled',
+    'pending', 'running', 'ready_to_submit', 'submitting', 'completed', 'failed', 'cancelled',
     'reconciling', 'submission_unknown', 'manual_review'
   ));
 
@@ -199,7 +205,9 @@ CREATE INDEX IF NOT EXISTS launch_jobs_campaign_id_idx
 -- At most one active launch job per campaign.
 CREATE UNIQUE INDEX IF NOT EXISTS launch_jobs_one_active_per_campaign
   ON launch_jobs (campaign_id)
-  WHERE status IN ('pending', 'running', 'reconciling', 'submission_unknown');
+  WHERE status IN (
+    'pending', 'running', 'ready_to_submit', 'submitting', 'reconciling', 'submission_unknown'
+  );
 
 -- launch_job_id is soft-linked (no FK) to avoid circular dependency with launch_jobs.campaign_id.
 
@@ -254,3 +262,43 @@ CREATE INDEX IF NOT EXISTS provider_events_unprocessed_idx
 CREATE INDEX IF NOT EXISTS provider_events_claim_expires_idx
   ON provider_events (claim_expires_at)
   WHERE processed_at IS NULL AND claim_expires_at IS NOT NULL;
+
+-- ---------------------------------------------------------------------------
+-- Frozen personalization on recipients (worker must not reload contacts)
+-- ---------------------------------------------------------------------------
+ALTER TABLE campaign_recipients
+  ADD COLUMN IF NOT EXISTS first_name TEXT,
+  ADD COLUMN IF NOT EXISTS last_name TEXT;
+
+-- ---------------------------------------------------------------------------
+-- Durable health blocks that cannot age healthy without explicit resolve/waiver
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS delivery_health_blocks (
+  id TEXT PRIMARY KEY,
+  kind TEXT NOT NULL CHECK (kind IN (
+    'unprocessed_webhook', 'submission_unknown', 'unresolved_launch_job',
+    'manual_review', 'stuck_captured', 'other'
+  )),
+  detail TEXT NOT NULL,
+  related_entity_type TEXT,
+  related_entity_id TEXT,
+  resolved_at TIMESTAMPTZ,
+  waived_at TIMESTAMPTZ,
+  waived_by TEXT REFERENCES users(id) ON DELETE SET NULL,
+  waiver_note TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS delivery_health_blocks_open_idx
+  ON delivery_health_blocks (kind)
+  WHERE resolved_at IS NULL AND waived_at IS NULL;
+
+-- Explicit waiver/resolution on provider events so aging cannot clear blockers.
+ALTER TABLE provider_events
+  ADD COLUMN IF NOT EXISTS waived_at TIMESTAMPTZ,
+  ADD COLUMN IF NOT EXISTS resolved_at TIMESTAMPTZ;
+
+-- Complaint is stronger than bounce for stored ranks (application also ranks complained > bounced).
+UPDATE messages
+   SET status_rank = 110
+ WHERE status = 'complained' AND status_rank < 110;

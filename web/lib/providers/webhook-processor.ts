@@ -40,8 +40,8 @@ export type ProcessWebhookResult = {
 };
 
 /**
- * Atomically claim a provider event, then apply monotonic message/recipient updates.
- * Concurrent delivery of the same event ID cannot process twice.
+ * Claim a provider event, apply all required effects, and set processed_at only on success.
+ * Failures leave the event unprocessed and retryable (claim cleared with token check).
  */
 export async function processResendWebhookEvent(
   eventId: string,
@@ -53,6 +53,8 @@ export async function processResendWebhookEvent(
   const pool = getPool();
   const client = await pool.connect();
   let campaignId: string | null = null;
+  let claimed = false;
+
   try {
     await client.query("BEGIN");
     await client.query(
@@ -62,7 +64,7 @@ export async function processResendWebhookEvent(
       [eventId, event.type ?? "unknown", rawBody],
     );
 
-    const claimed = await client.query<{ id: string }>(
+    const claimResult = await client.query<{ id: string }>(
       `UPDATE provider_events
           SET claim_owner = $2,
               claim_token = $3,
@@ -75,7 +77,7 @@ export async function processResendWebhookEvent(
       [eventId, claimOwner, claimToken],
     );
 
-    if (!claimed.rows[0]) {
+    if (!claimResult.rows[0]) {
       const existing = await client.query<{ processed_at: string | null }>(
         `SELECT processed_at FROM provider_events WHERE id = $1`,
         [eventId],
@@ -84,9 +86,9 @@ export async function processResendWebhookEvent(
       if (existing.rows[0]?.processed_at) {
         return { duplicate: true, processed: true, campaignId: null };
       }
-      // Claimed by another worker and still unprocessed — do not ack as successful duplicate.
       return { duplicate: false, processed: false, retryable: true, campaignId: null };
     }
+    claimed = true;
 
     const providerId = event.data?.email_id;
     const recipients = recipientsFromEvent(event);
@@ -139,7 +141,7 @@ export async function processResendWebhookEvent(
       }
     }
 
-    // Commit claim + audit before external suppression side effects / follow-up updates.
+    // Hold the claim; effects below must succeed before processed_at is set.
     await client.query("COMMIT");
   } catch (error) {
     await client.query("ROLLBACK").catch(() => undefined);
@@ -159,6 +161,7 @@ export async function processResendWebhookEvent(
       const email = event.data?.email ? normalizeEmail(event.data.email) : recipients[0];
       if (email) {
         await applySuppression(email, "unsubscribe", "resend_webhook");
+        // Only update the matched message/campaign — never rewrite unrelated history.
         await applyMonotonicUpdates({
           providerId,
           nextMessageStatus: "unsubscribed",
@@ -166,6 +169,7 @@ export async function processResendWebhookEvent(
           recipients: [email],
           campaignId,
           diagnostics: { event_type: event.type, event_id: eventId },
+          emailScopedWithoutProvider: false,
         });
       }
     } else {
@@ -192,16 +196,34 @@ export async function processResendWebhookEvent(
             event_id: eventId,
             broadcast_id: event.data?.broadcast_id ?? null,
           },
+          emailScopedWithoutProvider: !providerId && Boolean(campaignId),
         });
       }
     }
 
+    if (campaignId) {
+      await maybeCompleteCampaign(campaignId);
+      // Cancellation reconciliation only for campaigns actually in a cancel flow.
+      const cancelState = await query<{ status: string }>(
+        `SELECT status FROM campaigns WHERE id = $1`,
+        [campaignId],
+      );
+      if (
+        cancelState.rows[0] &&
+        ["cancel_requested", "cancelled", "partially_sent"].includes(cancelState.rows[0].status)
+      ) {
+        await reconcileCampaignAfterCancel(campaignId);
+      }
+    }
+
+    // processed_at only after all required effects succeed; unique claim token required.
     const completed = await query<{ id: string }>(
       `UPDATE provider_events
           SET processed_at = NOW(),
               claim_owner = NULL,
               claim_expires_at = NULL,
-              claim_token = NULL
+              claim_token = NULL,
+              resolved_at = NOW()
         WHERE id = $1
           AND claim_token = $2
           AND processed_at IS NULL
@@ -209,7 +231,6 @@ export async function processResendWebhookEvent(
       [eventId, claimToken],
     );
     if (!completed.rows[0]) {
-      // Another worker may have finished; treat as duplicate success if already processed.
       const existing = await query<{ processed_at: string | null }>(
         `SELECT processed_at FROM provider_events WHERE id = $1`,
         [eventId],
@@ -220,30 +241,28 @@ export async function processResendWebhookEvent(
       throw new Error("Webhook claim token mismatch while completing event.");
     }
 
-    if (campaignId) {
-      await maybeCompleteCampaign(campaignId);
-      await reconcileCampaignAfterCancel(campaignId);
-    }
     return { duplicate: false, processed: true, campaignId };
   } catch (error) {
     // Do NOT set processed_at. Clear claim with token check so another worker can retry.
-    await query(
-      `UPDATE provider_events
-          SET claim_owner = NULL,
-              claim_expires_at = NULL,
-              claim_token = NULL
-        WHERE id = $1
-          AND claim_token = $2
-          AND processed_at IS NULL`,
-      [eventId, claimToken],
-    ).catch(() => undefined);
+    if (claimed) {
+      await query(
+        `UPDATE provider_events
+            SET claim_owner = NULL,
+                claim_expires_at = NULL,
+                claim_token = NULL
+          WHERE id = $1
+            AND claim_token = $2
+            AND processed_at IS NULL`,
+        [eventId, claimToken],
+      ).catch(() => undefined);
+    }
     throw error;
   }
 }
 
 /**
  * Atomic monotonic updates using status ranks / terminal predicates.
- * Broadcast unsubscribes update message status to `unsubscribed` so delivery-health counts them.
+ * Does not rewrite unrelated historical messages for contact-level unsubscribes.
  */
 async function applyMonotonicUpdates(input: {
   providerId?: string;
@@ -252,6 +271,7 @@ async function applyMonotonicUpdates(input: {
   recipients: string[];
   campaignId: string | null;
   diagnostics: Record<string, unknown>;
+  emailScopedWithoutProvider?: boolean;
 }): Promise<void> {
   const nextMsgRank = messageStatusRank(input.nextMessageStatus);
   const nextRcptRank = input.nextRecipientStatus
@@ -269,7 +289,10 @@ async function applyMonotonicUpdates(input: {
               delivered_at = CASE WHEN $1 = 'delivered' THEN COALESCE(delivered_at, NOW()) ELSE delivered_at END,
               diagnostic_json = $3
         WHERE provider_id = $4
-          AND status <> ALL($5::text[])
+          AND (
+            status <> ALL($5::text[])
+            OR ($1 = 'complained' AND status = 'bounced')
+          )
           AND $2 >= status_rank`,
       [input.nextMessageStatus, nextMsgRank, diag, input.providerId, terminalMsgList],
     );
@@ -285,7 +308,10 @@ async function applyMonotonicUpdates(input: {
               provider_email_id = $2
               OR message_id IN (SELECT id FROM messages WHERE provider_id = $2)
             )
-            AND status <> ALL($3::text[])
+            AND (
+              status <> ALL($3::text[])
+              OR ($1 = 'complained' AND status = 'bounced')
+            )
             AND (
               $4::boolean
               OR status IN ('cancel_requested', 'outcome_pending')
@@ -298,6 +324,7 @@ async function applyMonotonicUpdates(input: {
                   WHEN 'outcome_pending' THEN 29
                   WHEN 'delayed' THEN 35
                   WHEN 'sent' THEN 40
+                  WHEN 'bounced' THEN 100
                   ELSE 0
                 END
               ) <= $5
@@ -313,71 +340,61 @@ async function applyMonotonicUpdates(input: {
     }
   }
 
-  // Always apply email/campaign-scoped updates for unsubscribe accounting and unmatched provider ids.
-  if (input.nextMessageStatus === "unsubscribed" || (!input.providerId && input.recipients.length)) {
-    for (const email of input.recipients) {
-      if (input.campaignId) {
-        await query(
-          `UPDATE messages
-              SET status = $1,
-                  status_rank = $2,
-                  diagnostic_json = $3
-            WHERE campaign_id = $4
-              AND lower(to_email) = $5
-              AND status <> ALL($6::text[])
-              AND $2 >= status_rank`,
-          [input.nextMessageStatus, nextMsgRank, diag, input.campaignId, email, terminalMsgList],
-        );
-      } else {
-        await query(
-          `UPDATE messages
-              SET status = $1,
-                  status_rank = $2,
-                  diagnostic_json = $3
-            WHERE lower(to_email) = $4
-              AND created_at >= NOW() - INTERVAL '30 days'
-              AND status <> ALL($5::text[])
-              AND $2 >= status_rank`,
-          [input.nextMessageStatus, nextMsgRank, diag, email, terminalMsgList],
-        );
-      }
-    }
-  }
-
-  if (input.campaignId && input.nextRecipientStatus) {
-    const isTerminalNext = TERMINAL_RECIPIENT_STATUSES.has(input.nextRecipientStatus);
+  // Campaign-scoped email updates only when no provider id (never a global 30-day rewrite).
+  if (input.emailScopedWithoutProvider && input.campaignId && input.recipients.length) {
     for (const email of input.recipients) {
       await query(
-        `UPDATE campaign_recipients
-            SET status = $1
-          WHERE campaign_id = $2
-            AND lower(email) = $3
-            AND status <> ALL($4::text[])
+        `UPDATE messages
+            SET status = $1,
+                status_rank = $2,
+                diagnostic_json = $3
+          WHERE campaign_id = $4
+            AND lower(to_email) = $5
             AND (
-              $5::boolean
-              OR status IN ('cancel_requested', 'outcome_pending')
-              OR (
-                CASE status
-                  WHEN 'queued' THEN 10
-                  WHEN 'processing' THEN 20
-                  WHEN 'submission_unknown' THEN 25
-                  WHEN 'cancel_requested' THEN 28
-                  WHEN 'outcome_pending' THEN 29
-                  WHEN 'delayed' THEN 35
-                  WHEN 'sent' THEN 40
-                  ELSE 0
-                END
-              ) <= $6
-            )`,
-        [
-          input.nextRecipientStatus,
-          input.campaignId,
-          email,
-          terminalRcptList,
-          isTerminalNext,
-          nextRcptRank,
-        ],
+              status <> ALL($6::text[])
+              OR ($1 = 'complained' AND status = 'bounced')
+            )
+            AND $2 >= status_rank`,
+        [input.nextMessageStatus, nextMsgRank, diag, input.campaignId, email, terminalMsgList],
       );
+      if (input.nextRecipientStatus) {
+        const isTerminalNext = TERMINAL_RECIPIENT_STATUSES.has(input.nextRecipientStatus);
+        await query(
+          `UPDATE campaign_recipients
+              SET status = $1
+            WHERE campaign_id = $2
+              AND lower(email) = $3
+              AND (
+                status <> ALL($4::text[])
+                OR ($1 = 'complained' AND status = 'bounced')
+              )
+              AND (
+                $5::boolean
+                OR status IN ('cancel_requested', 'outcome_pending')
+                OR (
+                  CASE status
+                    WHEN 'queued' THEN 10
+                    WHEN 'processing' THEN 20
+                    WHEN 'submission_unknown' THEN 25
+                    WHEN 'cancel_requested' THEN 28
+                    WHEN 'outcome_pending' THEN 29
+                    WHEN 'delayed' THEN 35
+                    WHEN 'sent' THEN 40
+                    WHEN 'bounced' THEN 100
+                    ELSE 0
+                  END
+                ) <= $6
+              )`,
+          [
+            input.nextRecipientStatus,
+            input.campaignId,
+            email,
+            terminalRcptList,
+            isTerminalNext,
+            nextRcptRank,
+          ],
+        );
+      }
     }
   }
 }

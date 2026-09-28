@@ -1,3 +1,4 @@
+import { parse as parsePublicSuffix } from "tldts";
 import { assertComplianceFooterPresent } from "./compliance-footer";
 import { loadSendingIdentity, type SendingIdentity } from "./sending-identity";
 import { validateEmailContent } from "./templates";
@@ -15,50 +16,24 @@ const PLACEHOLDER_PATTERNS: Array<{ pattern: RegExp; label: string }> = [
 
 const FAKE_THREAD_SUBJECT = /^(re|fw|fwd)\s*:/i;
 
-/**
- * Maintained multi-part and single-label public suffixes that must never be allowlisted alone.
- * Exact matches on this list (or any single-label TLD) are rejected.
- */
-export const PUBLIC_SUFFIX_LIST = new Set([
-  "com",
-  "net",
-  "org",
-  "io",
-  "co",
-  "uk",
-  "edu",
-  "gov",
-  "info",
-  "biz",
-  "example",
-  "localhost",
-  "local",
-  "test",
-  "invalid",
-  "co.uk",
-  "com.au",
-  "co.nz",
-  "org.uk",
-  "ac.uk",
-  "gov.uk",
-  "com.br",
-  "co.jp",
-  "com.mx",
-  "co.za",
-  "com.sg",
-  "com.hk",
-  "co.in",
-  "com.cn",
-  "net.au",
-  "org.au",
-  "gov.au",
-  "me.uk",
-  "ltd.uk",
-  "plc.uk",
-]);
-
 /** Only these merge tokens are permitted inside href / URL fields. */
 const SAFE_URL_MERGE_TOKENS = new Set(["{{unsubscribe_url}}", "{{{RESEND_UNSUBSCRIBE_URL}}}"]);
+
+/**
+ * True when the hostname is itself a public suffix (e.g. github.io, co.uk, com)
+ * and therefore not a registrable domain that can be allowlisted alone.
+ */
+export function isPublicSuffixHostname(hostname: string): boolean {
+  const domain = hostname.trim().toLowerCase().replace(/^\.+/, "");
+  if (!domain) return true;
+  const parsed = parsePublicSuffix(domain, { allowPrivateDomains: true });
+  if (!parsed.publicSuffix) {
+    // Single-label / unknown TLD — treat as public suffix (dangerously broad).
+    return !domain.includes(".") || domain.split(".").filter(Boolean).length < 2;
+  }
+  // Exact public-suffix match (no registrable domain beneath it).
+  return parsed.domain === null || parsed.domain === parsed.publicSuffix || domain === parsed.publicSuffix;
+}
 
 export function validateAllowedLinkDomains(domains: string[]): string[] {
   const errors: string[] = [];
@@ -72,8 +47,7 @@ export function validateAllowedLinkDomains(domains: string[]): string[] {
       errors.push(`Allowed link domain “${raw}” must be a hostname only.`);
       continue;
     }
-    const labelCount = domain.split(".").filter(Boolean).length;
-    if (PUBLIC_SUFFIX_LIST.has(domain) || labelCount < 2) {
+    if (isPublicSuffixHostname(domain)) {
       errors.push(`Allowed link domain “${raw}” is a public suffix or dangerously broad hostname.`);
     }
   }

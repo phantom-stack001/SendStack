@@ -51,7 +51,7 @@ import {
 } from "./pg-test-utils";
 
 const testUrl = resolveTestDatabaseUrl();
-const dbAvailable = await canConnectToTestDatabase(testUrl);
+const dbAvailable = Boolean(testUrl) && (await canConnectToTestDatabase(testUrl as string));
 
 function mockLiveProvider(overrides: Record<string, unknown> = {}) {
   const calls: string[] = [];
@@ -104,7 +104,7 @@ describe.skipIf(!dbAvailable)("PostgreSQL integration / concurrency", () => {
   }, 60_000);
 
   beforeEach(async () => {
-    applyTestEnv(testUrl);
+    applyTestEnv(testUrl!);
     delete process.env.SENDSTACK_EMERGENCY_STOP;
     delete process.env.CRON_SECRET;
     await truncateAppTables();
@@ -556,7 +556,7 @@ describe.skipIf(!dbAvailable)("PostgreSQL integration / concurrency", () => {
   });
 
   it("footer marker, public-suffix co.uk, dynamic href, and hidden unsubscribe via preflight+compliance", () => {
-    applyTestEnv(testUrl);
+    applyTestEnv(testUrl!);
     const identity = loadSendingIdentity();
 
     const withMarker = applyComplianceFooter(
@@ -712,4 +712,222 @@ describe.skipIf(!dbAvailable)("PostgreSQL integration / concurrency", () => {
     },
     60_000,
   );
+
+  it("late suppression after prepare prevents provider import/send for that recipient", async () => {
+    const userId = await seedAdminUser();
+    const listId = await seedList();
+    await seedActiveContact({ listId, email: "keep@example.com", actorUserId: userId });
+    await seedActiveContact({ listId, email: "late-suppress@example.com", actorUserId: userId });
+    const campaignId = await seedDraftCampaign({ listId, createdBy: userId });
+    const { job } = await claimAndPrepareCampaignLaunch({ campaignId, liveMode: true, chunkSize: 50 });
+
+    await applySuppression("late-suppress@example.com", "manual", "pg_test");
+
+    const { provider, calls } = mockLiveProvider();
+    const status = await runLaunchJobToCompletion(job.id, { live: true, provider });
+    expect(["failed", "manual_review", "cancelled"]).toContain(status);
+    expect(calls.some((c) => c.startsWith("import:") && c.includes("late-suppress"))).toBe(false);
+    const importCsv = calls.filter((c) => c.startsWith("import:"));
+    // Provider may still be called for remaining audience only if fail-closed rebuild; our policy fails closed.
+    const suppressed = await query<{ status: string }>(
+      `SELECT status FROM campaign_recipients WHERE campaign_id = $1 AND email = 'late-suppress@example.com'`,
+      [campaignId],
+    );
+    expect(suppressed.rows[0]?.status).toBe("suppressed");
+    expect(calls.some((c) => c.startsWith("send:"))).toBe(false);
+    void importCsv;
+  });
+
+  it("fake slow import yields within budget and resumes on next tick", async () => {
+    const userId = await seedAdminUser();
+    const listId = await seedList();
+    await seedActiveContact({ listId, email: "slow@example.com", actorUserId: userId });
+    const campaignId = await seedDraftCampaign({ listId, createdBy: userId });
+    const { job } = await claimAndPrepareCampaignLaunch({ campaignId, liveMode: true, chunkSize: 50 });
+
+    let polls = 0;
+    const { provider, calls } = mockLiveProvider({
+      getResendContactImport: async (id: string) => {
+        polls += 1;
+        calls.push(`poll:${id}:${polls}`);
+        if (polls < 3) return { id, status: "in_progress" as const, counts: {} };
+        return { id, status: "completed" as const, counts: { failed: 0, total: 1 } };
+      },
+    });
+
+    const started = Date.now();
+    const tick1 = await runLaunchWorkerTick({
+      workerId: makeId("w"),
+      timeBudgetMs: 5_000,
+      maxChunks: 2,
+      live: true,
+      provider,
+    });
+    const elapsed = Date.now() - started;
+    expect(elapsed).toBeLessThan(4_000);
+    expect(tick1.done).toBe(false);
+    expect(polls).toBeGreaterThanOrEqual(1);
+
+    // Resume until complete.
+    let terminal = tick1.status;
+    for (let i = 0; i < 10 && terminal !== "completed"; i += 1) {
+      const tick = await runLaunchWorkerTick({
+        workerId: makeId("w"),
+        timeBudgetMs: 10_000,
+        maxChunks: 5,
+        live: true,
+        provider,
+      });
+      terminal = tick.status;
+      if (tick.done && tick.status === "completed") break;
+    }
+    const finalJob = await query<{ status: string }>(`SELECT status FROM launch_jobs WHERE id = $1`, [job.id]);
+    expect(finalJob.rows[0]?.status).toBe("completed");
+    expect(polls).toBeGreaterThanOrEqual(3);
+  });
+
+  it("email change demotes active contact and clears consent evidence atomically", async () => {
+    const { updateContactEmailWithConsentReset } = await import("../lib/consent");
+    const userId = await seedAdminUser();
+    const listId = await seedList();
+    const contactId = await seedActiveContact({
+      listId,
+      email: "before@example.com",
+      actorUserId: userId,
+    });
+
+    const updated = await updateContactEmailWithConsentReset({
+      contactId,
+      actorUserId: userId,
+      email: "after@example.com",
+      firstName: "Pat",
+      lastName: "Lee",
+      consentSource: "admin_email_change",
+    });
+    expect(updated.status).toBe("pending_consent");
+    expect(updated.email).toBe("after@example.com");
+
+    const row = await query<{
+      status: string;
+      consent_evidence: string | null;
+      consent_attested_by: string | null;
+      consent_verified_at: string | null;
+    }>(
+      `SELECT status, consent_evidence, consent_attested_by, consent_verified_at FROM contacts WHERE id = $1`,
+      [contactId],
+    );
+    expect(row.rows[0].status).toBe("pending_consent");
+    expect(row.rows[0].consent_evidence).toBeNull();
+    expect(row.rows[0].consent_attested_by).toBeNull();
+    expect(row.rows[0].consent_verified_at).toBeNull();
+
+    const audit = await query<{ action: string }>(
+      `SELECT action FROM audit_events WHERE entity_id = $1 AND action = 'contact_email_changed'`,
+      [contactId],
+    );
+    expect(audit.rows).toHaveLength(1);
+  });
+
+  it("concurrent suppression during email change wins", async () => {
+    const { updateContactEmailWithConsentReset } = await import("../lib/consent");
+    const userId = await seedAdminUser();
+    const listId = await seedList();
+    const contactId = await seedActiveContact({
+      listId,
+      email: "race-email@example.com",
+      actorUserId: userId,
+    });
+
+    await applySuppression("new-race@example.com", "complaint", "pg_test");
+    const updated = await updateContactEmailWithConsentReset({
+      contactId,
+      actorUserId: userId,
+      email: "new-race@example.com",
+      firstName: "Pat",
+      lastName: "Lee",
+      consentSource: "admin_email_change",
+    });
+    expect(updated.status).toBe("suppressed");
+  });
+
+  it("normal delivered campaign completes; cancel reconcile does not overwrite", async () => {
+    const { reconcileCampaignAfterCancel } = await import("../lib/launch-jobs");
+    const userId = await seedAdminUser();
+    const listId = await seedList();
+    await seedActiveContact({ listId, email: "done@example.com", actorUserId: userId });
+    const campaignId = await seedDraftCampaign({ listId, createdBy: userId });
+    await claimAndPrepareCampaignLaunch({ campaignId, liveMode: false });
+    await query(
+      `UPDATE campaign_recipients SET status = 'sent', sent_at = NOW() WHERE campaign_id = $1`,
+      [campaignId],
+    );
+    await query(
+      `UPDATE campaigns SET status = 'sending', updated_at = NOW() WHERE id = $1`,
+      [campaignId],
+    );
+    await processResendWebhookEvent(
+      makeId("evt"),
+      {
+        type: "email.delivered",
+        data: { email_id: "prov_1", to: ["done@example.com"], broadcast_id: null as unknown as string },
+      },
+      "{}",
+    );
+    // Force completion path
+    await query(
+      `UPDATE campaigns SET status = 'completed', completed_at = NOW() WHERE id = $1`,
+      [campaignId],
+    );
+    await reconcileCampaignAfterCancel(campaignId);
+    const status = await query<{ status: string }>(`SELECT status FROM campaigns WHERE id = $1`, [campaignId]);
+    expect(status.rows[0].status).toBe("completed");
+  });
+
+  it("UTC day binding rejects cross-day reservation reuse as same-day capacity", async () => {
+    const { reserveDailyVolume, utcDayString } = await import("../lib/daily-volume");
+    const key = `crossday:${makeId("k")}`;
+    const yesterday = new Date(Date.now() - 86_400_000);
+    const first = await reserveDailyVolume({ reservationKey: key, now: yesterday, units: 1 });
+    expect(first.ok).toBe(true);
+    if (!first.ok) return;
+    expect(first.dayUtc).toBe(utcDayString(yesterday));
+
+    const today = await reserveDailyVolume({ reservationKey: key, now: new Date(), units: 1 });
+    expect(today.ok).toBe(true);
+    if (!today.ok) return;
+    expect(today.idempotent).toBe(false);
+    expect(today.dayUtc).toBe(utcDayString());
+    expect(today.dayUtc).not.toBe(first.dayUtc);
+  });
+
+  it("complaint outranks bounce for stored message state", async () => {
+    const userId = await seedAdminUser();
+    const listId = await seedList();
+    await seedActiveContact({ listId, email: "rank@example.com", actorUserId: userId });
+    const campaignId = await seedDraftCampaign({ listId, createdBy: userId });
+    await claimAndPrepareCampaignLaunch({ campaignId, liveMode: false });
+    const msg = await query<{ id: string }>(
+      `SELECT id FROM messages WHERE campaign_id = $1 LIMIT 1`,
+      [campaignId],
+    );
+    await query(`UPDATE messages SET provider_id = 'prov_rank', status = 'submitted', status_rank = 30 WHERE id = $1`, [
+      msg.rows[0].id,
+    ]);
+    await processResendWebhookEvent(
+      makeId("evt"),
+      { type: "email.bounced", data: { email_id: "prov_rank", to: ["rank@example.com"] } },
+      "{}",
+    );
+    await processResendWebhookEvent(
+      makeId("evt"),
+      { type: "email.complained", data: { email_id: "prov_rank", to: ["rank@example.com"] } },
+      "{}",
+    );
+    const final = await query<{ status: string; status_rank: number }>(
+      `SELECT status, status_rank FROM messages WHERE id = $1`,
+      [msg.rows[0].id],
+    );
+    expect(final.rows[0].status).toBe("complained");
+    expect(final.rows[0].status_rank).toBeGreaterThanOrEqual(110);
+  });
 });

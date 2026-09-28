@@ -34,7 +34,21 @@ Open http://localhost:3000 and sign in. Default local seed credentials (when use
 | `pnpm build` | Production build |
 | `pnpm db:migrate` | Apply incremental SQL migrations |
 | `pnpm db:seed` | Seed admin + sample `.test` contacts |
-| `pnpm test` | Unit tests |
+| `pnpm test` | Unit/safe suite (never uses `DATABASE_URL` for destructive PG work) |
+| `pnpm test:pg` | PostgreSQL integration/migration suite (**requires** `SENDSTACK_TEST_DATABASE_URL`) |
+
+### PostgreSQL test safety
+
+Destructive Postgres tests **never** fall back to `DATABASE_URL`. They require an explicit disposable URL:
+
+```bash
+# Database name must include a `_test` marker (e.g. sendstack_test), or
+# append ?sendstack_disposable=1
+export SENDSTACK_TEST_DATABASE_URL='postgresql://sendstack:sendstack@127.0.0.1:55432/sendstack_test'
+cd web && pnpm test:pg
+```
+
+Ordinary `pnpm test` skips PG suites when `SENDSTACK_TEST_DATABASE_URL` is unset and will not wipe or migrate the application database from `.env`.
 
 ## Delivery modes
 

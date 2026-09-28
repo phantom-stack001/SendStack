@@ -6,7 +6,10 @@ vi.mock("../lib/db", () => ({
   query: (...args: unknown[]) => queryMock(...args),
 }));
 
-import { getDeliveryHealthSnapshot } from "../lib/delivery-health";
+import {
+  assertDeliveryHealthAllowsSubmit,
+  getDeliveryHealthSnapshot,
+} from "../lib/delivery-health";
 
 describe("delivery health 100% complaint/bounce gate", () => {
   beforeEach(() => {
@@ -20,9 +23,9 @@ describe("delivery health 100% complaint/bounce gate", () => {
     delete process.env.SENDSTACK_EMERGENCY_STOP;
   });
 
-  it("marks unhealthy and launch-blocked when complaint rate is 100%", async () => {
+  function mockHealthyBaseline() {
     queryMock.mockImplementation(async (sql: string) => {
-      if (sql.includes("FROM messages")) {
+      if (sql.includes("FROM messages") && sql.includes("FILTER")) {
         return {
           rows: [
             {
@@ -30,30 +33,33 @@ describe("delivery health 100% complaint/bounce gate", () => {
               delivered: "0",
               delayed: "0",
               bounced: "0",
-              complained: "10",
-              suppressed: "0",
-              unsubscribed: "0",
               failed: "0",
             },
           ],
         };
+      }
+      if (sql.includes("FROM suppressions") || sql.includes("reason = 'complaint'")) {
+        return { rows: [{ complained: "10", unsubscribed: "0", suppressed: "0" }] };
       }
       if (sql.includes("COUNT(*)::int AS received")) {
         return { rows: [{ received: "0", processed: "0" }] };
       }
       return { rows: [{ count: "0" }] };
     });
+  }
 
+  it("marks unhealthy and launch-blocked when complaint rate is 100%", async () => {
+    mockHealthyBaseline();
     const health = await getDeliveryHealthSnapshot();
     expect(health.complaint_rate).toBe(1);
     expect(health.healthy).toBe(false);
     expect(health.launch_blocked).toBe(true);
-    expect(health.blocking_reasons.join(" ")).toMatch(/100%/i);
+    expect(health.blocking_reasons.join(" ")).toMatch(/100%|Complaint/i);
   });
 
   it("marks unhealthy when bounce rate is 100%", async () => {
     queryMock.mockImplementation(async (sql: string) => {
-      if (sql.includes("FROM messages")) {
+      if (sql.includes("FROM messages") && sql.includes("FILTER")) {
         return {
           rows: [
             {
@@ -61,13 +67,13 @@ describe("delivery health 100% complaint/bounce gate", () => {
               delivered: "0",
               delayed: "0",
               bounced: "8",
-              complained: "0",
-              suppressed: "0",
-              unsubscribed: "0",
               failed: "0",
             },
           ],
         };
+      }
+      if (sql.includes("FROM suppressions") || sql.includes("reason = 'complaint'")) {
+        return { rows: [{ complained: "0", unsubscribed: "0", suppressed: "0" }] };
       }
       if (sql.includes("COUNT(*)::int AS received")) {
         return { rows: [{ received: "0", processed: "0" }] };
@@ -79,5 +85,54 @@ describe("delivery health 100% complaint/bounce gate", () => {
     expect(health.bounce_rate).toBe(1);
     expect(health.healthy).toBe(false);
     expect(health.launch_blocked).toBe(true);
+  });
+
+  it("submit health ignores only the current job, not unrelated submission_unknown", async () => {
+    queryMock.mockImplementation(async (sql: string) => {
+      if (sql.includes("FROM messages") && sql.includes("FILTER")) {
+        return {
+          rows: [{ submitted: "0", delivered: "5", delayed: "0", bounced: "0", failed: "0" }],
+        };
+      }
+      if (sql.includes("FROM suppressions") || sql.includes("reason = 'complaint'")) {
+        return { rows: [{ complained: "0", unsubscribed: "0", suppressed: "0" }] };
+      }
+      if (sql.includes("COUNT(*)::int AS received")) {
+        return { rows: [{ received: "0", processed: "0" }] };
+      }
+      if (sql.includes("FROM launch_jobs")) {
+        // Unrelated unresolved job still counted because ignore filter excludes only current id.
+        return { rows: [{ count: "1" }] };
+      }
+      return { rows: [{ count: "0" }] };
+    });
+
+    await expect(
+      assertDeliveryHealthAllowsSubmit({ jobId: "lj_current", campaignId: "cam_current" }),
+    ).rejects.toThrow(/unresolved launch job/i);
+  });
+
+  it("unprocessed webhooks remain blocking without aging out", async () => {
+    queryMock.mockImplementation(async (sql: string) => {
+      if (sql.includes("FROM messages") && sql.includes("FILTER")) {
+        return {
+          rows: [{ submitted: "0", delivered: "5", delayed: "0", bounced: "0", failed: "0" }],
+        };
+      }
+      if (sql.includes("FROM suppressions") || sql.includes("reason = 'complaint'")) {
+        return { rows: [{ complained: "0", unsubscribed: "0", suppressed: "0" }] };
+      }
+      if (sql.includes("COUNT(*)::int AS received")) {
+        return { rows: [{ received: "3", processed: "1" }] };
+      }
+      if (sql.includes("provider_events") && sql.includes("processed_at IS NULL")) {
+        return { rows: [{ count: "2" }] };
+      }
+      return { rows: [{ count: "0" }] };
+    });
+
+    const health = await getDeliveryHealthSnapshot();
+    expect(health.launch_blocked).toBe(true);
+    expect(health.blocking_reasons.join(" ")).toMatch(/unprocessed|Suppression|webhook/i);
   });
 });

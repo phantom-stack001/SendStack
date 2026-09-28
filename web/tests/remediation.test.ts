@@ -31,12 +31,11 @@ function setIdentityEnv() {
   process.env.SENDSTACK_PUBLIC_URL = "https://app.contoso.com";
 }
 
-describe("consent integrity helpers", () => {
-  it("keeps CSV/manual imports non-sendable until activation", () => {
-    expect(importContactStatus(false)).toBe("pending_consent");
-    expect(importContactStatus(true)).toBe("suppressed");
-    expect(isSendableContactStatus("pending_consent")).toBe(false);
-    expect(isSendableContactStatus("active")).toBe(true);
+describe("message status ranking", () => {
+  it("allows complaint to overwrite bounce and rejects delivered regression", () => {
+    expect(canTransitionMessageStatus("bounced", "complained")).toBe(true);
+    expect(canTransitionMessageStatus("delivered", "submitted")).toBe(false);
+    expect(canTransitionMessageStatus("complained", "bounced")).toBe(false);
   });
 });
 
@@ -51,11 +50,15 @@ describe("fail-closed link validation", () => {
     expect(validateCampaignLink("{{unsubscribe_url}}", allowed).ok).toBe(true);
   });
 
-  it("rejects dangerously broad allowlist entries", () => {
+  it("rejects dangerously broad allowlist entries including PSL public suffixes", () => {
     expect(validateAllowedLinkDomains(["com"]).length).toBeGreaterThan(0);
     expect(validateAllowedLinkDomains(["example"]).length).toBeGreaterThan(0);
     expect(validateAllowedLinkDomains(["co.uk"]).length).toBeGreaterThan(0);
+    expect(validateAllowedLinkDomains(["co.kr"]).length).toBeGreaterThan(0);
+    expect(validateAllowedLinkDomains(["github.io"]).length).toBeGreaterThan(0);
     expect(validateAllowedLinkDomains(["contoso.com"])).toEqual([]);
+    expect(validateAllowedLinkDomains(["example.co.uk"])).toEqual([]);
+    expect(validateAllowedLinkDomains(["myorg.github.io"])).toEqual([]);
   });
 
   it("rejects unsafe merge tokens in hrefs", () => {

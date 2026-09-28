@@ -13,11 +13,11 @@ import {
 } from "./pg-test-utils";
 
 const testUrl = resolveTestDatabaseUrl();
-const dbAvailable = await canConnectToTestDatabase(testUrl);
+const dbAvailable = Boolean(testUrl) && (await canConnectToTestDatabase(testUrl!));
 
 describe.skipIf(!dbAvailable)("PostgreSQL migrations (0001→0006)", () => {
   beforeAll(async () => {
-    applyTestEnv(testUrl);
+    applyTestEnv(testUrl!);
     await resetPool();
   });
 

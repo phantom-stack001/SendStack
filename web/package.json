@@ -11,14 +11,16 @@
     "db:migrate": "tsx scripts/migrate.ts",
     "db:seed": "tsx scripts/seed.ts",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "test:pg": "vitest run tests/pg-safety.test.ts tests/pg-migrate.test.ts tests/pg-integration.test.ts"
   },
   "dependencies": {
     "@next/env": "15.5.10",
     "next": "15.5.10",
     "pg": "^8.13.1",
     "react": "^19.0.0",
-    "react-dom": "^19.0.0"
+    "react-dom": "^19.0.0",
+    "tldts": "^7.4.16"
   },
   "devDependencies": {
     "@types/node": "^22.10.2",

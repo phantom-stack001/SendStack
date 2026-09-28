@@ -3,7 +3,12 @@ import { json } from "./http";
 import { config } from "./config";
 import { query } from "./db";
 import { applyComplianceFooter } from "./compliance-footer";
-import { activateContactWithConsent, createPendingContact, importContactStatus } from "./consent";
+import {
+  activateContactWithConsent,
+  createPendingContact,
+  importContactStatus,
+  updateContactEmailWithConsentReset,
+} from "./consent";
 import {
   consumeDailyReservation,
   releaseDailyReservation,
@@ -11,7 +16,11 @@ import {
   usedDailyVolume,
   utcDayString,
 } from "./daily-volume";
-import { assertLaunchAllowedByHealth, getDeliveryHealthSnapshot } from "./delivery-health";
+import {
+  assertDeliveryHealthAllowsSubmit,
+  assertLaunchAllowedByHealth,
+  getDeliveryHealthSnapshot,
+} from "./delivery-health";
 import { hashPassword, makeId, normalizeEmail, validEmail, verifyPassword } from "./ids";
 import {
   claimAndPrepareCampaignLaunch,
@@ -1103,52 +1112,22 @@ export async function handleApi(request: Request, path: string[]) {
     const consentSource = (body.consent_source ?? "").trim();
     if (!consentSource) return json(400, { error: "Consent source is required." });
 
-    const conflict = await query(
-      `SELECT id FROM contacts WHERE email = $1 AND id <> $2`,
-      [email, contactMatch[1]],
-    );
-    if (conflict.rows[0]) return json(409, { error: "That email address already exists." });
-
-    if (body.list_id) {
-      const list = await query(`SELECT id FROM lists WHERE id = $1`, [body.list_id]);
-      if (!list.rows[0]) return json(400, { error: "The selected list does not exist." });
-    }
-
-    const updated = await query(
-      `UPDATE contacts
-          SET email = $1,
-              first_name = $2,
-              last_name = $3,
-              status = COALESCE($4, status),
-              consent_source = $5,
-              updated_at = NOW()
-        WHERE id = $6
-        RETURNING id, email, first_name, last_name, status, consent_source, created_at`,
-      [
+    try {
+      const contact = await updateContactEmailWithConsentReset({
+        contactId: contactMatch[1],
+        actorUserId: auth.session.user_id,
         email,
-        (body.first_name ?? "").trim(),
-        (body.last_name ?? "").trim(),
-        nextStatus ?? null,
+        firstName: (body.first_name ?? "").trim(),
+        lastName: (body.last_name ?? "").trim(),
         consentSource,
-        contactMatch[1],
-      ],
-    );
-    if (!updated.rows[0]) return json(404, { error: "Contact not found." });
-
-    if (body.list_id) {
-      await query(`DELETE FROM list_contacts WHERE contact_id = $1`, [contactMatch[1]]);
-      await query(
-        `INSERT INTO list_contacts (list_id, contact_id, added_at) VALUES ($1, $2, NOW())`,
-        [body.list_id, contactMatch[1]],
-      );
+        status: nextStatus as "pending_consent" | "suppressed" | undefined,
+        listId: body.list_id ?? null,
+      });
+      return json(200, { contact });
+    } catch (error) {
+      const status = (error as { status?: number }).status ?? 400;
+      return json(status, { error: error instanceof Error ? error.message : "Contact update failed." });
     }
-
-    await recordRequestAudit(request, auth.session.user_id, "contact_updated", "contact", contactMatch[1], {
-      email,
-      status: updated.rows[0].status,
-      list_id: body.list_id ?? null,
-    });
-    return json(200, { contact: updated.rows[0] });
   }
   if (request.method === "DELETE" && contactMatch) {
     const auth = await requirePermission(request, "contacts.edit");
@@ -1493,6 +1472,9 @@ export async function handleApi(request: Request, path: string[]) {
       if (isSpecialUseRecipientDomain(targetEmail)) {
         return json(400, { error: "Special-use domains cannot receive test email." });
       }
+      if (["1", "true", "yes", "on"].includes((process.env.SENDSTACK_EMERGENCY_STOP ?? "").trim().toLowerCase())) {
+        return json(403, { error: "SENDSTACK_EMERGENCY_STOP is enabled." });
+      }
       if (isLive) {
         if (!identityConfigured(identity)) {
           return json(403, { error: "Identity and compliance settings are required before live test sends." });
@@ -1544,20 +1526,39 @@ export async function handleApi(request: Request, path: string[]) {
       }
 
       // Distinct test sends each get a new attempt id (and capacity unit).
-      // Retries of an ambiguous attempt must pass the same attempt_id to reuse reservation + idempotency key.
+      // Retries must pass the attempt_id of the exact persisted submission_unknown message.
       const bodyAttempt = body.attempt_id?.trim();
-      const existingUnknown = bodyAttempt
-        ? (
-            await query<{ id: string; idempotency_key: string | null; volume_reservation_id: string | null; status: string }>(
-              `SELECT id, idempotency_key, volume_reservation_id, status FROM messages
-                WHERE campaign_id = $1 AND lower(to_email) = $2 AND COALESCE(is_test, FALSE) = TRUE
-                  AND status = 'submission_unknown'
-                  AND idempotency_key LIKE $3
-                ORDER BY created_at DESC LIMIT 1`,
-              [campaign.id, targetEmail, `%:${bodyAttempt}`],
-            )
-          ).rows[0]
-        : null;
+      let existingUnknown: {
+        id: string;
+        idempotency_key: string | null;
+        volume_reservation_id: string | null;
+        status: string;
+      } | null = null;
+      if (bodyAttempt) {
+        const matched = (
+          await query<{
+            id: string;
+            idempotency_key: string | null;
+            volume_reservation_id: string | null;
+            status: string;
+          }>(
+            `SELECT id, idempotency_key, volume_reservation_id, status FROM messages
+              WHERE campaign_id = $1 AND lower(to_email) = $2 AND COALESCE(is_test, FALSE) = TRUE
+                AND idempotency_key LIKE $3
+              ORDER BY created_at DESC LIMIT 1`,
+            [campaign.id, targetEmail, `%:${bodyAttempt}`],
+          )
+        ).rows[0];
+        if (!matched || matched.status !== "submission_unknown") {
+          return json(409, {
+            error:
+              "attempt_id must identify the exact persisted submission_unknown test message for this campaign and recipient.",
+            attempt_id: bodyAttempt,
+            found_status: matched?.status ?? null,
+          });
+        }
+        existingUnknown = matched;
+      }
       const attemptId = bodyAttempt || makeId("tatt");
       const reservationKey = `test:${campaign.id}:${targetEmail}:${attemptId}`;
       const reserved = await reserveDailyVolume({
@@ -1608,6 +1609,36 @@ export async function handleApi(request: Request, path: string[]) {
       let providerAttempted = false;
       try {
         if (isLive) {
+          // Final gates immediately before Resend — fail closed if any gate changed.
+          if (["1", "true", "yes", "on"].includes((process.env.SENDSTACK_EMERGENCY_STOP ?? "").trim().toLowerCase())) {
+            await releaseDailyReservation(reserved.reservationId, true);
+            return json(403, { error: "SENDSTACK_EMERGENCY_STOP is enabled." });
+          }
+          if (!liveSendAllowed()) {
+            await releaseDailyReservation(reserved.reservationId, true);
+            return json(403, { error: "Live sending is disabled." });
+          }
+          if (!identityConfigured(identity) || !isTestRecipientAllowed(targetEmail, identity)) {
+            await releaseDailyReservation(reserved.reservationId, true);
+            return json(403, { error: "Identity/allowlist gate failed immediately before send." });
+          }
+          if (await isEmailSuppressed(targetEmail)) {
+            await releaseDailyReservation(reserved.reservationId, true);
+            await query(`UPDATE messages SET status = 'suppressed', error = $1 WHERE id = $2`, [
+              "Late suppression before provider submit",
+              messageId,
+            ]);
+            return json(403, { error: "That address is suppressed and cannot receive test email." });
+          }
+          try {
+            await assertDeliveryHealthAllowsSubmit({ requireThresholds: true });
+          } catch (error) {
+            await releaseDailyReservation(reserved.reservationId, true);
+            return json(403, {
+              error: error instanceof Error ? error.message : "Delivery health gate blocked test send.",
+            });
+          }
+
           providerAttempted = true;
           providerEmail = await sendResendEmail({
             to: targetEmail,
@@ -1681,17 +1712,8 @@ export async function handleApi(request: Request, path: string[]) {
       return json(400, { error: "Only draft or paused campaigns can be launched." });
     }
 
-    const contacts = (await query<{ id: string; email: string; first_name: string; last_name: string }>(
-      `SELECT c.id, c.email, c.first_name, c.last_name
-         FROM contacts c JOIN list_contacts lc ON lc.contact_id = c.id
-        WHERE lc.list_id = $1 AND c.status = 'active'
-          AND NOT EXISTS (SELECT 1 FROM suppressions s WHERE s.email = c.email)`,
-      [campaign.list_id],
-    )).rows;
-
-    if (!contacts.length) {
-      return json(400, { error: "No active, non-suppressed contacts are available to launch." });
-    }
+    // Audience select/validate/persist happens inside claimAndPrepareCampaignLaunch (same TX).
+    // Do not query live contacts here — that TOCTOU gap is closed by transactional freeze.
 
     const attachmentRows = await query<{ filename: string }>(
       `SELECT filename FROM campaign_attachments WHERE campaign_id = $1 AND blocked = FALSE`,
@@ -1760,18 +1782,9 @@ export async function handleApi(request: Request, path: string[]) {
       });
     }
 
-    if (isLive && contacts.some((contact) => isSpecialUseRecipientDomain(contact.email))) {
-      return json(400, { error: "Audience contains special-use domains that cannot receive live email." });
-    }
     if (isBroadcastLaunch && isLive) {
       if (!identityConfigured(identity)) {
         return json(403, { error: "Identity and compliance settings are incomplete. Live launch is blocked." });
-      }
-      for (const contact of contacts) {
-        const live = validateLiveRecipient(contact.email);
-        if (!live.ok) {
-          return json(400, { error: `Recipient ${contact.email}: ${live.error}` });
-        }
       }
     }
 
@@ -1785,7 +1798,11 @@ export async function handleApi(request: Request, path: string[]) {
         replyToEmail: replyTo,
         htmlBody: footered.html,
         textBody: footered.text,
+        validateLiveRecipients: Boolean(isBroadcastLaunch && isLive),
       });
+      if (prepared.totalRecipients === 0) {
+        return json(400, { error: "No active, non-suppressed contacts are available to launch." });
+      }
       await recordRequestAudit(request, auth.session.user_id, "campaign_launched", "campaign", campaign.id, {
         recipients: prepared.totalRecipients,
         delivery_mode: config.deliveryMode,

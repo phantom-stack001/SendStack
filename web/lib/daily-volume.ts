@@ -51,9 +51,11 @@ export async function reserveDailyVolume(input: {
     );
     await client.query(`SELECT day_utc FROM daily_volume_counters WHERE day_utc = $1::date FOR UPDATE`, [dayUtc]);
 
-    const existing = await client.query<{ id: string; status: string }>(
-      `SELECT id, status FROM daily_volume_reservations WHERE reservation_key = $1`,
-      [input.reservationKey],
+    const existing = await client.query<{ id: string; status: string; day_utc: string }>(
+      `SELECT id, status, day_utc::text
+         FROM daily_volume_reservations
+        WHERE reservation_key = $1 AND day_utc = $2::date`,
+      [input.reservationKey, dayUtc],
     );
     if (existing.rows[0]) {
       if (existing.rows[0].status === "released") {
@@ -150,8 +152,9 @@ export async function reserveDailyVolumeBatch(input: {
     const existing = await client.query<{ id: string; reservation_key: string; status: string }>(
       `SELECT id, reservation_key, status
          FROM daily_volume_reservations
-        WHERE reservation_key = ANY($1::text[])`,
-      [keys],
+        WHERE day_utc = $1::date
+          AND reservation_key = ANY($2::text[])`,
+      [dayUtc, keys],
     );
     const byKey = new Map(existing.rows.map((row) => [row.reservation_key, row]));
     const idempotentKeys: string[] = [];
