@@ -154,6 +154,10 @@ contract lives with the code, so each build validates against its own expectatio
 
 ---
 
+## 4a. Hobby worker ticks
+
+Production on Vercel Hobby does not run a cron. `pnpm launch-jobs:tick` (from `web/`) performs one authenticated request and stops. Do not wrap it in a timer, retry daemon, or external scheduler. A continuous schedule is a Vercel Pro decision and is not part of the canary window.
+
 ## 5. Backup handling
 
 The pre-migration backup is a custom-format `pg_dump`, stored outside the repository with

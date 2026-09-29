@@ -10,6 +10,7 @@
     "lint": "next lint",
     "db:migrate": "tsx scripts/migrate.ts",
     "db:seed": "tsx scripts/seed.ts",
+    "launch-jobs:tick": "tsx scripts/launch-jobs-tick.ts",
     "test": "vitest run",
     "test:watch": "vitest",
     "test:pg": "vitest run tests/pg-safety.test.ts tests/pg-migrate.test.ts tests/pg-migration-safety.test.ts tests/pg-launch-safety.test.ts tests/pg-integration.test.ts"

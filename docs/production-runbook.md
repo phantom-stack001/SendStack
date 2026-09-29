@@ -64,18 +64,19 @@ Required before live unlock:
 
 Rotate credentials if prior unauthorized use is suspected.
 
-### 6. Configure and verify the external cron
+### 6. Manual worker tick on Vercel Hobby
 
-`web/vercel.json` intentionally has **no** cron schedule. An external once-per-minute scheduler must call:
+`web/vercel.json` has **no** cron schedule. Do not add one on Hobby, and do not run an external loop to imitate Pro.
 
-```http
-GET /api/cron/launch-jobs
-Authorization: Bearer ${CRON_SECRET}
+From `web/`, with `CRON_SECRET` and the canonical `SENDSTACK_PUBLIC_URL` in `.env.production`:
+
+```bash
+pnpm launch-jobs:tick
 ```
 
-- Without this, durable live launches cannot complete.
-- Admins can tick manually via `POST /api/launch-jobs/tick` (CSRF + `campaigns.send`) for debugging only.
-- Confirm cron freshness via readiness / launch job diagnostics (non-sensitive).
+The command makes exactly one `GET /api/cron/launch-jobs` request, refuses redirects, prints only the bounded tick result, and exits. It is for a controlled manual check while live sending is disabled and the emergency stop is on. Continuous scheduling waits for Vercel Pro.
+
+Admins can also tick once via `POST /api/launch-jobs/tick` (CSRF + `campaigns.send`). That path is not a scheduler either.
 
 ### 7. Configure and verify signed Resend webhooks
 
