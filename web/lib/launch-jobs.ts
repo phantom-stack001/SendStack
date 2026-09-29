@@ -5,6 +5,7 @@ import {
   reserveDailyVolumeBatch,
 } from "./daily-volume";
 import { getPool, query } from "./db";
+import { withSubmitBarrier } from "./submit-barrier";
 import { assertDeliveryHealthAllowsSubmit, ensureDeliveryHealthBlock } from "./delivery-health";
 import { makeId } from "./ids";
 import {
@@ -52,12 +53,43 @@ export type LaunchJobRow = {
   provider_import_id: string | null;
   reservation_batch_id: string | null;
   last_error: string | null;
+  submit_attempted_at?: string | null;
 };
+
+/** Statuses from which a generic retry may return the job to pending. */
+const PRE_SUBMIT_STATUSES = ["pending", "running", "ready_to_submit"] as const;
+
+function isPostSubmit(job: Pick<LaunchJobRow, "status" | "submit_attempted_at">): boolean {
+  if (job.submit_attempted_at) return true;
+  return ![...PRE_SUBMIT_STATUSES].includes(job.status as (typeof PRE_SUBMIT_STATUSES)[number]);
+}
+
+/**
+ * The worker sends the frozen snapshot bytes. It does not reload company identity
+ * or reapply the compliance footer. Empty text is still a frozen snapshot.
+ */
+function frozenLaunchContent(
+  snapshot: LaunchSnapshot | null,
+  campaign: CampaignLaunchRow,
+): { html: string; text: string } {
+  if (snapshot && typeof snapshot.html_body === "string" && typeof snapshot.text_body === "string") {
+    return { html: snapshot.html_body, text: snapshot.text_body };
+  }
+  return applyComplianceFooter(campaign.html_body, campaign.text_body, loadSendingIdentity(), {
+    broadcast: true,
+  });
+}
 
 type ResendProvider = typeof import("./providers/resend");
 type ProcessOptions = {
   provider?: Partial<ResendProvider>;
   live?: boolean;
+  /** Test seam: runs after the provider accepts a broadcast, before local finalization. */
+  afterProviderAccepted?: () => Promise<void>;
+  /** Test seam: runs before the submit barrier, so a concurrent suppression can commit. */
+  beforeSubmitBarrier?: () => Promise<void>;
+  /** Test seam: runs after the job row is marked completed. */
+  afterCompleted?: () => Promise<void>;
 };
 
 type CampaignLaunchRow = {
@@ -502,7 +534,6 @@ export async function claimLaunchJob(workerId: string): Promise<LaunchJobRow | n
          WHERE status IN ('pending', 'running', 'ready_to_submit', 'submitting', 'reconciling', 'submission_unknown')
            AND (lease_expires_at IS NULL OR lease_expires_at < NOW())
            AND (next_retry_at IS NULL OR next_retry_at <= NOW())
-           AND cancel_requested_at IS NULL
          ORDER BY created_at ASC
          FOR UPDATE SKIP LOCKED
          LIMIT 1
@@ -535,6 +566,29 @@ export async function claimLaunchJob(workerId: string): Promise<LaunchJobRow | n
     return null;
   }
   return job;
+}
+
+/**
+ * The lease identity a worker acquired at claim time.
+ *
+ * A fencing token is only a fence if it is pinned. Reloading a job row also
+ * reloads `lease_owner`/`lease_generation`, which would make every subsequent
+ * compare-and-swap compare the database against itself — a worker whose lease
+ * had been stolen would silently regain write authority and could submit the
+ * same broadcast a second time. Reloads must therefore keep the claimed values.
+ */
+export type LeaseFence = {
+  lease_owner: string | null;
+  lease_generation: number;
+};
+
+export function leaseFenceOf(job: Pick<LaunchJobRow, "lease_owner" | "lease_generation">): LeaseFence {
+  return { lease_owner: job.lease_owner, lease_generation: job.lease_generation };
+}
+
+/** Re-apply the pinned lease identity to a freshly loaded row. */
+function withFence(row: LaunchJobRow, fence: LeaseFence): LaunchJobRow {
+  return { ...row, lease_owner: fence.lease_owner, lease_generation: fence.lease_generation };
 }
 
 /** Renew lease fenced by lease_owner + lease_generation. Stale workers no-op. */
@@ -601,14 +655,23 @@ async function scheduleRetry(job: LaunchJobRow, errorMessage: string): Promise<v
     return;
   }
   const delay = retryBackoffSeconds(job.attempt_count);
-  await fenceUpdate(
-    job,
-    `status = 'pending',
-     last_error = $1,
-     next_retry_at = NOW() + ($2 || ' seconds')::interval,
-     lease_expires_at = NOW(),
-     lease_owner = NULL`,
-    [errorMessage.slice(0, 500), String(delay)],
+  // The WHERE clause is the state machine: a post-submit status or a recorded
+  // attempt can never be moved back to pending, even if the TypeScript caller
+  // passes a stale in-memory row. The 0007 trigger rejects the same transition.
+  await query(
+    `UPDATE launch_jobs
+        SET status = 'pending',
+            last_error = $1,
+            next_retry_at = NOW() + ($2 || ' seconds')::interval,
+            lease_expires_at = NOW(),
+            lease_owner = NULL,
+            updated_at = NOW()
+      WHERE id = $3
+        AND lease_owner = $4
+        AND lease_generation = $5
+        AND submit_attempted_at IS NULL
+        AND status IN ('pending', 'running', 'ready_to_submit')`,
+    [errorMessage.slice(0, 500), String(delay), job.id, job.lease_owner, job.lease_generation],
   );
 }
 
@@ -629,7 +692,12 @@ async function failJob(
   );
   await query(
     `UPDATE campaigns
-        SET status = CASE WHEN status = 'submission_unknown' THEN status ELSE 'failed' END,
+        SET status = CASE
+              WHEN status IN (
+                'submission_unknown', 'cancel_requested', 'cancelled', 'paused', 'partially_sent'
+              ) THEN status
+              ELSE 'failed'
+            END,
             provider_status = $1,
             cancellable = FALSE,
             updated_at = NOW()
@@ -766,33 +834,44 @@ async function preflightIrreversibleOp(
   job: LaunchJobRow,
 ): Promise<{ ok: true } | { ok: false; result: { done: boolean; advanced: number; status: string } }> {
   if (emergencyStopEnabled()) {
-    return {
-      ok: false,
-      result: await failJob(job, "SENDSTACK_EMERGENCY_STOP is enabled.", { manualReview: true }),
-    };
-  }
-  if (job.cancel_requested_at) {
+    // A kill switch must be reversible: park the job instead of terminalizing it, so
+    // clearing the stop resumes the launch rather than requiring manual DB repair.
+    // Volume stays reserved because the send may still happen after the incident.
     await fenceUpdate(
       job,
-      `status = 'cancelled',
-       terminal_reason = 'cancel_requested',
+      `status = CASE WHEN status IN ('pending', 'running') THEN 'pending' ELSE status END,
+       last_error = $1,
+       next_retry_at = NOW() + INTERVAL '60 seconds',
        lease_expires_at = NOW(),
        lease_owner = NULL`,
-      [],
+      ["SENDSTACK_EMERGENCY_STOP is enabled."],
     );
-    return { ok: false, result: { done: true, advanced: 0, status: "cancelled" } };
+    return {
+      ok: false,
+      result: { done: false, advanced: 0, status: "paused_emergency_stop" },
+    };
   }
   const campaign = await query<{ status: string }>(
     `SELECT status FROM campaigns WHERE id = $1`,
     [job.campaign_id],
   );
   const campaignStatus = campaign.rows[0]?.status;
-  if (campaignStatus === "cancel_requested" || campaignStatus === "cancelled" || campaignStatus === "paused") {
+  const cancelIntent =
+    Boolean(job.cancel_requested_at) ||
+    campaignStatus === "cancel_requested" ||
+    campaignStatus === "cancelled" ||
+    campaignStatus === "paused";
+  if (cancelIntent) {
+    // A submit may already have reached the provider. Recording `cancelled` here
+    // would claim a stop that was not confirmed. Reconcile instead.
+    if (isPostSubmit(job)) {
+      return { ok: false, result: { done: false, advanced: 0, status: job.status } };
+    }
     await fenceUpdate(
       job,
       `status = 'cancelled',
        cancel_requested_at = COALESCE(cancel_requested_at, NOW()),
-       terminal_reason = 'campaign_cancelled',
+       terminal_reason = 'cancel_requested',
        lease_expires_at = NOW(),
        lease_owner = NULL`,
       [],
@@ -919,12 +998,20 @@ export async function processLaunchJobChunk(
     return failJob(job, "Campaign missing", { releaseVolume: true });
   }
 
+  // Cancel intent is honoured before any chunk work. Jobs carrying cancel intent are
+  // claimable (they must be, or a cancel issued while `submitting` would leave the job
+  // unclaimable and therefore permanently non-terminal, blocking every future launch).
+  // Pre-submit cancel can be definite: the provider was never called. Post-submit
+  // cancel stays on the reconcile path so an unknown provider result is not stored
+  // as a confirmed stop.
+  if (job.cancel_requested_at && !isPostSubmit(job)) {
+    const cancelGuard = await preflightIrreversibleOp(job);
+    if (!cancelGuard.ok) return cancelGuard.result;
+  }
+
   const live = options?.live ?? liveSendAllowed();
-  const identity = loadSendingIdentity();
   const snapshot = (job.snapshot_json ?? null) as LaunchSnapshot | null;
-  const htmlBody = snapshot?.html_body ?? campaign.html_body;
-  const textBody = snapshot?.text_body ?? campaign.text_body;
-  const footered = applyComplianceFooter(htmlBody, textBody, identity, { broadcast: true });
+  const footered = frozenLaunchContent(snapshot, campaign);
 
   if (
     job.status === "submission_unknown" ||
@@ -1105,9 +1192,14 @@ export async function processLaunchJobChunk(
 
   const advanced = recipients.rows.length;
   const nextOffset = job.cursor_offset + advanced;
+  // attempt_count is incremented on every lease claim, and a healthy multi-chunk
+  // launch needs many claims (each import poll costs one). Resetting it whenever the
+  // cursor genuinely advances keeps max_attempts a failure budget rather than a cap
+  // on how long a progressing campaign may take.
   const advancedOk = await fenceUpdate(
     job,
     `cursor_offset = $1,
+     attempt_count = 0,
      lease_expires_at = NOW() + ($2 || ' seconds')::interval`,
     [nextOffset, String(LAUNCH_LEASE_SECONDS)],
   );
@@ -1127,6 +1219,23 @@ export async function processLaunchJobChunk(
     );
   }
   return { done: false, advanced, status: "running" };
+}
+
+async function cancellationInProgress(jobId: string, campaignId: string): Promise<boolean> {
+  const row = await query<{ cancel_requested_at: string | null; campaign_status: string }>(
+    `SELECT j.cancel_requested_at, c.status AS campaign_status
+       FROM launch_jobs j
+       JOIN campaigns c ON c.id = j.campaign_id
+      WHERE j.id = $1 AND c.id = $2`,
+    [jobId, campaignId],
+  );
+  const status = row.rows[0]?.campaign_status;
+  return (
+    Boolean(row.rows[0]?.cancel_requested_at) ||
+    status === "cancel_requested" ||
+    status === "cancelled" ||
+    status === "paused"
+  );
 }
 
 async function finalizeBroadcastSubmission(
@@ -1171,8 +1280,12 @@ async function finalizeBroadcastSubmission(
 
   const identity = loadSendingIdentity();
   const snapshot = (job.snapshot_json ?? null) as LaunchSnapshot | null;
+  // Pinned at entry: reloads below refresh provider ids and status but must never
+  // refresh the lease identity, or the fence stops excluding a stale worker.
+  const fence = leaseFenceOf(job);
   // Prefer fresh DB values after long import/chunk work — avoid stale in-memory ids.
-  let workingJob = (await loadJobById(job.id)) ?? job;
+  const reloaded = await loadJobById(job.id);
+  let workingJob = reloaded ? withFence(reloaded, fence) : job;
   let broadcastId =
     (await loadFreshProviderBroadcastId(workingJob.id, campaign.id)) ||
     workingJob.provider_broadcast_id ||
@@ -1224,14 +1337,26 @@ async function finalizeBroadcastSubmission(
         remote.status === "sent" ||
         remote.status === "scheduled"
       ) {
-        await fenceUpdate(
+        const accepted = await fenceUpdate(
           workingJob,
           `status = 'completed', terminal_reason = 'provider_accepted', lease_expires_at = NOW()`,
           [],
         );
+        if (!accepted) {
+          // Stale lease. Do not touch the campaign, recipients, or volume.
+          return { done: false, advanced: 0, status: workingJob.status };
+        }
+        if (await cancellationInProgress(workingJob.id, campaign.id)) {
+          // Provider accepted, but cancellation is already recorded. Leave the
+          // campaign status untouched so reconciliation cannot revive a send.
+          return { done: true, advanced: 0, status: "completed" };
+        }
         await query(
           `UPDATE campaigns
-              SET status = 'sending',
+              SET status = CASE
+                    WHEN status IN ('cancel_requested', 'cancelled', 'paused') THEN status
+                    ELSE 'sending'
+                  END,
                   provider_status = $1,
                   cancellable = TRUE,
                   submission_state = 'accepted',
@@ -1249,8 +1374,52 @@ async function finalizeBroadcastSubmission(
         return { done: true, advanced: 0, status: "completed" };
       }
       if (remote.status === "draft") {
-        // Safe to send once (or retry after a crashed submitting attempt).
-      } else if (remote.status === "canceled" || remote.status === "cancelled" || remote.status === "failed") {
+        // Reaching here means `submitting` was committed before a provider send, so a
+        // send may have been accepted and simply not reflected yet (processing lag or a
+        // stale read). Resend honours Idempotency-Key only on POST /emails and
+        // /emails/batch — never on POST /broadcasts/{id}/send — so re-sending could
+        // deliver the campaign to the entire audience twice. Escalate instead of guessing.
+        await fenceUpdate(
+          workingJob,
+          `status = 'manual_review',
+           terminal_reason = 'submit_attempted_provider_reports_draft',
+           last_error = $1,
+           lease_expires_at = NOW(),
+           lease_owner = NULL`,
+          [
+            "A broadcast send was already attempted but the provider still reports draft. " +
+              "Confirm in the Resend dashboard whether the broadcast was sent before resuming.",
+          ],
+        );
+        await ensureDeliveryHealthBlock({
+          kind: "manual_review",
+          detail:
+            "Broadcast send was attempted but the provider still reports draft; manual confirmation required before any resend.",
+          relatedEntityType: "launch_job",
+          relatedEntityId: workingJob.id,
+        }).catch(() => undefined);
+        return { done: true, advanced: 0, status: "manual_review" };
+      } else if (remote.status === "canceled" || remote.status === "cancelled") {
+        const confirmed = await fenceUpdate(
+          workingJob,
+          `status = 'cancelled',
+           terminal_reason = 'provider_confirmed_cancel',
+           lease_expires_at = NOW(),
+           lease_owner = NULL`,
+          [],
+        );
+        if (confirmed) {
+          await query(
+            `UPDATE campaigns
+                SET provider_status = 'cancelled',
+                    updated_at = NOW()
+              WHERE id = $1
+                AND status IN ('sending', 'cancel_requested', 'submission_unknown', 'reconciling')`,
+            [campaign.id],
+          );
+        }
+        return { done: true, advanced: 0, status: "cancelled" };
+      } else if (remote.status === "failed") {
         return failJob(workingJob, `Provider broadcast status: ${remote.status}`);
       } else {
         await fenceUpdate(
@@ -1287,7 +1456,8 @@ async function finalizeBroadcastSubmission(
   if (!audienceGuard.ok) return audienceGuard.result;
 
   // Reload again immediately before send CAS — broadcast id / cancel may have changed.
-  workingJob = (await loadJobById(workingJob.id)) ?? workingJob;
+  const preSend = await loadJobById(workingJob.id);
+  workingJob = preSend ? withFence(preSend, fence) : workingJob;
   broadcastId =
     (await loadFreshProviderBroadcastId(workingJob.id, campaign.id)) || broadcastId;
   if (!broadcastId) {
@@ -1297,13 +1467,20 @@ async function finalizeBroadcastSubmission(
     return { done: true, advanced: 0, status: "cancelled" };
   }
 
+  // A submit attempt is recorded by committing `submitting` before the provider call,
+  // so any of these statuses means a send may already have reached Resend. Resend does
+  // not honour Idempotency-Key on POST /broadcasts/{id}/send, so re-entering the submit
+  // path here would risk a second delivery to the whole audience. Recovery from these
+  // states goes only through the reconcile branch above.
   if (
-    workingJob.status === "pending" ||
-    workingJob.status === "running" ||
+    workingJob.status === "submitting" ||
     workingJob.status === "submission_unknown" ||
-    workingJob.status === "reconciling" ||
-    workingJob.status === "submitting"
+    workingJob.status === "reconciling"
   ) {
+    return { done: false, advanced: 0, status: workingJob.status };
+  }
+
+  if (workingJob.status === "pending" || workingJob.status === "running") {
     const ready = await fenceUpdate(workingJob, `status = 'ready_to_submit'`, []);
     if (!ready) return { done: false, advanced: 0, status: workingJob.status };
     workingJob = { ...workingJob, status: "ready_to_submit" };
@@ -1313,26 +1490,63 @@ async function finalizeBroadcastSubmission(
     return { done: false, advanced: 0, status: workingJob.status };
   }
 
-  const cas = await query<LaunchJobRow>(
-    `UPDATE launch_jobs
-        SET status = 'submitting', updated_at = NOW()
-      WHERE id = $1
-        AND lease_owner = $2
-        AND lease_generation = $3
-        AND status IN ('ready_to_submit', 'running')
-        AND cancel_requested_at IS NULL
-      RETURNING *`,
-    [workingJob.id, workingJob.lease_owner, workingJob.lease_generation],
-  );
-  if (!cas.rows[0]) {
-    // Cancel (or another worker) won the race — do not call provider.
-    return { done: true, advanced: 0, status: "cancelled" };
-  }
-  workingJob = cas.rows[0];
+  if (options?.beforeSubmitBarrier) await options.beforeSubmitBarrier();
 
-  const sendKey = buildIdempotencyKey(["broadcast-send", campaign.id, broadcastId]);
   try {
-    await sendBroadcast(broadcastId, sendKey);
+    const guardedSend = await withSubmitBarrier(async () => {
+      const inside = await preflightIrreversibleOp(workingJob);
+      if (!inside.ok) return { sent: false as const, result: inside.result };
+      try {
+        await assertDeliveryHealthAllowsSubmit({
+          requireThresholds: true,
+          jobId: workingJob.id,
+          campaignId: campaign.id,
+        });
+      } catch (error) {
+        await fenceUpdate(
+          workingJob,
+          `status = 'pending',
+           last_error = $1,
+           next_retry_at = NOW() + INTERVAL '60 seconds',
+           lease_expires_at = NOW(),
+           lease_owner = NULL`,
+          [error instanceof Error ? error.message : "Delivery health gate blocked submission."],
+        );
+        return {
+          sent: false as const,
+          result: { done: true, advanced: 0, status: "paused_health_block" },
+        };
+      }
+      const late = await enforcePreparedAudience(workingJob);
+      if (!late.ok) return { sent: false as const, result: late.result };
+
+      const cas = await query<LaunchJobRow>(
+        `UPDATE launch_jobs
+            SET status = 'submitting',
+                submit_attempted_at = COALESCE(submit_attempted_at, NOW()),
+                updated_at = NOW()
+          WHERE id = $1
+            AND lease_owner = $2
+            AND lease_generation = $3
+            AND status IN ('ready_to_submit', 'running')
+            AND submit_attempted_at IS NULL
+            AND cancel_requested_at IS NULL
+          RETURNING *`,
+        [workingJob.id, workingJob.lease_owner, workingJob.lease_generation],
+      );
+      if (!cas.rows[0]) {
+        return {
+          sent: false as const,
+          result: { done: true, advanced: 0, status: "cancelled" },
+        };
+      }
+      workingJob = cas.rows[0];
+      const sendKey = buildIdempotencyKey(["broadcast-send", campaign.id, broadcastId]);
+      await sendBroadcast(broadcastId, sendKey);
+      return { sent: true as const };
+    });
+    if (!guardedSend.sent) return guardedSend.result;
+    if (options?.afterProviderAccepted) await options.afterProviderAccepted();
   } catch (error) {
     // Ambiguous: do not release volume; keep reserved until reconcile confirms.
     await fenceUpdate(
@@ -1366,6 +1580,17 @@ async function finalizeBroadcastSubmission(
     return { done: false, advanced: 0, status: "submission_unknown" };
   }
 
+  if (await cancellationInProgress(workingJob.id, campaign.id)) {
+    // The provider accepted, then a cancel landed. Do not rewrite the campaign
+    // back to sending, and do not claim the send was stopped.
+    await fenceUpdate(
+      workingJob,
+      `status = 'submission_unknown', last_error = $1`,
+      ["Cancellation was recorded after provider acceptance."],
+    );
+    return { done: false, advanced: 0, status: "submission_unknown" };
+  }
+
   const completed = await fenceUpdate(
     workingJob,
     `status = 'completed', terminal_reason = 'broadcast_sent', lease_expires_at = NOW()`,
@@ -1376,9 +1601,13 @@ async function finalizeBroadcastSubmission(
     // Leave honest uncertain state; another tick/reconcile can confirm.
     return { done: false, advanced: 0, status: "submission_unknown" };
   }
+  if (options?.afterCompleted) await options.afterCompleted();
   await query(
     `UPDATE campaigns
-        SET status = 'sending',
+        SET status = CASE
+              WHEN status IN ('cancel_requested', 'cancelled', 'paused') THEN status
+              ELSE 'sending'
+            END,
             provider_status = 'queued',
             submission_state = 'accepted',
             cancellable = TRUE,
@@ -1449,7 +1678,8 @@ export async function requestLaunchCancel(campaignId: string): Promise<{
               lease_expires_at = NOW(),
               updated_at = NOW()
         WHERE campaign_id = $1
-          AND status IN ('pending', 'running', 'ready_to_submit', 'reconciling', 'submission_unknown')`,
+          AND submit_attempted_at IS NULL
+          AND status IN ('pending', 'running', 'ready_to_submit')`,
       [campaignId],
     );
     // Already submitting: record cancel intent without claiming the send was stopped.
@@ -1458,7 +1688,7 @@ export async function requestLaunchCancel(campaignId: string): Promise<{
           SET cancel_requested_at = COALESCE(cancel_requested_at, NOW()),
               updated_at = NOW()
         WHERE campaign_id = $1
-          AND status = 'submitting'`,
+          AND status IN ('submitting', 'submission_unknown', 'reconciling')`,
       [campaignId],
     );
     if (broadcastAcceptedOrSubmitting) {
@@ -1491,6 +1721,14 @@ export async function requestLaunchCancel(campaignId: string): Promise<{
   if (broadcastId && liveSendAllowed()) {
     try {
       await cancelResendBroadcast(broadcastId);
+      const remote = await getResendBroadcast(broadcastId);
+      if (remote.status !== "canceled" && remote.status !== "cancelled") {
+        return {
+          campaignStatus: "cancel_requested",
+          providerCancelled: null,
+          error: "Provider cancel was not confirmed. Recipient outcomes stay pending.",
+        };
+      }
       // Confirmed provider cancel path: terminalize unsent outcome_pending / cancel_requested.
       await query(
         `UPDATE campaign_recipients
@@ -1531,8 +1769,11 @@ export async function requestLaunchCancel(campaignId: string): Promise<{
   return { campaignStatus: "paused", providerCancelled: null };
 }
 
-export async function reconcileCampaignAfterCancel(campaignId: string): Promise<void> {
-  const campaign = await query<{ status: string }>(
+export async function reconcileCampaignAfterCancel(
+  campaignId: string,
+  sql: { query: typeof query } = { query },
+): Promise<void> {
+  const campaign = await sql.query<{ status: string }>(
     `SELECT status FROM campaigns WHERE id = $1`,
     [campaignId],
   );
@@ -1545,7 +1786,7 @@ export async function reconcileCampaignAfterCancel(campaignId: string): Promise<
     return;
   }
 
-  const stats = await query<{ status: string; count: string }>(
+  const stats = await sql.query<{ status: string; count: string }>(
     `SELECT status, COUNT(*)::int AS count FROM campaign_recipients WHERE campaign_id = $1 GROUP BY status`,
     [campaignId],
   );
@@ -1559,7 +1800,7 @@ export async function reconcileCampaignAfterCancel(campaignId: string): Promise<
     (counts.processing ?? 0);
 
   if (pending === 0 && sentLike > 0) {
-    await query(
+    await sql.query(
       `UPDATE campaigns
           SET status = 'partially_sent', completed_at = COALESCE(completed_at, NOW()), cancellable = FALSE, updated_at = NOW()
         WHERE id = $1
@@ -1567,12 +1808,12 @@ export async function reconcileCampaignAfterCancel(campaignId: string): Promise<
       [campaignId],
     );
   } else if (pending === 0 && sentLike === 0) {
-    await query(
+    await sql.query(
       `UPDATE campaign_recipients SET status = 'cancelled'
         WHERE campaign_id = $1 AND status IN ('cancel_requested', 'outcome_pending')`,
       [campaignId],
     );
-    await query(
+    await sql.query(
       `UPDATE campaigns
           SET status = 'cancelled', completed_at = COALESCE(completed_at, NOW()), cancellable = FALSE, updated_at = NOW()
         WHERE id = $1
@@ -1592,6 +1833,9 @@ export async function runLaunchWorkerTick(input: {
   maxChunks?: number;
   provider?: Partial<ResendProvider>;
   live?: boolean;
+  afterProviderAccepted?: () => Promise<void>;
+  afterCompleted?: () => Promise<void>;
+  beforeSubmitBarrier?: () => Promise<void>;
 }): Promise<{
   claimed: boolean;
   launch_job_id: string | null;
@@ -1604,6 +1848,18 @@ export async function runLaunchWorkerTick(input: {
   const timeBudgetMs = input.timeBudgetMs ?? 20_000;
   const maxChunks = input.maxChunks ?? 5;
   const started = Date.now();
+  if (emergencyStopEnabled()) {
+    // Do not even claim: claiming burns an attempt and takes a lease for no purpose.
+    return {
+      claimed: false,
+      launch_job_id: null,
+      campaign_id: null,
+      done: false,
+      advanced: 0,
+      status: "paused_emergency_stop",
+      chunks: 0,
+    };
+  }
   const job = await claimLaunchJob(input.workerId);
   if (!job) {
     return {
@@ -1617,6 +1873,7 @@ export async function runLaunchWorkerTick(input: {
     };
   }
 
+  const claimFence = leaseFenceOf(job);
   let current = job;
   let totalAdvanced = 0;
   let chunks = 0;
@@ -1633,6 +1890,9 @@ export async function runLaunchWorkerTick(input: {
       const result = await processLaunchJobChunk(current, {
         provider: input.provider,
         live: input.live,
+        afterProviderAccepted: input.afterProviderAccepted,
+        afterCompleted: input.afterCompleted,
+        beforeSubmitBarrier: input.beforeSubmitBarrier,
       });
       chunks += 1;
       totalAdvanced += result.advanced;
@@ -1641,7 +1901,9 @@ export async function runLaunchWorkerTick(input: {
 
       const refreshed = await loadJobById(current.id);
       if (!refreshed) break;
-      current = refreshed;
+      // Keep the claim's lease identity: a refreshed token would let this worker
+      // keep writing after another worker legitimately stole the lease.
+      current = withFence(refreshed, claimFence);
 
       if (result.done && result.status !== "submission_unknown" && result.status !== "reconciling") {
         break;
@@ -1655,8 +1917,29 @@ export async function runLaunchWorkerTick(input: {
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : "Launch worker chunk failed";
-      await scheduleRetry(current, message);
-      lastStatus = "pending";
+      const fresh = await loadJobById(current.id);
+      const row = fresh ? withFence(fresh, claimFence) : current;
+      if (isPostSubmit(row)) {
+        // A provider call may already have been accepted. Never return to pending.
+        if (!["completed", "manual_review", "cancelled"].includes(row.status)) {
+          await query(
+            `UPDATE launch_jobs
+                SET status = 'submission_unknown',
+                    last_error = $1,
+                    lease_expires_at = NOW(),
+                    updated_at = NOW()
+              WHERE id = $2
+                AND lease_owner = $3
+                AND lease_generation = $4
+                AND status IN ('submitting', 'submission_unknown', 'reconciling', 'running', 'ready_to_submit')`,
+            [message.slice(0, 500), row.id, row.lease_owner, row.lease_generation],
+          );
+        }
+        lastStatus = row.status === "completed" ? "completed" : "submission_unknown";
+      } else {
+        await scheduleRetry(row, message);
+        lastStatus = "pending";
+      }
       done = false;
       break;
     }

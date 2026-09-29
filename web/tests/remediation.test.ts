@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { importContactStatus, isSendableContactStatus } from "../lib/consent";
 import { applyComplianceFooter } from "../lib/compliance-footer";
+import { assertProductionSessionCookie } from "../lib/env";
 import {
   canTransitionMessageStatus,
   canTransitionRecipientStatus,
@@ -104,16 +105,68 @@ describe("compliance footer injection", () => {
     expect(result.text).toContain("{{{RESEND_UNSUBSCRIBE_URL}}}");
   });
 
-  it("always reinjects canonical footer even when marker text was author-supplied", () => {
+  it("preserves author content that contains dashes and Unsubscribe lines", () => {
     setIdentityEnv();
     const result = applyComplianceFooter(
-      '<p>Hi</p><div class="sendstack-compliance-footer">stale author footer</div>',
-      "Hi\n---\nOld Co\nUnsubscribe: {{unsubscribe_url}}",
+      "<p>Hi</p><p>Section --- still here</p>",
+      "Hi\n---\nOld Co\nUnsubscribe: read this line",
       loadSendingIdentity(),
     );
-    expect(result.html).toContain("Contoso Ltd");
-    expect(result.html).not.toContain("stale author footer");
-    expect((result.html.match(/sendstack-compliance-footer/g) || []).length).toBe(1);
+    expect(result.html).toContain("Section --- still here");
+    expect(result.text).toContain("Unsubscribe: read this line");
+    expect(result.text).toContain("Contoso Ltd");
+    const again = applyComplianceFooter(result.html, result.text, loadSendingIdentity());
+    expect(again.html).toBe(result.html);
+    expect(again.text).toBe(result.text);
+  });
+
+  it("rejects CSS that can conceal the compliance footer", () => {
+    setIdentityEnv();
+    const identity = loadSendingIdentity();
+    expect(() =>
+      applyComplianceFooter('<p style="display:none">Hi</p>', "Hi", identity),
+    ).toThrow(/conceal/i);
+    for (const css of [
+      "visibility:hidden",
+      "opacity:0",
+      "font-size:0",
+      "color:transparent",
+    ]) {
+      expect(() =>
+        applyComplianceFooter(`<style>.sendstack-compliance-footer{${css}}</style><p>Hi</p>`, "Hi", identity),
+      ).toThrow(/conceal/i);
+    }
+    const stripped = applyComplianceFooter("<style>p{color:#333}</style><p>Hi</p>", "Hi", identity);
+    expect(stripped.html).not.toContain("<style");
+    expect(stripped.html).toContain("Contoso Ltd");
+    expect(stripped.html).toContain("<p>Hi</p>");
+  });
+
+  it("rejects concealment added after the footer was already applied", () => {
+    setIdentityEnv();
+    const identity = loadSendingIdentity();
+    const first = applyComplianceFooter(
+      "<p>Hi</p><p>Section --- still here</p>",
+      "Hi\n---\nKeep this author line",
+      identity,
+    );
+    expect(first.html).toContain("Section --- still here");
+    expect(first.text).toContain("Keep this author line");
+    const hidden = first.html.replace(
+      "<p>Hi</p>",
+      '<style>.sendstack-compliance-footer{display:none}</style><p>Hi</p>',
+    );
+    expect(() => applyComplianceFooter(hidden, first.text, identity)).toThrow(/conceal/i);
+  });
+
+  it("refuses a production session cookie unless it is Secure", () => {
+    (process.env as { NODE_ENV?: string }).NODE_ENV = "production";
+    delete process.env.VERCEL_ENV;
+    delete process.env.SENDSTACK_COOKIE_SECURE;
+    process.env.SENDSTACK_PUBLIC_URL = "http://insecure.example";
+    expect(() => assertProductionSessionCookie()).toThrow(/Secure/);
+    process.env.SENDSTACK_PUBLIC_URL = "https://app.example.com";
+    expect(() => assertProductionSessionCookie()).not.toThrow();
   });
 });
 

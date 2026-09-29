@@ -1,17 +1,48 @@
+import { initialEnv } from "@next/env";
 import { config } from "../lib/config";
 import { getPool, query } from "../lib/db";
 import { hashPassword, makeId, normalizeEmail, utcNow } from "../lib/ids";
 
+/**
+ * Seeding writes sample `.test` contacts, so the target must be chosen
+ * deliberately. NODE_ENV is not a safe signal: local tooling runs with
+ * NODE_ENV=development while a dotenv file can still resolve a remote URL.
+ */
+function assertExplicitLocalTarget(): void {
+  // initialEnv is @next/env's snapshot from before any dotenv file was applied,
+  // so a URL that merely came from .env / .env.production does not count as injected.
+  const injected = ((initialEnv ?? process.env).DATABASE_URL ?? "").trim();
+  if (!injected) {
+    throw new Error(
+      "DATABASE_URL must be injected explicitly to seed. Refusing to seed a database chosen by a dotenv file.\n" +
+        "Example: DATABASE_URL='postgresql://sendstack:sendstack@127.0.0.1:55432/sendstack_test' pnpm db:seed",
+    );
+  }
+  if (process.argv.includes("--allow-remote")) return;
+  let host = "";
+  try {
+    host = new URL(injected).hostname;
+  } catch {
+    throw new Error("DATABASE_URL is not a valid postgresql:// connection string.");
+  }
+  const local = ["localhost", "127.0.0.1", "::1", "host.docker.internal"].includes(host);
+  if (!local) {
+    throw new Error(
+      "Refusing to seed a non-local database. Seeding inserts sample contacts and must never touch a shared or production database.",
+    );
+  }
+}
+
 async function main() {
+  assertExplicitLocalTarget();
+
   const now = utcNow();
   const adminEmail = normalizeEmail(config.adminEmail);
   const usingDefaultPassword = config.adminPassword === config.defaultAdminPassword;
-  const productionLike =
-    config.isVercelProduction || (config.nodeEnv === "production" && !config.isVercelPreview);
 
-  if (productionLike && usingDefaultPassword) {
+  if (usingDefaultPassword && process.argv.includes("--allow-remote")) {
     throw new Error(
-      "Refusing to seed the default admin password in production. Set SENDSTACK_ADMIN_PASSWORD to a strong unique value.",
+      "Refusing to seed the default admin password outside a local database. Set SENDSTACK_ADMIN_PASSWORD to a strong unique value.",
     );
   }
 

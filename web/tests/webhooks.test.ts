@@ -21,7 +21,13 @@ import { processResendWebhookEvent } from "../lib/providers/webhook-processor";
 
 function setupClient(handler: (sql: string) => { rows: unknown[] }) {
   const client = {
-    query: vi.fn(async (sql: string) => handler(String(sql))),
+    query: vi.fn(async (sql: string) => {
+      const text = String(sql);
+      if (text.includes("SET processed_at = NOW()") && text.includes("claim_token")) {
+        return { rows: [{ id: "evt" }] };
+      }
+      return handler(text);
+    }),
     release: vi.fn(),
   };
   connectMock.mockResolvedValue(client);
@@ -100,7 +106,12 @@ describe("resend webhook processor", () => {
       '{"type":"contact.updated"}',
     );
     expect(result.duplicate).toBe(false);
-    expect(applySuppressionMock).toHaveBeenCalledWith("user@contoso.com", "unsubscribe", "resend_webhook");
+    expect(applySuppressionMock).toHaveBeenCalledWith(
+      "user@contoso.com",
+      "unsubscribe",
+      "resend_webhook",
+      expect.anything(),
+    );
   });
 
   it("applies suppressions for bounce complaint suppressed paths", async () => {
@@ -121,7 +132,12 @@ describe("resend webhook processor", () => {
         { type, data: { email_id: "email_x", to: ["bounce@contoso.com"], broadcast_id: "bcast_1" } },
         `{"type":"${type}"}`,
       );
-      expect(applySuppressionMock).toHaveBeenCalledWith("bounce@contoso.com", reason, "resend_webhook");
+      expect(applySuppressionMock).toHaveBeenCalledWith(
+        "bounce@contoso.com",
+        reason,
+        "resend_webhook",
+        expect.anything(),
+      );
     }
   });
 

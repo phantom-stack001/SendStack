@@ -1,6 +1,8 @@
+import { DATABASE_MIGRATION_REQUIRED, DATABASE_UNAVAILABLE } from "@/lib/db-errors";
 import { makeId } from "@/lib/ids";
 import { runLaunchWorkerTick } from "@/lib/launch-jobs";
 import { liveSendAllowed } from "@/lib/providers/resend";
+import { inspectSchema, summarizeSchemaReport } from "@/lib/schema-guard";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -24,6 +26,17 @@ export async function GET(request: Request) {
   const expected = `Bearer ${secret}`;
   if (auth !== expected) {
     return Response.json({ error: "Unauthorized." }, { status: 401 });
+  }
+
+  const schema = await inspectSchema();
+  if (!schema.reachable || !schema.ok) {
+    return Response.json(
+      {
+        error: schema.reachable ? summarizeSchemaReport(schema) : "The database could not be inspected.",
+        code: schema.reachable ? DATABASE_MIGRATION_REQUIRED : DATABASE_UNAVAILABLE,
+      },
+      { status: 503 },
+    );
   }
 
   const workerId = makeId("cron");

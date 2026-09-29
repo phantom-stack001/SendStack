@@ -1,6 +1,12 @@
 import { escapeHtml } from "./html-escape";
 import { loadSendingIdentity, type SendingIdentity } from "./sending-identity";
 
+/** Unique markers. They are not a regex over author punctuation. */
+export const COMPLIANCE_HTML_START = "<!-- SENDSTACK_COMPLIANCE_FOOTER_START -->";
+export const COMPLIANCE_HTML_END = "<!-- SENDSTACK_COMPLIANCE_FOOTER_END -->";
+export const COMPLIANCE_TEXT_START = "[[SENDSTACK_COMPLIANCE_FOOTER_START]]";
+export const COMPLIANCE_TEXT_END = "[[SENDSTACK_COMPLIANCE_FOOTER_END]]";
+
 export type ComplianceFooterParts = {
   companyName: string;
   postalAddress: string;
@@ -27,9 +33,24 @@ export function buildComplianceFooterParts(
   };
 }
 
-/** Escape user-configured identity values for HTML injection. */
 export function escapeIdentity(value: string): string {
   return escapeHtml(value);
+}
+
+const CONCEALING_STYLE =
+  /display\s*:\s*none|visibility\s*:\s*hidden|opacity\s*:\s*0|font-size\s*:\s*0|color\s*:\s*transparent|height\s*:\s*0|width\s*:\s*0|overflow\s*:\s*hidden/i;
+
+/**
+ * Author CSS can target the footer. Style blocks and style attributes are removed
+ * before the footer is frozen so concealment rules cannot survive into the snapshot.
+ */
+export function stripConcealingStyles(html: string): string {
+  if (CONCEALING_STYLE.test(html) && /<style\b/i.test(html)) {
+    // Entire style blocks are dropped when any concealment declaration is present.
+  }
+  return html
+    .replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, "")
+    .replace(/\sstyle\s*=\s*("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*')/gi, "");
 }
 
 export function renderComplianceFooterHtml(parts: ComplianceFooterParts): string {
@@ -37,31 +58,46 @@ export function renderComplianceFooterHtml(parts: ComplianceFooterParts): string
   const postal = escapeIdentity(parts.postalAddress);
   const contact = escapeIdentity(parts.contactEmail);
   return [
-    '<div class="sendstack-compliance-footer" style="margin-top:32px;padding-top:16px;border-top:1px solid #d0d7e2;font-size:12px;line-height:1.6;color:#5b6b7c">',
-    `<p style="margin:0 0 8px">${company}<br>${postal}</p>`,
-    `<p style="margin:0 0 8px">Contact: <a href="mailto:${contact}">${contact}</a></p>`,
-    `<p style="margin:0"><a href="${parts.unsubscribeUrlToken}">Unsubscribe</a></p>`,
+    COMPLIANCE_HTML_START,
+    '<div class="sendstack-compliance-footer" style="margin-top:32px;padding-top:16px;border-top:1px solid #d0d7e2;font-size:12px;line-height:1.6;color:#5b6b7c;display:block;visibility:visible;opacity:1">',
+    `<p style="margin:0 0 8px;font-size:12px;color:#5b6b7c">${company}<br>${postal}</p>`,
+    `<p style="margin:0 0 8px;font-size:12px;color:#5b6b7c">Contact: <a href="mailto:${contact}">${contact}</a></p>`,
+    `<p style="margin:0;font-size:12px"><a href="${parts.unsubscribeUrlToken}">Unsubscribe</a></p>`,
     "</div>",
+    COMPLIANCE_HTML_END,
   ].join("");
 }
 
 export function renderComplianceFooterText(parts: ComplianceFooterParts): string {
   return [
-    "",
-    "---",
+    COMPLIANCE_TEXT_START,
     parts.companyName,
     parts.postalAddress,
     `Contact: ${parts.contactEmail}`,
     `Unsubscribe: ${parts.unsubscribeUrlToken}`,
+    COMPLIANCE_TEXT_END,
   ].join("\n");
 }
 
-const FOOTER_DIV_RE =
-  /<div\b[^>]*\bclass=["'][^"']*\bsendstack-compliance-footer\b[^"']*["'][^>]*>[\s\S]*?<\/div>/gi;
+function rejectMarkerCollision(value: string, label: string): void {
+  if (
+    value.includes(COMPLIANCE_HTML_START) ||
+    value.includes(COMPLIANCE_HTML_END) ||
+    value.includes(COMPLIANCE_TEXT_START) ||
+    value.includes(COMPLIANCE_TEXT_END)
+  ) {
+    throw new Error(`Author ${label} contains a reserved compliance-footer marker.`);
+  }
+}
+
+function alreadyCanonical(html: string, text: string, footerHtml: string, footerText: string): boolean {
+  return html.includes(footerHtml) && text.includes(footerText);
+}
 
 /**
- * Always inject the canonical server footer.
- * Author-supplied marker text must not suppress injection — existing footers are stripped first.
+ * Produce the final HTML and text exactly once.
+ * Repeated calls with the same identity are byte-for-byte idempotent.
+ * Author content containing "---" or "Unsubscribe:" is preserved.
  */
 export function applyComplianceFooter(
   htmlBody: string,
@@ -73,43 +109,33 @@ export function applyComplianceFooter(
   const footerHtml = renderComplianceFooterHtml(parts);
   const footerText = renderComplianceFooterText(parts);
 
-  let html = (htmlBody ?? "").replace(FOOTER_DIV_RE, "");
+  let html = htmlBody ?? "";
   let text = textBody ?? "";
 
-  // Strip prior canonical text footers (marker + unsubscribe token lines).
-  text = text.replace(
-    /\n---\n[\s\S]*?Unsubscribe:\s*\{\{\{?RESEND_UNSUBSCRIBE_URL\}?\}\}|\n---\n[\s\S]*?Unsubscribe:\s*\{\{unsubscribe_url\}\}/gi,
-    "",
-  );
+  // Concealment is rejected even when the footer is already present. Stripping
+  // happens only before the footer is inserted, so a second call stays byte-identical
+  // and does not delete the footer's own style attributes or author text.
+  if (CONCEALING_STYLE.test(html)) {
+    throw new Error("Campaign HTML contains a style that can conceal the compliance footer.");
+  }
+
+  if (alreadyCanonical(html, text, footerHtml, footerText)) {
+    return { html, text };
+  }
+
+  rejectMarkerCollision(html, "HTML");
+  rejectMarkerCollision(text, "text");
+  html = stripConcealingStyles(html);
 
   if (/<\/body>/i.test(html)) {
     html = html.replace(/<\/body>/i, `${footerHtml}</body>`);
   } else {
     html = `${html.trimEnd()}\n${footerHtml}`;
   }
-
   text = `${text.trimEnd()}\n${footerText}\n`;
-
-  // Guarantee unsubscribe token presence for validators / Resend.
-  if (
-    !html.includes(parts.unsubscribeUrlToken) &&
-    !html.includes("{{unsubscribe_url}}") &&
-    !html.includes("{{{RESEND_UNSUBSCRIBE_URL}}}")
-  ) {
-    html = `${html}\n<p><a href="${parts.unsubscribeUrlToken}">Unsubscribe</a></p>`;
-  }
-  if (
-    !text.includes(parts.unsubscribeUrlToken) &&
-    !text.includes("{{unsubscribe_url}}") &&
-    !text.includes("{{{RESEND_UNSUBSCRIBE_URL}}}")
-  ) {
-    text = `${text.trimEnd()}\nUnsubscribe: ${parts.unsubscribeUrlToken}\n`;
-  }
-
   return { html, text };
 }
 
-/** Verify company name, postal address, contact email, and unsubscribe link are present. */
 export function assertComplianceFooterPresent(
   html: string,
   text: string,
@@ -118,25 +144,30 @@ export function assertComplianceFooterPresent(
   const contactEmail = identity.replyToEmail || identity.fromEmail;
   const missing: string[] = [];
 
-  if (!identity.companyName || (!html.includes(identity.companyName) && !text.includes(identity.companyName))) {
+  if (!html.includes(COMPLIANCE_HTML_START) || !html.includes(COMPLIANCE_HTML_END)) {
+    missing.push("html footer markers");
+  }
+  if (!text.includes(COMPLIANCE_TEXT_START) || !text.includes(COMPLIANCE_TEXT_END)) {
+    missing.push("text footer markers");
+  }
+  if (!identity.companyName || !html.includes(identity.companyName) || !text.includes(identity.companyName)) {
     missing.push("company name");
   }
   if (
     !identity.postalAddress ||
-    (!html.includes(identity.postalAddress) && !text.includes(identity.postalAddress))
+    !html.includes(identity.postalAddress) ||
+    !text.includes(identity.postalAddress)
   ) {
     missing.push("postal address");
   }
-  if (!contactEmail || (!html.includes(contactEmail) && !text.includes(contactEmail))) {
+  if (!contactEmail || !html.includes(contactEmail) || !text.includes(contactEmail)) {
     missing.push("contact email");
   }
 
   const hasUnsubHtml =
-    /href\s*=\s*["']?\{\{unsubscribe_url\}\}/i.test(html) ||
-    /href\s*=\s*["']?\{\{\{RESEND_UNSUBSCRIBE_URL\}\}\}/i.test(html) ||
-    html.includes("sendstack-compliance-footer");
+    html.includes('href="{{unsubscribe_url}}"') || html.includes('href="{{{RESEND_UNSUBSCRIBE_URL}}}"');
   const hasUnsubText =
-    /\{\{unsubscribe_url\}\}/.test(text) || /\{\{\{RESEND_UNSUBSCRIBE_URL\}\}\}/.test(text);
+    text.includes("{{unsubscribe_url}}") || text.includes("{{{RESEND_UNSUBSCRIBE_URL}}}");
   if (!hasUnsubHtml || !hasUnsubText) {
     missing.push("unsubscribe link");
   }

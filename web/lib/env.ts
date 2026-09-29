@@ -81,6 +81,12 @@ export function validateProductionEnv(): void {
     throw new Error(`Missing required production environment variables: ${missing.join(", ")}`);
   }
 
+  if (!sessionCookieIsSecure()) {
+    throw new Error(
+      "Production session cookies must be Secure, HttpOnly, and SameSite=Lax. Set SENDSTACK_COOKIE_SECURE or an https SENDSTACK_PUBLIC_URL.",
+    );
+  }
+
   const liveIssues = liveSendBootIssues();
   for (const issue of liveIssues) {
     console.error(`[sendstack] ${issue} Live send stays blocked until fixed; login and other APIs remain available.`);
@@ -89,4 +95,24 @@ export function validateProductionEnv(): void {
 
 export function productionReadinessIdentityOk(): boolean {
   return identityComplianceGaps().length === 0;
+}
+
+/** True when a session cookie would carry the Secure attribute. */
+export function sessionCookieIsSecure(): boolean {
+  return (
+    ["1", "true", "yes", "on"].includes((process.env.SENDSTACK_COOKIE_SECURE ?? "").trim().toLowerCase()) ||
+    process.env.VERCEL_ENV === "production" ||
+    (process.env.SENDSTACK_PUBLIC_URL ?? "").trim().startsWith("https://")
+  );
+}
+
+/**
+ * Production must not emit a usable session cookie unless it is Secure.
+ * Callers that only clear a cookie (empty token) should not call this.
+ */
+export function assertProductionSessionCookie(): void {
+  if (!isProductionLike()) return;
+  if (!sessionCookieIsSecure()) {
+    throw new Error("Refusing to issue a session cookie: production cookies must be Secure.");
+  }
 }

@@ -101,25 +101,44 @@ export type DeliveryHealthBlockKind =
   | "other";
 
 /** Record an open health block that cannot age healthy without explicit resolve/waiver. */
-export async function recordDeliveryHealthBlock(input: {
-  kind: DeliveryHealthBlockKind;
-  detail: string;
-  relatedEntityType?: string | null;
-  relatedEntityId?: string | null;
-}): Promise<string> {
+export async function recordDeliveryHealthBlock(
+  input: {
+    kind: DeliveryHealthBlockKind;
+    detail: string;
+    relatedEntityType?: string | null;
+    relatedEntityId?: string | null;
+  },
+  options?: { preempt?: boolean },
+): Promise<string> {
   const id = makeId("dhb");
-  await query(
-    `INSERT INTO delivery_health_blocks
-       (id, kind, detail, related_entity_type, related_entity_id, created_at)
-     VALUES ($1, $2, $3, $4, $5, NOW())`,
-    [
-      id,
-      input.kind,
-      input.detail.slice(0, 500),
-      input.relatedEntityType ?? null,
-      input.relatedEntityId ?? null,
-    ],
-  );
+  const { getPool } = await import("./db");
+  const { lockSubmitBarrier } = await import("./submit-barrier");
+  const client = await getPool().connect();
+  try {
+    await client.query("BEGIN");
+    // Outcome records written while a worker already holds the submit barrier must not
+    // take that lock again (it would deadlock). Preempting blocks do take it, so they
+    // commit before the final check or wait until after the provider call.
+    if (options?.preempt !== false) await lockSubmitBarrier(client);
+    await client.query(
+      `INSERT INTO delivery_health_blocks
+         (id, kind, detail, related_entity_type, related_entity_id, created_at)
+       VALUES ($1, $2, $3, $4, $5, NOW())`,
+      [
+        id,
+        input.kind,
+        input.detail.slice(0, 500),
+        input.relatedEntityType ?? null,
+        input.relatedEntityId ?? null,
+      ],
+    );
+    await client.query("COMMIT");
+  } catch (error) {
+    await client.query("ROLLBACK").catch(() => undefined);
+    throw error;
+  } finally {
+    client.release();
+  }
   return id;
 }
 
@@ -146,7 +165,7 @@ export async function ensureDeliveryHealthBlock(input: {
     );
     if (existing.rows[0]) return existing.rows[0].id;
   }
-  return recordDeliveryHealthBlock(input);
+  return recordDeliveryHealthBlock(input, { preempt: false });
 }
 
 export async function resolveDeliveryHealthBlock(input: {
@@ -226,6 +245,36 @@ export async function listOpenDeliveryHealthBlocks() {
       LIMIT 200`,
   );
   return result.rows;
+}
+
+/** Health report used when the schema is not ready to query application tables. */
+export function blockedHealthSnapshot(reason: string): DeliveryHealthSnapshot {
+  return {
+    submitted: 0,
+    delivered: 0,
+    delayed: 0,
+    bounced: 0,
+    complained: 0,
+    suppressed: 0,
+    unsubscribed: 0,
+    failed: 0,
+    sample_size: 0,
+    bounce_rate: 0,
+    complaint_rate: 0,
+    unsubscribe_rate: 0,
+    delay_rate: 0,
+    failure_rate: 0,
+    webhook_events_received: 0,
+    webhook_events_processed: 0,
+    webhook_correlation_complete: false,
+    suppression_sync_healthy: false,
+    thresholds_configured: false,
+    emergency_stop: false,
+    healthy: false,
+    launch_blocked: true,
+    blocking_reasons: [reason],
+    issues: [reason],
+  };
 }
 
 export async function getDeliveryHealthSnapshot(

@@ -7,6 +7,9 @@ const noStore = [
 ];
 
 const nextConfig: NextConfig = {
+  outputFileTracingIncludes: {
+    "*": ["./drizzle/*.sql"],
+  },
   experimental: {
     // Ensure instrumentation.ts runs for env validation.
     serverActions: {

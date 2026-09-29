@@ -174,11 +174,18 @@ describe.skipIf(!dbAvailable)("PostgreSQL migrations (0001→0006)", () => {
     const campaignCount = await query<{ count: string }>(`SELECT COUNT(*)::int AS count FROM campaigns`);
     const messageCount = await query<{ count: string }>(`SELECT COUNT(*)::int AS count FROM messages`);
 
+    const appliedCatchup = await applyMigrations();
+    expect(appliedCatchup).toEqual(["0007_submission_state_machine.sql"]);
+    const caughtUp = await query<{ id: string }>(`SELECT id FROM schema_migrations ORDER BY id`);
+    expect(caughtUp.rows.map((row) => row.id)).toEqual([
+      ...before.rows.map((row) => row.id),
+      "0007_submission_state_machine.sql",
+    ]);
     const appliedAgain = await applyMigrations();
     expect(appliedAgain).toEqual([]);
 
     const after = await query<{ id: string }>(`SELECT id FROM schema_migrations ORDER BY id`);
-    expect(after.rows.map((row) => row.id)).toEqual(before.rows.map((row) => row.id));
+    expect(after.rows.map((row) => row.id)).toEqual(caughtUp.rows.map((row) => row.id));
 
     const campaignCountAfter = await query<{ count: string }>(
       `SELECT COUNT(*)::int AS count FROM campaigns`,

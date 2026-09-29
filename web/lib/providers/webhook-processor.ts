@@ -21,8 +21,31 @@ export type ResendWebhookEvent = {
     broadcast_id?: string;
     email?: string;
     unsubscribed?: boolean;
+    /** Resend/SES bounce classification; absent on older or partial payloads. */
+    bounce?: {
+      type?: string;
+      subType?: string;
+      sub_type?: string;
+      message?: string;
+    };
   };
 };
+
+/**
+ * Only a permanent bounce justifies a protected, permanent suppression.
+ *
+ * A transient bounce (full mailbox, greylisting, throttling) must not destroy a
+ * legitimate subscriber: protected suppressions cannot be cleared by re-consent or
+ * by the removal APIs, so treating a soft bounce as hard is unrecoverable in-app.
+ * A missing classification is treated as permanent, which protects sending
+ * reputation rather than continuing to mail an address that may be dead.
+ */
+export function isPermanentBounce(event: ResendWebhookEvent): boolean {
+  const raw = (event.data?.bounce?.type ?? "").trim().toLowerCase();
+  if (!raw) return true;
+  if (raw === "transient" || raw === "soft" || raw === "undetermined") return false;
+  return true;
+}
 
 function recipientsFromEvent(event: ResendWebhookEvent): string[] {
   const to = event.data?.to;
@@ -53,7 +76,6 @@ export async function processResendWebhookEvent(
   const pool = getPool();
   const client = await pool.connect();
   let campaignId: string | null = null;
-  let claimed = false;
 
   try {
     await client.query("BEGIN");
@@ -88,8 +110,6 @@ export async function processResendWebhookEvent(
       }
       return { duplicate: false, processed: false, retryable: true, campaignId: null };
     }
-    claimed = true;
-
     const providerId = event.data?.email_id;
     const recipients = recipientsFromEvent(event);
 
@@ -141,18 +161,6 @@ export async function processResendWebhookEvent(
       }
     }
 
-    // Hold the claim; effects below must succeed before processed_at is set.
-    await client.query("COMMIT");
-  } catch (error) {
-    await client.query("ROLLBACK").catch(() => undefined);
-    client.release();
-    throw error;
-  }
-  client.release();
-
-  try {
-    const providerId = event.data?.email_id;
-    const recipients = recipientsFromEvent(event);
     const isBroadcastUnsubscribe =
       event.type === "email.unsubscribed" ||
       (event.type === "contact.updated" && event.data?.unsubscribed === true);
@@ -160,9 +168,9 @@ export async function processResendWebhookEvent(
     if (isBroadcastUnsubscribe) {
       const email = event.data?.email ? normalizeEmail(event.data.email) : recipients[0];
       if (email) {
-        await applySuppression(email, "unsubscribe", "resend_webhook");
+        await applySuppression(email, "unsubscribe", "resend_webhook", client);
         // Only update the matched message/campaign — never rewrite unrelated history.
-        await applyMonotonicUpdates({
+        await applyMonotonicUpdates(client, {
           providerId,
           nextMessageStatus: "unsubscribed",
           nextRecipientStatus: "suppressed",
@@ -176,16 +184,18 @@ export async function processResendWebhookEvent(
       const derived = statusFromResendEvent(event.type);
       if (derived) {
         let suppressionReason: SuppressionReason | null = null;
-        if (derived === "bounced") suppressionReason = "hard_bounce";
+        // A transient bounce still records the bounced message state below, but must
+        // not create a permanent protected suppression.
+        if (derived === "bounced" && isPermanentBounce(event)) suppressionReason = "hard_bounce";
         if (derived === "complained") suppressionReason = "complaint";
         if (derived === "suppressed") suppressionReason = "provider_suppression";
         if (derived === "unsubscribed") suppressionReason = "unsubscribe";
         if (suppressionReason) {
           for (const email of recipients) {
-            await applySuppression(email, suppressionReason, "resend_webhook");
+            await applySuppression(email, suppressionReason, "resend_webhook", client);
           }
         }
-        await applyMonotonicUpdates({
+        await applyMonotonicUpdates(client, {
           providerId,
           nextMessageStatus: derived,
           nextRecipientStatus: recipientStatusFromMessageStatus(derived),
@@ -202,9 +212,8 @@ export async function processResendWebhookEvent(
     }
 
     if (campaignId) {
-      await maybeCompleteCampaign(campaignId);
-      // Cancellation reconciliation only for campaigns actually in a cancel flow.
-      const cancelState = await query<{ status: string }>(
+      await maybeCompleteCampaign(client, campaignId);
+      const cancelState = await client.query<{ status: string }>(
         `SELECT status FROM campaigns WHERE id = $1`,
         [campaignId],
       );
@@ -212,12 +221,12 @@ export async function processResendWebhookEvent(
         cancelState.rows[0] &&
         ["cancel_requested", "cancelled", "partially_sent"].includes(cancelState.rows[0].status)
       ) {
-        await reconcileCampaignAfterCancel(campaignId);
+        await reconcileCampaignAfterCancel(campaignId, client);
       }
     }
 
     // processed_at only after all required effects succeed; unique claim token required.
-    const completed = await query<{ id: string }>(
+    const completed = await client.query<{ id: string }>(
       `UPDATE provider_events
           SET processed_at = NOW(),
               claim_owner = NULL,
@@ -231,7 +240,7 @@ export async function processResendWebhookEvent(
       [eventId, claimToken],
     );
     if (!completed.rows[0]) {
-      const existing = await query<{ processed_at: string | null }>(
+      const existing = await client.query<{ processed_at: string | null }>(
         `SELECT processed_at FROM provider_events WHERE id = $1`,
         [eventId],
       );
@@ -241,22 +250,13 @@ export async function processResendWebhookEvent(
       throw new Error("Webhook claim token mismatch while completing event.");
     }
 
+    await client.query("COMMIT");
     return { duplicate: false, processed: true, campaignId };
   } catch (error) {
-    // Do NOT set processed_at. Clear claim with token check so another worker can retry.
-    if (claimed) {
-      await query(
-        `UPDATE provider_events
-            SET claim_owner = NULL,
-                claim_expires_at = NULL,
-                claim_token = NULL
-          WHERE id = $1
-            AND claim_token = $2
-            AND processed_at IS NULL`,
-        [eventId, claimToken],
-      ).catch(() => undefined);
-    }
+    await client.query("ROLLBACK").catch(() => undefined);
     throw error;
+  } finally {
+    client.release();
   }
 }
 
@@ -264,7 +264,7 @@ export async function processResendWebhookEvent(
  * Atomic monotonic updates using status ranks / terminal predicates.
  * Does not rewrite unrelated historical messages for contact-level unsubscribes.
  */
-async function applyMonotonicUpdates(input: {
+async function applyMonotonicUpdates(client: { query: typeof query }, input: {
   providerId?: string;
   nextMessageStatus: string;
   nextRecipientStatus: string | null;
@@ -282,7 +282,7 @@ async function applyMonotonicUpdates(input: {
   const terminalRcptList = [...TERMINAL_RECIPIENT_STATUSES];
 
   if (input.providerId) {
-    await query(
+    await client.query(
       `UPDATE messages
           SET status = $1,
               status_rank = $2,
@@ -299,7 +299,7 @@ async function applyMonotonicUpdates(input: {
 
     if (input.nextRecipientStatus) {
       const isTerminalNext = TERMINAL_RECIPIENT_STATUSES.has(input.nextRecipientStatus);
-      await query(
+      await client.query(
         `UPDATE campaign_recipients
             SET status = $1,
                 sent_at = CASE WHEN $1 IN ('sent', 'delayed') THEN COALESCE(sent_at, NOW()) ELSE sent_at END,
@@ -343,7 +343,7 @@ async function applyMonotonicUpdates(input: {
   // Campaign-scoped email updates only when no provider id (never a global 30-day rewrite).
   if (input.emailScopedWithoutProvider && input.campaignId && input.recipients.length) {
     for (const email of input.recipients) {
-      await query(
+      await client.query(
         `UPDATE messages
             SET status = $1,
                 status_rank = $2,
@@ -359,7 +359,7 @@ async function applyMonotonicUpdates(input: {
       );
       if (input.nextRecipientStatus) {
         const isTerminalNext = TERMINAL_RECIPIENT_STATUSES.has(input.nextRecipientStatus);
-        await query(
+        await client.query(
           `UPDATE campaign_recipients
               SET status = $1
             WHERE campaign_id = $2
@@ -399,8 +399,8 @@ async function applyMonotonicUpdates(input: {
   }
 }
 
-async function maybeCompleteCampaign(campaignId: string): Promise<void> {
-  await query(
+async function maybeCompleteCampaign(client: { query: typeof query }, campaignId: string): Promise<void> {
+  await client.query(
     `UPDATE campaigns
         SET status = 'completed', completed_at = COALESCE(completed_at, NOW()), updated_at = NOW()
       WHERE id = $1

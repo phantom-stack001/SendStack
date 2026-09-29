@@ -7,7 +7,10 @@ if (!process.env.NODE_ENV) {
   (process.env as { NODE_ENV?: string }).NODE_ENV = "development";
 }
 
-loadEnvConfig(process.cwd());
+// The `dev` argument is required: without it @next/env always resolves the
+// production file set, so `.env.production` would win locally and point tooling
+// at the production database even though NODE_ENV is "development" above.
+loadEnvConfig(process.cwd(), process.env.NODE_ENV !== "production");
 
 function booleanEnv(name: string, fallback: boolean): boolean {
   const value = process.env[name];

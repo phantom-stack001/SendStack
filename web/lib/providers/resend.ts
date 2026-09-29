@@ -31,9 +31,26 @@ function resendHeaders(idempotencyKey?: string): HeadersInit {
   return headers;
 }
 
+function emergencyStopEnabled(): boolean {
+  return ["1", "true", "yes", "on"].includes(
+    (process.env.SENDSTACK_EMERGENCY_STOP ?? "").trim().toLowerCase(),
+  );
+}
+
+export function providerTimeoutMs(): number {
+  return Number(process.env.SENDSTACK_PROVIDER_TIMEOUT_MS ?? 8_000) || 8_000;
+}
+
+function providerAbortSignal(): AbortSignal {
+  return AbortSignal.timeout(providerTimeoutMs());
+}
+
 export function liveSendAllowed(): boolean {
   if (config.isVercelPreview) return false;
   if (config.nodeEnv === "test") return false;
+  // Checked at the provider chokepoint as well as in the send/launch handlers, so
+  // any future provider call path inherits the stop instead of having to repeat it.
+  if (emergencyStopEnabled()) return false;
   return Boolean(config.liveSendEnabled && process.env.RESEND_API_KEY);
 }
 
@@ -47,6 +64,10 @@ async function resendJson<T extends { id?: string; message?: string; name?: stri
   const { idempotencyKey, ...requestInit } = init ?? {};
   const response = await fetch(`https://api.resend.com${path}`, {
     ...requestInit,
+    // Without a timeout a hung provider call holds the worker's lease past its
+    // expiry, which is exactly the window in which a second worker can claim the
+    // same job. It also defeats the tick's time budget under maxDuration.
+    signal: providerAbortSignal(),
     headers: {
       ...resendHeaders(idempotencyKey),
       ...(requestInit.headers ?? {}),
@@ -215,6 +236,8 @@ export async function importResendContactsCsv(input: {
     method: "POST",
     headers: { Authorization: `Bearer ${process.env.RESEND_API_KEY}` },
     body: form,
+    // CSV uploads are larger than JSON calls, so allow more time but still bound it.
+    signal: AbortSignal.timeout(providerTimeoutMs() * 3),
   });
   const payload = (await response.json().catch(() => ({}))) as { id?: string; message?: string; name?: string };
   if (!response.ok) {

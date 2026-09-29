@@ -1,7 +1,8 @@
 import { createHash, randomBytes } from "crypto";
 import { json } from "./http";
 import { config } from "./config";
-import { query } from "./db";
+import { getPool, query } from "./db";
+import { withSubmitBarrier } from "./submit-barrier";
 import { applyComplianceFooter } from "./compliance-footer";
 import {
   activateContactWithConsent,
@@ -19,6 +20,7 @@ import {
 import {
   assertDeliveryHealthAllowsSubmit,
   assertLaunchAllowedByHealth,
+  blockedHealthSnapshot,
   getDeliveryHealthSnapshot,
   listOpenDeliveryHealthBlocks,
   resolveDeliveryHealthBlock,
@@ -31,7 +33,10 @@ import {
   requestLaunchCancel,
   runLaunchWorkerTick,
 } from "./launch-jobs";
+import { DATABASE_MIGRATION_REQUIRED, DATABASE_UNAVAILABLE, redactForLog, safeClientMessage } from "./db-errors";
 import { runCampaignPreflight } from "./preflight";
+import { assertProductionSessionCookie, sessionCookieIsSecure } from "./env";
+import { inspectSchema, summarizeSchemaReport } from "./schema-guard";
 import {
   buildIdempotencyKey,
   liveSendAllowed,
@@ -68,8 +73,62 @@ function cookieValue(request: Request, name: string): string | null {
 }
 
 function cookieHeader(token: string, maxAge: number): string {
-  const secure = config.cookieSecure ? "; Secure" : "";
+  if (token && maxAge > 0) assertProductionSessionCookie();
+  const secure = sessionCookieIsSecure() ? "; Secure" : "";
   return `sendstack_session=${encodeURIComponent(token)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${maxAge}${secure}`;
+}
+
+const IMPORT_MAX_BYTES = 1_000_000;
+const IMPORT_MAX_ROWS = 5_000;
+const IMPORT_MAX_FIELDS = 32;
+const IMPORT_MAX_FIELD_LENGTH = 500;
+
+async function readBoundedBody(request: Request, maxBytes: number): Promise<string> {
+  const declared = Number(request.headers.get("content-length") ?? "0");
+  if (Number.isFinite(declared) && declared > maxBytes) {
+    throw new Error("BODY_TOO_LARGE");
+  }
+  const reader = request.body?.getReader();
+  if (!reader) return "";
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  while (true) {
+    const next = await reader.read();
+    if (next.done) break;
+    total += next.value.byteLength;
+    if (total > maxBytes) {
+      await reader.cancel().catch(() => undefined);
+      throw new Error("BODY_TOO_LARGE");
+    }
+    chunks.push(next.value);
+  }
+  const merged = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    merged.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  try {
+    return new TextDecoder("utf-8", { fatal: true }).decode(merged);
+  } catch {
+    throw new Error("BAD_ENCODING");
+  }
+}
+
+function trustedClientIp(request: Request): string {
+  const plausible = (value: string) =>
+    /^[0-9a-fA-F:.]+$/.test(value) && value.length <= 64 && value !== "unknown";
+  if (process.env.VERCEL === "1") {
+    const forwarded = request.headers.get("x-forwarded-for");
+    if (forwarded) {
+      const parts = forwarded.split(",").map((part) => part.trim()).filter(Boolean);
+      const rightmost = parts[parts.length - 1] ?? "";
+      if (plausible(rightmost)) return rightmost;
+    }
+    const real = request.headers.get("x-real-ip")?.trim() ?? "";
+    if (plausible(real)) return real;
+  }
+  return "unknown";
 }
 
 function hasValidCsrf(request: Request, csrfToken: string): boolean {
@@ -473,18 +532,29 @@ async function loadCampaignAttachmentsForSend(campaignId: string) {
 }
 
 async function readinessResponse() {
+  // Catalog inspection only. Application tables that 0006/0007 add are not queried
+  // until this report says the schema matches the code.
+  const schema = await inspectSchema();
   const identity = loadSendingIdentity();
   const gaps = identityComplianceGaps(identity);
   const identityReady = gaps.length === 0;
   const resendKeys = Boolean(process.env.RESEND_API_KEY && process.env.RESEND_WEBHOOK_SECRET);
   const resendConfigured = resendKeys && identityReady;
   const production = config.isVercelProduction || config.nodeEnv === "production";
-  const health = await getDeliveryHealthSnapshot();
+  const health =
+    schema.reachable && schema.ok
+      ? await getDeliveryHealthSnapshot()
+      : blockedHealthSnapshot(
+          schema.reachable ? summarizeSchemaReport(schema) : "The database could not be inspected.",
+        );
+  const cronConfigured = Boolean((process.env.CRON_SECRET ?? "").trim());
   const readyForLive =
     production &&
     config.deliveryMode === "resend" &&
     config.liveSendEnabled &&
     resendConfigured &&
+    schema.ok &&
+    cronConfigured &&
     health.thresholds_configured &&
     !health.launch_blocked;
 
@@ -502,6 +572,18 @@ async function readinessResponse() {
     health_thresholds_configured: health.thresholds_configured,
     launch_blocked: health.launch_blocked,
     blocking_reasons: health.blocking_reasons,
+    schema: {
+      ok: schema.ok,
+      reachable: schema.reachable,
+      applied_migrations: schema.applied_migrations.length,
+      missing_migrations: schema.missing_migrations,
+      missing_tables: schema.missing_tables,
+      missing_columns: schema.missing_columns,
+      missing_indexes: schema.missing_indexes,
+      missing_constraints: schema.missing_constraints,
+      unknown_migrations: schema.unknown_migrations,
+      checksum_drift: schema.checksum_drift,
+    },
     checks: [
       {
         id: "vercel_runtime",
@@ -514,10 +596,26 @@ async function readinessResponse() {
       {
         id: "postgres_database",
         label: "PostgreSQL database",
-        status: config.databaseUrl ? "ready" : "migration_required",
-        detail: config.databaseUrl
-          ? "The managed database is connected."
-          : "Connect the managed database and apply migrations.",
+        status: !config.databaseUrl
+          ? "not_connected"
+          : !schema.reachable
+            ? "unreachable"
+            : schema.ok
+              ? "ready"
+              : "migration_required",
+        detail: !config.databaseUrl
+          ? "Connect the managed database and apply migrations."
+          : !schema.reachable
+            ? "The database could not be inspected."
+            : summarizeSchemaReport(schema),
+      },
+      {
+        id: "launch_job_cron",
+        label: "Launch-job scheduler",
+        status: cronConfigured ? "ready" : "not_connected",
+        detail: cronConfigured
+          ? "CRON_SECRET is configured; an external scheduler can authenticate launch-job ticks."
+          : "CRON_SECRET is not configured, so GET /api/cron/launch-jobs fails closed and durable launches cannot progress.",
       },
       {
         id: "sender_identity",
@@ -563,6 +661,22 @@ async function readinessResponse() {
 
 export async function handleApi(request: Request, path: string[]) {
   const route = `/${path.join("/")}`;
+  const schema = await inspectSchema();
+  if (!schema.reachable || !schema.ok) {
+    return json(503, {
+      error: schema.reachable ? summarizeSchemaReport(schema) : "The database could not be inspected.",
+      code: schema.reachable ? DATABASE_MIGRATION_REQUIRED : DATABASE_UNAVAILABLE,
+      schema: schema.reachable
+        ? {
+            missing_migrations: schema.missing_migrations,
+            missing_tables: schema.missing_tables,
+            missing_columns: schema.missing_columns,
+            unknown_migrations: schema.unknown_migrations,
+            checksum_drift: schema.checksum_drift,
+          }
+        : undefined,
+    });
+  }
   if (!(request.method === "POST" && route === "/auth/login")) {
     const session = await currentSession(request);
     if (session?.must_change_password && !passwordChangeAllowedPath(`/api${route}`, request.method)) {
@@ -570,48 +684,77 @@ export async function handleApi(request: Request, path: string[]) {
     }
   }
   if (request.method === "POST" && route === "/auth/login") {
-    const clientIp =
-      request.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ||
-      request.headers.get("x-real-ip")?.trim() ||
-      "unknown";
-    const recentAttempts = await query<{ count: string }>(
-      `SELECT COUNT(*)::int AS count
-         FROM login_attempts
-        WHERE client_ip = $1
-          AND attempted_at > NOW() - INTERVAL '5 minutes'`,
-      [clientIp],
-    );
-    if (Number(recentAttempts.rows[0]?.count ?? 0) >= 10) {
+    const clientIp = trustedClientIp(request);
+    const body = await request.json().catch(() => ({})) as { email?: string; password?: string };
+    const accountKey = normalizeEmail(body.email ?? "") || "unknown";
+    const ACCOUNT_LIMIT = 10;
+    const IP_LIMIT = 100;
+    const limiter = await getPool().connect();
+    let limited = false;
+    try {
+      await limiter.query("BEGIN");
+      const lockKeys = [`login-account:${accountKey}`];
+      if (clientIp !== "unknown") lockKeys.push(`login-ip:${clientIp}`);
+      lockKeys.sort();
+      for (const key of lockKeys) {
+        await limiter.query(`SELECT pg_advisory_xact_lock(hashtext($1::text))`, [key]);
+      }
+      const recentAttempts = await limiter.query<{ account_count: string; ip_count: string }>(
+        `SELECT
+            COUNT(*) FILTER (WHERE account_key = $1)::int AS account_count,
+            COUNT(*) FILTER (WHERE client_ip = $2 AND $2 <> 'unknown')::int AS ip_count
+           FROM login_attempts
+          WHERE attempted_at > NOW() - INTERVAL '5 minutes'
+            AND (account_key = $1 OR (client_ip = $2 AND $2 <> 'unknown'))`,
+        [accountKey, clientIp],
+      );
+      const accountCount = Number(recentAttempts.rows[0]?.account_count ?? 0);
+      const ipCount = Number(recentAttempts.rows[0]?.ip_count ?? 0);
+      if (accountCount >= ACCOUNT_LIMIT || ipCount >= IP_LIMIT) {
+        limited = true;
+      } else {
+        const result = await limiter.query<{ id: string; email: string; name: string; role: "admin" | "marketer" | "analyst"; password_hash: string; must_change_password: boolean }>(
+          `SELECT id, email, name, role, password_hash, must_change_password FROM users WHERE email = $1 AND active = TRUE`,
+          [accountKey === "unknown" ? "" : accountKey],
+        );
+        const user = result.rows[0];
+        if (!user || !body.password || !verifyPassword(body.password, user.password_hash)) {
+          await limiter.query(
+            `INSERT INTO login_attempts (client_ip, account_key, attempted_at) VALUES ($1, $2, NOW())`,
+            [clientIp, accountKey],
+          );
+          await limiter.query("COMMIT");
+          await recordRequestAudit(request, user?.id ?? null, "login_failed", "authentication", user?.id ?? null, {
+            email: accountKey,
+          });
+          return json(401, { error: "Invalid email or password." });
+        }
+        await limiter.query(`DELETE FROM login_attempts WHERE account_key = $1`, [accountKey]);
+        await limiter.query("COMMIT");
+        const token = randomBytes(32).toString("base64url");
+        const csrfToken = randomBytes(24).toString("base64url");
+        const hours = Number(process.env.SENDSTACK_SESSION_HOURS ?? 12);
+        await query(
+          `INSERT INTO sessions (token_hash, user_id, csrf_token, expires_at, created_at)
+           VALUES ($1, $2, $3, NOW() + ($4 * INTERVAL '1 hour'), NOW())`,
+          [tokenHash(token), user.id, csrfToken, hours],
+        );
+        const response = json(200, await sessionPayload({ ...user, user_id: user.id, token_hash: tokenHash(token), csrf_token: csrfToken, token } as never));
+        response.headers.set("Set-Cookie", cookieHeader(token, hours * 3600));
+        await recordRequestAudit(request, user.id, "login_succeeded", "session", tokenHash(token), { role: user.role });
+        return response;
+      }
+      await limiter.query("COMMIT");
+    } catch (error) {
+      await limiter.query("ROLLBACK").catch(() => undefined);
+      throw error;
+    } finally {
+      limiter.release();
+    }
+    if (limited) {
       return json(429, { error: "Too many login attempts. Try again shortly." });
     }
-
-    const body = await request.json().catch(() => ({})) as { email?: string; password?: string };
-    const result = await query<{ id: string; email: string; name: string; role: "admin" | "marketer" | "analyst"; password_hash: string; must_change_password: boolean }>(
-      `SELECT id, email, name, role, password_hash, must_change_password FROM users WHERE email = $1 AND active = TRUE`,
-      [normalizeEmail(body.email ?? "")],
-    );
-    const user = result.rows[0];
-    if (!user || !body.password || !verifyPassword(body.password, user.password_hash)) {
-      await query(`INSERT INTO login_attempts (client_ip, attempted_at) VALUES ($1, NOW())`, [clientIp]);
-      await recordRequestAudit(request, user?.id ?? null, "login_failed", "authentication", user?.id ?? null, {
-        email: normalizeEmail(body.email ?? ""),
-      });
-      return json(401, { error: "Invalid email or password." });
-    }
-    // Successful login: prune old attempts for this IP so a good password clears the window.
-    await query(`DELETE FROM login_attempts WHERE client_ip = $1`, [clientIp]);
-    const token = randomBytes(32).toString("base64url");
-    const csrfToken = randomBytes(24).toString("base64url");
-    const hours = Number(process.env.SENDSTACK_SESSION_HOURS ?? 12);
-    await query(
-      `INSERT INTO sessions (token_hash, user_id, csrf_token, expires_at, created_at)
-       VALUES ($1, $2, $3, NOW() + ($4 * INTERVAL '1 hour'), NOW())`,
-      [tokenHash(token), user.id, csrfToken, hours],
-    );
-    const response = json(200, await sessionPayload({ ...user, user_id: user.id, token_hash: tokenHash(token), csrf_token: csrfToken, token } as never));
-    response.headers.set("Set-Cookie", cookieHeader(token, hours * 3600));
-    await recordRequestAudit(request, user.id, "login_succeeded", "session", tokenHash(token), { role: user.role });
-    return response;
+    return json(500, { error: "Login could not be completed." });
   }
   if (request.method === "GET" && route === "/session") {
     const session = await currentSession(request);
@@ -833,7 +976,7 @@ export async function handleApi(request: Request, path: string[]) {
         previous_source: result.previousSource ?? null,
       });
     } catch (error) {
-      return json(400, { error: error instanceof Error ? error.message : "Re-consent is required." });
+      return json(400, { error: safeClientMessage(error, "Re-consent is required.") });
     }
   }
   if (request.method === "POST" && route === "/users") {
@@ -935,7 +1078,25 @@ export async function handleApi(request: Request, path: string[]) {
     if (auth.response) return auth.response;
     if (!hasValidCsrf(request, auth.session.csrf_token)) return json(403, { error: "CSRF validation failed." });
 
-    const body = await request.json().catch(() => ({})) as { csv_text?: string; list_id?: string };
+    const contentType = (request.headers.get("content-type") ?? "").toLowerCase();
+    if (!contentType.includes("application/json")) {
+      return json(415, { error: "Content-Type must be application/json." });
+    }
+    let rawBody = "";
+    try {
+      rawBody = await readBoundedBody(request, IMPORT_MAX_BYTES);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "";
+      if (message === "BODY_TOO_LARGE") return json(413, { error: "Import body exceeds the size limit." });
+      if (message === "BAD_ENCODING") return json(400, { error: "Import body must be valid UTF-8." });
+      throw error;
+    }
+    let body: { csv_text?: string; list_id?: string };
+    try {
+      body = JSON.parse(rawBody) as { csv_text?: string; list_id?: string };
+    } catch {
+      return json(400, { error: "Import body must be JSON." });
+    }
     const csvText = body.csv_text ?? "";
     const listId = body.list_id ?? "";
     if (!csvText.trim()) return json(400, { error: "Upload a CSV file." });
@@ -972,7 +1133,13 @@ export async function handleApi(request: Request, path: string[]) {
       return cells;
     };
 
+    if (lines.length - 1 > IMPORT_MAX_ROWS) {
+      return json(413, { error: "CSV exceeds the row limit." });
+    }
     const headers = parseCsvLine(lines[0]).map((header) => header.trim().toLowerCase().replace(/\s+/g, "_"));
+    if (headers.length > IMPORT_MAX_FIELDS) {
+      return json(400, { error: "CSV exceeds the field limit." });
+    }
     const emailIndex = headers.indexOf("email");
     if (emailIndex < 0) return json(400, { error: "CSV must include an email column." });
     const firstNameIndex = headers.indexOf("first_name");
@@ -993,10 +1160,18 @@ export async function handleApi(request: Request, path: string[]) {
       issues.push({ row, email, reason });
     };
     const seenInFile = new Set<string>();
+    const importClient = await getPool().connect();
+    try {
+    await importClient.query("BEGIN");
 
     for (let index = 1; index < lines.length; index += 1) {
       const row = index + 1;
       const cells = parseCsvLine(lines[index]);
+      if (cells.length > IMPORT_MAX_FIELDS || cells.some((cell) => cell.length > IMPORT_MAX_FIELD_LENGTH)) {
+        invalid += 1;
+        pushIssue(row, "", "field_too_long");
+        continue;
+      }
       const rawEmail = (cells[emailIndex] ?? "").trim();
       const email = normalizeEmail(rawEmail);
       if (!validEmail(email)) {
@@ -1013,16 +1188,16 @@ export async function handleApi(request: Request, path: string[]) {
 
       const firstName = firstNameIndex >= 0 ? (cells[firstNameIndex] ?? "").trim() : "";
       const lastName = lastNameIndex >= 0 ? (cells[lastNameIndex] ?? "").trim() : "";
-      const existing = await query<{ id: string }>(`SELECT id FROM contacts WHERE email = $1`, [email]);
+      const existing = await importClient.query<{ id: string }>(`SELECT id FROM contacts WHERE email = $1`, [email]);
       if (existing.rows[0]) {
         const contactId = existing.rows[0].id;
-        await query(
+        await importClient.query(
           `UPDATE contacts SET first_name = CASE WHEN $1 = '' THEN first_name ELSE $1 END,
              last_name = CASE WHEN $2 = '' THEN last_name ELSE $2 END, updated_at = NOW()
            WHERE id = $3`,
           [firstName, lastName, contactId],
         );
-        await query(
+        await importClient.query(
           `INSERT INTO list_contacts (list_id, contact_id, added_at) VALUES ($1, $2, NOW())
            ON CONFLICT (list_id, contact_id) DO NOTHING`,
           [listId, contactId],
@@ -1032,21 +1207,22 @@ export async function handleApi(request: Request, path: string[]) {
       }
 
       const id = `con_${randomBytes(16).toString("hex")}`;
-      const suppressed = await query(`SELECT 1 FROM suppressions WHERE email = $1`, [email]);
+      const suppressed = await importClient.query(`SELECT 1 FROM suppressions WHERE email = $1`, [email]);
       const status = importContactStatus(Boolean(suppressed.rows[0]));
-      await query(
+      await importClient.query(
         `INSERT INTO contacts
            (id, email, first_name, last_name, status, consent_source, consent_at, created_at, updated_at)
          VALUES ($1, $2, $3, $4, $5, 'csv_import', NOW(), NOW(), NOW())`,
         [id, email, firstName, lastName, status],
       );
-      await query(
+      await importClient.query(
         `INSERT INTO list_contacts (list_id, contact_id, added_at) VALUES ($1, $2, NOW())`,
         [listId, id],
       );
       imported += 1;
     }
 
+    await importClient.query("COMMIT");
     await recordRequestAudit(request, auth.session.user_id, "contacts_imported", "list", listId, {
       imported,
       updated,
@@ -1054,6 +1230,15 @@ export async function handleApi(request: Request, path: string[]) {
       invalid,
     });
     return json(200, { imported, updated, duplicates, invalid, issues, issues_truncated: issuesTruncated });
+    } catch (error) {
+      await importClient.query("ROLLBACK").catch(() => undefined);
+      await recordRequestAudit(request, auth.session.user_id, "contacts_import_failed", "list", listId, {
+        error: safeClientMessage(error, "Import failed."),
+      }).catch(() => undefined);
+      return json(500, { error: safeClientMessage(error, "Import failed.") });
+    } finally {
+      importClient.release();
+    }
   }
   const contactActivateMatch = route.match(/^\/contacts\/([^/]+)\/activate$/);
   if (request.method === "POST" && contactActivateMatch) {
@@ -1074,7 +1259,7 @@ export async function handleApi(request: Request, path: string[]) {
       // Audit row is written inside activateContactWithConsent's transaction.
       return json(200, { contact: { id: contactActivateMatch[1], status: result.status, activated: result.activated } });
     } catch (error) {
-      const message = error instanceof Error ? error.message : "Activation failed.";
+      const message = safeClientMessage(error, "Activation failed.");
       if (message === "Contact not found.") return json(404, { error: message });
       return json(400, { error: message });
     }
@@ -1172,7 +1357,7 @@ export async function handleApi(request: Request, path: string[]) {
       return json(200, { contact });
     } catch (error) {
       const status = (error as { status?: number }).status ?? 400;
-      return json(status, { error: error instanceof Error ? error.message : "Contact update failed." });
+      return json(status, { error: safeClientMessage(error, "Contact update failed.") });
     }
   }
   if (request.method === "DELETE" && contactMatch) {
@@ -1495,7 +1680,7 @@ export async function handleApi(request: Request, path: string[]) {
           provider_cancelled: cancel.providerCancelled,
         });
       } catch (error) {
-        return json(400, { error: error instanceof Error ? error.message : "Cancel request failed." });
+        return json(400, { error: safeClientMessage(error, "Cancel request failed.") });
       }
     }
 
@@ -1571,46 +1756,58 @@ export async function handleApi(request: Request, path: string[]) {
         return json(400, { error: preflight.errors[0], errors: preflight.errors });
       }
 
-      // Distinct test sends each get a new attempt id (and capacity unit).
-      // Retries must pass the attempt_id of the exact persisted submission_unknown message.
+      // A retry reuses the open attempt. It must not mint a new idempotency key.
       const bodyAttempt = body.attempt_id?.trim();
-      let existingUnknown: {
-        id: string;
-        idempotency_key: string | null;
-        volume_reservation_id: string | null;
-        status: string;
-      } | null = null;
-      if (bodyAttempt) {
-        const matched = (
-          await query<{
-            id: string;
-            idempotency_key: string | null;
-            volume_reservation_id: string | null;
-            status: string;
-          }>(
-            `SELECT id, idempotency_key, volume_reservation_id, status FROM messages
-              WHERE campaign_id = $1 AND lower(to_email) = $2 AND COALESCE(is_test, FALSE) = TRUE
-                AND idempotency_key LIKE $3
-              ORDER BY created_at DESC LIMIT 1`,
-            [campaign.id, targetEmail, `%:${bodyAttempt}`],
-          )
-        ).rows[0];
-        if (!matched || matched.status !== "submission_unknown") {
-          return json(409, {
-            error:
-              "attempt_id must identify the exact persisted submission_unknown test message for this campaign and recipient.",
-            attempt_id: bodyAttempt,
-            found_status: matched?.status ?? null,
-          });
-        }
-        existingUnknown = matched;
+      const openAttempt = (
+        await query<{
+          id: string;
+          idempotency_key: string | null;
+          volume_reservation_id: string | null;
+          status: string;
+          provider_id: string | null;
+          created_at: string;
+        }>(
+          `SELECT id, idempotency_key, volume_reservation_id, status, provider_id, created_at
+             FROM messages
+            WHERE campaign_id = $1 AND lower(to_email) = $2 AND COALESCE(is_test, FALSE) = TRUE
+              AND ($3::text IS NULL OR idempotency_key LIKE $3)
+              AND status IN ('captured', 'submission_unknown', 'submitted')
+            ORDER BY created_at DESC LIMIT 1`,
+          [campaign.id, targetEmail, bodyAttempt ? `%:${bodyAttempt}` : null],
+        )
+      ).rows[0];
+      if (bodyAttempt && (!openAttempt || !["captured", "submission_unknown", "submitted"].includes(openAttempt.status))) {
+        return json(409, {
+          error: "attempt_id must identify the open test message for this campaign and recipient.",
+          attempt_id: bodyAttempt,
+          found_status: openAttempt?.status ?? null,
+        });
       }
-      const attemptId = bodyAttempt || makeId("tatt");
+      if (openAttempt?.provider_id || openAttempt?.status === "submitted") {
+        return json(200, {
+          queued: 1,
+          sent: 1,
+          failed: 0,
+          attempt_id: bodyAttempt || openAttempt.idempotency_key?.split(":").pop() || openAttempt.id,
+          status: "submitted",
+        });
+      }
+      if (openAttempt && Date.now() - new Date(openAttempt.created_at).getTime() > 24 * 60 * 60 * 1000) {
+        return json(409, {
+          error: "The provider idempotency window for this attempt has expired. Confirm delivery before sending again.",
+          attempt_id: bodyAttempt || openAttempt.id,
+          status: "manual_review",
+        });
+      }
+      const existingUnknown = openAttempt ?? null;
+      const attemptId = bodyAttempt || existingUnknown?.idempotency_key?.split(":").pop() || makeId("tatt");
       const reservationKey = `test:${campaign.id}:${targetEmail}:${attemptId}`;
-      const reserved = await reserveDailyVolume({
-        reservationKey,
-        campaignId: campaign.id,
-      });
+      const reserved = existingUnknown?.volume_reservation_id
+        ? { ok: true as const, reservationId: existingUnknown.volume_reservation_id }
+        : await reserveDailyVolume({
+            reservationKey,
+            campaignId: campaign.id,
+          });
       if (!reserved.ok) {
         return json(429, { error: reserved.error, used: reserved.used, limit: reserved.limit });
       }
@@ -1651,71 +1848,79 @@ export async function handleApi(request: Request, path: string[]) {
         ],
       );
 
-      let providerEmail: { id: string } | null = null;
+      const accepted: { current: { id: string } | null } = { current: null };
       let providerAttempted = false;
       try {
         if (isLive) {
-          // Final gates immediately before Resend — fail closed if any gate changed.
-          if (["1", "true", "yes", "on"].includes((process.env.SENDSTACK_EMERGENCY_STOP ?? "").trim().toLowerCase())) {
-            await releaseDailyReservation(reserved.reservationId, true);
-            return json(403, { error: "SENDSTACK_EMERGENCY_STOP is enabled." });
-          }
-          if (!liveSendAllowed()) {
-            await releaseDailyReservation(reserved.reservationId, true);
-            return json(403, { error: "Live sending is disabled." });
-          }
-          if (!identityConfigured(identity) || !isTestRecipientAllowed(targetEmail, identity)) {
-            await releaseDailyReservation(reserved.reservationId, true);
-            return json(403, { error: "Identity/allowlist gate failed immediately before send." });
-          }
-          if (await isEmailSuppressed(targetEmail)) {
-            await releaseDailyReservation(reserved.reservationId, true);
-            await query(`UPDATE messages SET status = 'suppressed', error = $1 WHERE id = $2`, [
-              "Late suppression before provider submit",
-              messageId,
-            ]);
-            return json(403, { error: "That address is suppressed and cannot receive test email." });
-          }
-          try {
-            await assertDeliveryHealthAllowsSubmit({ requireThresholds: true });
-          } catch (error) {
-            await releaseDailyReservation(reserved.reservationId, true);
-            return json(403, {
-              error: error instanceof Error ? error.message : "Delivery health gate blocked test send.",
+          let gate: Response | null = null;
+          await withSubmitBarrier(async () => {
+            if (["1", "true", "yes", "on"].includes((process.env.SENDSTACK_EMERGENCY_STOP ?? "").trim().toLowerCase())) {
+              await releaseDailyReservation(reserved.reservationId, true);
+              gate = json(403, { error: "SENDSTACK_EMERGENCY_STOP is enabled." });
+              return;
+            }
+            if (!liveSendAllowed()) {
+              await releaseDailyReservation(reserved.reservationId, true);
+              gate = json(403, { error: "Live sending is disabled." });
+              return;
+            }
+            if (!identityConfigured(identity) || !isTestRecipientAllowed(targetEmail, identity)) {
+              await releaseDailyReservation(reserved.reservationId, true);
+              gate = json(403, { error: "Identity/allowlist gate failed immediately before send." });
+              return;
+            }
+            if (await isEmailSuppressed(targetEmail)) {
+              await releaseDailyReservation(reserved.reservationId, true);
+              await query(`UPDATE messages SET status = 'suppressed', error = $1 WHERE id = $2`, [
+                "Late suppression before provider submit",
+                messageId,
+              ]);
+              gate = json(403, { error: "That address is suppressed and cannot receive test email." });
+              return;
+            }
+            try {
+              await assertDeliveryHealthAllowsSubmit({ requireThresholds: true });
+            } catch (error) {
+              await releaseDailyReservation(reserved.reservationId, true);
+              gate = json(403, {
+                error: error instanceof Error ? error.message : "Delivery health gate blocked test send.",
+              });
+              return;
+            }
+            providerAttempted = true;
+            accepted.current = await sendResendEmail({
+              to: targetEmail,
+              subject,
+              html: htmlBody,
+              text: textBody,
+              fromName: campaign.from_name,
+              fromEmail,
+              replyTo,
+              unsubscribeUrl,
+              attachments: sendAttachments,
+              idempotencyKey,
+              tags: [
+                { name: "campaign_id", value: campaign.id.slice(0, 256) },
+                { name: "send_type", value: "test" },
+              ],
             });
-          }
-
-          providerAttempted = true;
-          providerEmail = await sendResendEmail({
-            to: targetEmail,
-            subject,
-            html: htmlBody,
-            text: textBody,
-            fromName: campaign.from_name,
-            fromEmail,
-            replyTo,
-            unsubscribeUrl,
-            attachments: sendAttachments,
-            idempotencyKey,
-            tags: [
-              { name: "campaign_id", value: campaign.id.slice(0, 256) },
-              { name: "send_type", value: "test" },
-            ],
           });
+          if (gate) return gate;
         }
       } catch (error) {
         const errorMessage = error instanceof Error ? error.message : "Delivery failed.";
-        const ambiguous =
-          providerAttempted &&
-          /timeout|network|ECONNRESET|fetch failed|aborted|socket|503|504|ambiguous/i.test(errorMessage);
-        if (ambiguous) {
+        // Stored diagnostics stay detailed for operators but must not retain tokens.
+        const storedMessage = redactForLog(errorMessage).slice(0, 500);
+        // Returned text must never expose driver or provider internals.
+        const clientMessage = safeClientMessage(error, "Delivery failed.");
+        if (providerAttempted) {
           await query(
             `UPDATE messages
                 SET status = 'submission_unknown',
                     error = $1,
                     diagnostic_json = $2
               WHERE id = $3`,
-            [errorMessage.slice(0, 500), JSON.stringify({ error: errorMessage, attempt_id: attemptId }), messageId],
+            [storedMessage, JSON.stringify({ error: storedMessage, attempt_id: attemptId }), messageId],
           );
           return json(202, {
             queued: 1,
@@ -1723,25 +1928,39 @@ export async function handleApi(request: Request, path: string[]) {
             failed: 0,
             status: "submission_unknown",
             attempt_id: attemptId,
-            error: errorMessage,
+            error: clientMessage,
           });
         }
         await query(
           `UPDATE messages SET status = 'failed', error = $1, diagnostic_json = $2 WHERE id = $3`,
-          [errorMessage.slice(0, 500), JSON.stringify({ error: errorMessage }), messageId],
+          [storedMessage, JSON.stringify({ error: storedMessage }), messageId],
         );
         // Release only when no provider submission could have occurred.
         if (!providerAttempted) {
           await releaseDailyReservation(reserved.reservationId, true);
         }
-        return json(500, { error: errorMessage });
+        return json(500, { error: clientMessage });
       }
 
-      if (providerEmail) {
-        await query(
-          `UPDATE messages SET status = 'submitted', provider_id = $1, diagnostic_json = $2 WHERE id = $3`,
-          [providerEmail.id, JSON.stringify({ provider_id: providerEmail.id, list_unsubscribe: unsubscribeUrl, attempt_id: attemptId }), messageId],
-        );
+      if (accepted.current) {
+        try {
+          await query(
+            `UPDATE messages SET status = 'submitted', provider_id = $1, diagnostic_json = $2 WHERE id = $3`,
+            [accepted.current.id, JSON.stringify({ provider_id: accepted.current.id, list_unsubscribe: unsubscribeUrl, attempt_id: attemptId }), messageId],
+          );
+        } catch {
+          await query(
+            `UPDATE messages SET status = 'submission_unknown', error = $1, diagnostic_json = $2 WHERE id = $3`,
+            ["Local write failed after the provider accepted the email.", JSON.stringify({ attempt_id: attemptId }), messageId],
+          ).catch(() => undefined);
+          return json(202, {
+            queued: 1,
+            sent: 0,
+            failed: 0,
+            status: "submission_unknown",
+            attempt_id: attemptId,
+          });
+        }
       }
       await consumeDailyReservation(reserved.reservationId);
       await recordRequestAudit(request, auth.session.user_id, "campaign_test_sent", "campaign", campaign.id, {
@@ -1865,7 +2084,7 @@ export async function handleApi(request: Request, path: string[]) {
         idempotent: prepared.idempotent,
       });
     } catch (error) {
-      const message = error instanceof Error ? error.message : "Launch prepare failed.";
+      const message = safeClientMessage(error, "Launch prepare failed.");
       if (/Daily delivery limit/i.test(message)) {
         return json(429, { error: message });
       }
@@ -2093,7 +2312,7 @@ export async function handleApi(request: Request, path: string[]) {
         consentSource,
       });
     } catch (error) {
-      return json(400, { error: error instanceof Error ? error.message : "Could not create contact." });
+      return json(400, { error: safeClientMessage(error, "Could not create contact.") });
     }
     await recordRequestAudit(request, auth.session.user_id, "contact_created", "contact", created.id, {
       email,
@@ -2131,12 +2350,38 @@ export async function handleApi(request: Request, path: string[]) {
     if (!body.new_password || body.new_password.length < 12) {
       return json(400, { error: "New password must be at least 12 characters." });
     }
-    await query(
-      `UPDATE users SET password_hash = $1, must_change_password = FALSE, updated_at = NOW() WHERE id = $2`,
-      [hashPassword(body.new_password), session.user_id],
-    );
+    const token = randomBytes(32).toString("base64url");
+    const csrfToken = randomBytes(24).toString("base64url");
+    const hours = Number(process.env.SENDSTACK_SESSION_HOURS ?? 12);
+    const passwordClient = await getPool().connect();
+    try {
+      await passwordClient.query("BEGIN");
+      await passwordClient.query(
+        `UPDATE users SET password_hash = $1, must_change_password = FALSE, updated_at = NOW() WHERE id = $2`,
+        [hashPassword(body.new_password), session.user_id],
+      );
+      await passwordClient.query(`DELETE FROM sessions WHERE user_id = $1`, [session.user_id]);
+      await passwordClient.query(
+        `INSERT INTO sessions (token_hash, user_id, csrf_token, expires_at, created_at)
+         VALUES ($1, $2, $3, NOW() + ($4 * INTERVAL '1 hour'), NOW())`,
+        [tokenHash(token), session.user_id, csrfToken, hours],
+      );
+      await passwordClient.query("COMMIT");
+    } catch (error) {
+      await passwordClient.query("ROLLBACK").catch(() => undefined);
+      throw error;
+    } finally {
+      passwordClient.release();
+    }
     await recordRequestAudit(request, session.user_id, "password_changed", "user", session.user_id);
-    return json(200, await sessionPayload({ ...session, must_change_password: false }));
+    const response = json(200, await sessionPayload({
+      ...session,
+      must_change_password: false,
+      csrf_token: csrfToken,
+      token,
+    }));
+    response.headers.set("Set-Cookie", cookieHeader(token, hours * 3600));
+    return response;
   }
   if (request.method === "POST" && route === "/auth/logout") {
     const token = cookieValue(request, "sendstack_session");

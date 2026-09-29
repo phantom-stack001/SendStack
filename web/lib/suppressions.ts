@@ -1,3 +1,4 @@
+import type { PoolClient } from "pg";
 import { getPool } from "./db";
 import { normalizeEmail } from "./ids";
 
@@ -37,12 +38,15 @@ export async function applySuppression(
   email: string,
   reason: SuppressionReason,
   source = "application",
+  external?: PoolClient,
 ): Promise<void> {
   const normalized = normalizeEmail(email);
-  const pool = getPool();
-  const client = await pool.connect();
+  const client = external ?? (await getPool().connect());
+  const ownTransaction = !external;
   try {
-    await client.query("BEGIN");
+    if (ownTransaction) await client.query("BEGIN");
+    const { lockSubmitBarrier } = await import("./submit-barrier");
+    await lockSubmitBarrier(client);
     const hasProtected = await suppressionsHaveProtectedColumn(client);
     const existing = await client.query<{ reason: SuppressionReason; protected?: boolean }>(
       hasProtected
@@ -55,14 +59,14 @@ export async function applySuppression(
       await client.query(`UPDATE contacts SET status = 'suppressed', updated_at = NOW() WHERE email = $1`, [
         normalized,
       ]);
-      await client.query("COMMIT");
+      if (ownTransaction) await client.query("COMMIT");
       return;
     }
     if (current === "complaint" && reason !== "complaint") {
       await client.query(`UPDATE contacts SET status = 'suppressed', updated_at = NOW() WHERE email = $1`, [
         normalized,
       ]);
-      await client.query("COMMIT");
+      if (ownTransaction) await client.query("COMMIT");
       return;
     }
 
@@ -112,12 +116,12 @@ export async function applySuppression(
     await client.query(`UPDATE contacts SET status = 'suppressed', updated_at = NOW() WHERE email = $1`, [
       normalized,
     ]);
-    await client.query("COMMIT");
+    if (ownTransaction) await client.query("COMMIT");
   } catch (error) {
-    await client.query("ROLLBACK").catch(() => undefined);
+    if (ownTransaction) await client.query("ROLLBACK").catch(() => undefined);
     throw error;
   } finally {
-    client.release();
+    if (ownTransaction) client.release();
   }
 }
 
@@ -153,7 +157,10 @@ export async function removeSuppression(email: string): Promise<{
       await client.query("ROLLBACK");
       return { removed: false };
     }
-    if (hasProtected && row.protected) {
+    // Key the refusal on the reason as well as the column: on a database that has not
+    // yet applied 0006 the `protected` column is absent, and gating only on the column
+    // would allow a complaint or hard-bounce suppression to be deleted.
+    if ((hasProtected && row.protected) || PROTECTED_REASONS.has(row.reason as SuppressionReason)) {
       await client.query("ROLLBACK");
       throw new Error("Protected suppressions (bounce/complaint/provider) cannot be removed.");
     }
@@ -199,7 +206,10 @@ export async function removeSuppressionWithReconsent(input: {
       await client.query("ROLLBACK");
       return { removed: false };
     }
-    if (hasProtected && existing.rows[0].protected) {
+    if (
+      (hasProtected && existing.rows[0].protected) ||
+      PROTECTED_REASONS.has(existing.rows[0].reason as SuppressionReason)
+    ) {
       await client.query("ROLLBACK");
       throw new Error("Protected suppressions cannot be cleared via generic re-consent.");
     }

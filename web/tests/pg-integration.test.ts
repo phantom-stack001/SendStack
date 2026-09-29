@@ -43,6 +43,7 @@ import {
   resolveTestDatabaseUrl,
   seedActiveContact,
   seedActiveContactsBulk,
+  seedAdminSession,
   seedAdminUser,
   seedDraftCampaign,
   seedList,
@@ -321,14 +322,31 @@ describe.skipIf(!dbAvailable)("PostgreSQL integration / concurrency", () => {
     });
 
     expect(sendCount).toBe(0);
-    expect(tick.status).toMatch(/manual_review|failed|cancelled/);
+    // The stop is a reversible pause, not a destroyer: the job must not be claimed
+    // and must not be terminalized, so clearing the stop resumes the launch instead
+    // of requiring manual database repair.
+    expect(tick.claimed).toBe(false);
+    expect(tick.status).toBe("paused_emergency_stop");
 
-    const row = await query<{ status: string; last_error: string | null }>(
-      `SELECT status, last_error FROM launch_jobs WHERE id = $1`,
+    const row = await query<{ status: string; terminal_reason: string | null }>(
+      `SELECT status, terminal_reason FROM launch_jobs WHERE id = $1`,
       [job.id],
     );
-    expect(row.rows[0]?.status).toBe("manual_review");
-    expect(row.rows[0]?.last_error ?? "").toMatch(/EMERGENCY_STOP/i);
+    expect(row.rows[0]?.status).not.toBe("manual_review");
+    expect(row.rows[0]?.status).not.toBe("failed");
+    expect(row.rows[0]?.terminal_reason ?? null).toBeNull();
+
+    // Clearing the stop makes the job claimable again and it completes normally.
+    delete process.env.SENDSTACK_EMERGENCY_STOP;
+    const resumed = await runLaunchWorkerTick({
+      workerId: makeId("w"),
+      live: true,
+      provider: mockLiveProvider().provider,
+      timeBudgetMs: 5_000,
+      maxChunks: 10,
+    });
+    expect(resumed.claimed).toBe(true);
+    expect(resumed.status).not.toBe("manual_review");
   });
 
   it("repeated volume reservations are idempotent per key", async () => {
@@ -560,14 +578,15 @@ describe.skipIf(!dbAvailable)("PostgreSQL integration / concurrency", () => {
     const identity = loadSendingIdentity();
 
     const withMarker = applyComplianceFooter(
-      '<p>Hi</p><div class="sendstack-compliance-footer">author marker should not suppress</div>',
-      "Hi",
+      '<p>Hi --- keep this</p><p>Unsubscribe: author line</p>',
+      "Hi\n---\nUnsubscribe: author line",
       identity,
       { broadcast: true },
     );
     expect(withMarker.html).toContain("Example Co");
-    expect(withMarker.html).not.toContain("author marker should not suppress");
-    expect((withMarker.html.match(/sendstack-compliance-footer/g) || []).length).toBe(1);
+    expect(withMarker.html).toContain("Hi --- keep this");
+    expect(withMarker.text).toContain("Unsubscribe: author line");
+    expect(withMarker.html).toContain("{{{RESEND_UNSUBSCRIBE_URL}}}");
 
     expect(validateAllowedLinkDomains(["co.uk"]).length).toBeGreaterThan(0);
     expect(validateAllowedLinkDomains(["example.co.uk"])).toEqual([]);
@@ -1475,6 +1494,116 @@ describe.skipIf(!dbAvailable)("PostgreSQL integration / concurrency", () => {
       ["auth", "login"],
     );
     expect(blocked.status).toBe(429);
+  });
+
+  it("login limits stay atomic for one trusted client address", async () => {
+    const { handleApi } = await import("../lib/api-router");
+    process.env.VERCEL = "1";
+    const ip = "203.0.113.77";
+    try {
+      const emails: string[] = [];
+      for (let i = 0; i < 101; i += 1) {
+        const email = `ipcap_${i}_${makeId("u")}@example.com`;
+        emails.push(email);
+        await seedAdminUser(email);
+      }
+      const results: Response[] = [];
+      const concurrency = 8;
+      let cursor = 0;
+      async function worker() {
+        while (cursor < emails.length) {
+          const email = emails[cursor];
+          cursor += 1;
+          results.push(
+            await handleApi(
+              new Request("https://app.example.com/api/auth/login", {
+                method: "POST",
+                headers: {
+                  "content-type": "application/json",
+                  "x-forwarded-for": ip,
+                },
+                body: JSON.stringify({ email, password: "WrongPassword!!" }),
+              }),
+              ["auth", "login"],
+            ),
+          );
+        }
+      }
+      await Promise.all(Array.from({ length: concurrency }, () => worker()));
+      const blocked = results.filter((response) => response.status === 429).length;
+      const denied = results.filter((response) => response.status === 401).length;
+      expect(denied).toBe(100);
+      expect(blocked).toBe(1);
+      const attempts = await query<{ count: string }>(
+        `SELECT COUNT(*)::int AS count FROM login_attempts WHERE client_ip = $1`,
+        [ip],
+      );
+      expect(Number(attempts.rows[0]?.count)).toBe(100);
+    } finally {
+      delete process.env.VERCEL;
+    }
+  }, 60_000);
+
+  it("password change revokes every previous session", async () => {
+    const { handleApi } = await import("../lib/api-router");
+    const { createHash } = await import("node:crypto");
+    const userId = await seedAdminUser();
+    const first = await seedAdminSession(userId);
+    const second = await seedAdminSession(userId);
+    const response = await handleApi(
+      new Request("https://app.example.com/api/auth/change-password", {
+        method: "POST",
+        headers: {
+          cookie: first.cookie,
+          "x-csrf-token": first.csrfToken,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({ current_password: "TestPass123!", new_password: "Replacement456!" }),
+      }),
+      ["auth", "change-password"],
+    );
+    expect(response.status).toBe(200);
+    const previous = [first.token, second.token].map((token) =>
+      createHash("sha256").update(token).digest("hex"),
+    );
+    const remaining = await query<{ token_hash: string }>(
+      `SELECT token_hash FROM sessions WHERE user_id = $1`,
+      [userId],
+    );
+    expect(remaining.rows).toHaveLength(1);
+    expect(previous).not.toContain(remaining.rows[0]?.token_hash);
+  });
+
+  it("a test-send retry reuses one durable idempotency key", async () => {
+    const { handleApi } = await import("../lib/api-router");
+    const userId = await seedAdminUser();
+    const session = await seedAdminSession(userId);
+    const listId = await seedList();
+    const campaignId = await seedDraftCampaign({ listId, createdBy: userId });
+    const send = (email: string) =>
+      handleApi(
+        new Request(`https://app.example.com/api/campaigns/${campaignId}/test-send`, {
+          method: "POST",
+          headers: {
+            cookie: session.cookie,
+            "x-csrf-token": session.csrfToken,
+            "content-type": "application/json",
+          },
+          body: JSON.stringify({ email }),
+        }),
+        ["campaigns", campaignId, "test-send"],
+      );
+    const first = await send("retry-canary@ctn-sk.com");
+    expect(first.status).toBe(200);
+    const second = await send("retry-canary@ctn-sk.com");
+    expect(second.status).toBe(200);
+    const messages = await query<{ idempotency_key: string | null }>(
+      `SELECT idempotency_key FROM messages
+        WHERE campaign_id = $1 AND COALESCE(is_test, FALSE) = TRUE`,
+      [campaignId],
+    );
+    expect(messages.rows).toHaveLength(1);
+    expect(messages.rows[0]?.idempotency_key).toMatch(/^test:/);
   });
 
   it("health block waive closes blocker and readiness can recover", async () => {
