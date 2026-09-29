@@ -159,13 +159,35 @@ async function main() {
     const ledgerExists = await client.query<{ rel: string | null }>(
       `SELECT to_regclass(current_schema() || '.schema_migrations')::text AS rel`,
     );
-    const ledger = ledgerExists.rows[0]?.rel
-      ? await client.query<{
-          id: string;
-          checksum: string | null;
-          checksum_source: string | null;
-        }>(`SELECT id, checksum, checksum_source FROM schema_migrations ORDER BY id`)
-      : { rows: [] as Array<{ id: string; checksum: string | null; checksum_source: string | null }> };
+    const checksumColumn = ledgerExists.rows[0]?.rel
+      ? await client.query<{ exists: boolean }>(
+          `SELECT EXISTS (
+             SELECT 1 FROM information_schema.columns
+              WHERE table_schema = current_schema()
+                AND table_name = 'schema_migrations'
+                AND column_name = 'checksum'
+           ) AS exists`,
+        )
+      : { rows: [{ exists: false }] };
+    const hasChecksum = checksumColumn.rows[0]?.exists === true;
+    // A dry-run against a ledger created before this runner has no checksum
+    // column. Reading id only keeps the plan free of writes.
+    const ledger = !ledgerExists.rows[0]?.rel
+      ? { rows: [] as Array<{ id: string; checksum: string | null; checksum_source: string | null }> }
+      : hasChecksum
+        ? await client.query<{
+            id: string;
+            checksum: string | null;
+            checksum_source: string | null;
+          }>(`SELECT id, checksum, checksum_source FROM schema_migrations ORDER BY id`)
+        : await client.query<{
+            id: string;
+            checksum: string | null;
+            checksum_source: string | null;
+          }>(
+            `SELECT id, NULL::text AS checksum, NULL::text AS checksum_source
+               FROM schema_migrations ORDER BY id`,
+          );
 
     const orphaned = ledger.rows.filter((row) => !known.has(row.id)).map((row) => row.id);
     if (orphaned.length) {
@@ -193,8 +215,9 @@ async function main() {
       }
     }
     if (baselined.length) {
+      const verb = args.dryRun ? "Would baseline" : "Recorded baseline";
       console.log(
-        `Recorded baseline checksums for ${baselined.length} previously applied migration(s): ${baselined.join(", ")}`,
+        `${verb} checksums for ${baselined.length} previously applied migration(s): ${baselined.join(", ")}`,
       );
     }
     if (drift.length) {

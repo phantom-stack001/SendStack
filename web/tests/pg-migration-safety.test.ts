@@ -174,4 +174,27 @@ describe.skipIf(!dbAvailable)("migration runner safety (disposable PostgreSQL)",
       await migrate();
     }
   });
+
+  it("dry-run plans a pre-checksum ledger without creating the checksum column", async () => {
+    await query(`ALTER TABLE schema_migrations DROP COLUMN IF EXISTS checksum`);
+    await query(`ALTER TABLE schema_migrations DROP COLUMN IF EXISTS checksum_source`);
+    await query(`ALTER TABLE schema_migrations DROP COLUMN IF EXISTS duration_ms`);
+    const before = await query<{ id: string }>(`SELECT id FROM schema_migrations ORDER BY id`);
+    try {
+      const { stdout } = await migrate(["--dry-run"]);
+      expect(stdout).toMatch(/Would baseline checksums for 7 previously applied migration/);
+      expect(stdout).toMatch(/Pending: none/);
+      expect(stdout).toMatch(/Dry run: no statements were executed/);
+      expect(stdout).not.toMatch(/Applied /);
+      const columns = await query<{ column_name: string }>(
+        `SELECT column_name FROM information_schema.columns
+          WHERE table_schema = current_schema() AND table_name = 'schema_migrations'`,
+      );
+      expect(columns.rows.map((row) => row.column_name)).not.toContain("checksum");
+      const after = await query<{ id: string }>(`SELECT id FROM schema_migrations ORDER BY id`);
+      expect(after.rows).toEqual(before.rows);
+    } finally {
+      await migrate();
+    }
+  });
 });
