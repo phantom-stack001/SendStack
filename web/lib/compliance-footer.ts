@@ -38,19 +38,25 @@ export function escapeIdentity(value: string): string {
 }
 
 const CONCEALING_STYLE =
-  /display\s*:\s*none|visibility\s*:\s*hidden|opacity\s*:\s*0|font-size\s*:\s*0|color\s*:\s*transparent|height\s*:\s*0|width\s*:\s*0|overflow\s*:\s*hidden/i;
+  /(?<![\w-])display\s*:\s*none|(?<![\w-])visibility\s*:\s*hidden|(?<![\w-])opacity\s*:\s*0|(?<![\w-])font-size\s*:\s*0|(?<![\w-])color\s*:\s*transparent|(?<![\w-])height\s*:\s*0|(?<![\w-])width\s*:\s*0|(?<![\w-])overflow\s*:\s*hidden/i;
 
 /**
- * Author CSS can target the footer. Style blocks and style attributes are removed
- * before the footer is frozen so concealment rules cannot survive into the snapshot.
+ * Author CSS can target the footer via selectors. Drop entire <style> blocks, and
+ * remove only concealing declarations from inline style attributes so layout CSS survives.
  */
 export function stripConcealingStyles(html: string): string {
-  if (CONCEALING_STYLE.test(html) && /<style\b/i.test(html)) {
-    // Entire style blocks are dropped when any concealment declaration is present.
-  }
   return html
     .replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, "")
-    .replace(/\sstyle\s*=\s*("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*')/gi, "");
+    .replace(/\sstyle\s*=\s*("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*')/gi, (match, quoted: string) => {
+      const quote = quoted[0];
+      const raw = quoted.slice(1, -1);
+      const cleaned = raw
+        .split(";")
+        .map((part) => part.trim())
+        .filter((part) => part.length > 0 && !CONCEALING_STYLE.test(part))
+        .join(";");
+      return cleaned ? ` style=${quote}${cleaned}${quote}` : "";
+    });
 }
 
 export function renderComplianceFooterHtml(parts: ComplianceFooterParts): string {
@@ -112,9 +118,9 @@ export function applyComplianceFooter(
   let html = htmlBody ?? "";
   let text = textBody ?? "";
 
-  // Concealment is rejected even when the footer is already present. Stripping
-  // happens only before the footer is inserted, so a second call stays byte-identical
-  // and does not delete the footer's own style attributes or author text.
+  // Sanitize concealing CSS first so stored visual templates and post-hoc style
+  // blocks cannot hide the footer. Preserve non-concealing author layout styles.
+  html = stripConcealingStyles(html);
   if (CONCEALING_STYLE.test(html)) {
     throw new Error("Campaign HTML contains a style that can conceal the compliance footer.");
   }
@@ -125,7 +131,6 @@ export function applyComplianceFooter(
 
   rejectMarkerCollision(html, "HTML");
   rejectMarkerCollision(text, "text");
-  html = stripConcealingStyles(html);
 
   if (/<\/body>/i.test(html)) {
     html = html.replace(/<\/body>/i, `${footerHtml}</body>`);

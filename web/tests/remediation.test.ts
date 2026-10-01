@@ -120,21 +120,29 @@ describe("compliance footer injection", () => {
     expect(again.text).toBe(result.text);
   });
 
-  it("rejects CSS that can conceal the compliance footer", () => {
+  it("sanitizes CSS that can conceal the compliance footer", () => {
     setIdentityEnv();
     const identity = loadSendingIdentity();
-    expect(() =>
-      applyComplianceFooter('<p style="display:none">Hi</p>', "Hi", identity),
-    ).toThrow(/conceal/i);
+    const hidden = applyComplianceFooter('<p style="display:none;color:#333">Hi</p>', "Hi", identity);
+    expect(hidden.html).not.toMatch(/display\s*:\s*none/i);
+    expect(hidden.html).toContain('style="color:#333"');
+    expect(hidden.html).toContain("Contoso Ltd");
+    expect(hidden.html).toContain(">Hi</p>");
     for (const css of [
       "visibility:hidden",
       "opacity:0",
       "font-size:0",
       "color:transparent",
     ]) {
-      expect(() =>
-        applyComplianceFooter(`<style>.sendstack-compliance-footer{${css}}</style><p>Hi</p>`, "Hi", identity),
-      ).toThrow(/conceal/i);
+      const result = applyComplianceFooter(
+        `<style>.sendstack-compliance-footer{${css}}</style><p style="color:#333">Hi</p>`,
+        "Hi",
+        identity,
+      );
+      expect(result.html).not.toContain("<style");
+      expect(result.html).not.toMatch(new RegExp(css.replace(":", "\\s*:\\s*"), "i"));
+      expect(result.html).toContain('style="color:#333"');
+      expect(result.html).toContain("Contoso Ltd");
     }
     const stripped = applyComplianceFooter("<style>p{color:#333}</style><p>Hi</p>", "Hi", identity);
     expect(stripped.html).not.toContain("<style");
@@ -142,7 +150,7 @@ describe("compliance footer injection", () => {
     expect(stripped.html).toContain("<p>Hi</p>");
   });
 
-  it("rejects concealment added after the footer was already applied", () => {
+  it("strips concealment added after the footer was already applied", () => {
     setIdentityEnv();
     const identity = loadSendingIdentity();
     const first = applyComplianceFooter(
@@ -156,7 +164,26 @@ describe("compliance footer injection", () => {
       "<p>Hi</p>",
       '<style>.sendstack-compliance-footer{display:none}</style><p>Hi</p>',
     );
-    expect(() => applyComplianceFooter(hidden, first.text, identity)).toThrow(/conceal/i);
+    const cleaned = applyComplianceFooter(hidden, first.text, identity);
+    expect(cleaned.html).not.toContain("<style");
+    expect(cleaned.html).not.toMatch(/display\s*:\s*none/i);
+    expect(cleaned.html).toContain("Contoso Ltd");
+    expect(cleaned.html).toContain("SENDSTACK_COMPLIANCE_FOOTER_START");
+    expect(cleaned.text).toBe(first.text);
+  });
+
+  it("preserves visual layout styles when applying the compliance footer", () => {
+    setIdentityEnv();
+    const html =
+      '<div style="max-height:0;line-height:1px;font-size:1px;color:#ffffff">Preview</div>' +
+      '<table style="max-width:600px;background:#ffffff;border-radius:14px"><tr><td style="padding:34px 30px;color:#14213d">Hello</td></tr></table>';
+    const result = applyComplianceFooter(html, "Hello", loadSendingIdentity());
+    expect(result.html).toContain("border-radius:14px");
+    expect(result.html).toContain("padding:34px 30px");
+    expect(result.html).toContain("max-height:0");
+    expect(result.html).not.toMatch(/overflow\s*:\s*hidden/i);
+    expect(result.html).not.toMatch(/display\s*:\s*none/i);
+    expect(result.html).toContain("Contoso Ltd");
   });
 
   it("refuses a production session cookie unless it is Secure", () => {
