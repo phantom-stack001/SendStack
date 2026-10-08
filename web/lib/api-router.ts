@@ -173,7 +173,6 @@ async function sessionPayload(session: NonNullable<Awaited<ReturnType<typeof cur
     must_change_password: session.must_change_password,
     enforced_from_email: identity.fromEmail || null,
     reply_to_email: identity.replyToEmail || null,
-    company_name: identity.companyName || null,
     identity_configured: identityConfigured(identity),
     user: {
       id: session.user_id,
@@ -562,7 +561,6 @@ async function readinessResponse() {
       transport: config.deliveryMode,
       from_email: identity.fromEmail || null,
       reply_to_email: identity.replyToEmail || null,
-      company_name: identity.companyName || null,
     },
     ready_for_live_sending: readyForLive,
     health_thresholds_configured: health.thresholds_configured,
@@ -615,7 +613,7 @@ async function readinessResponse() {
       },
       {
         id: "sender_identity",
-        label: "Sender identity & compliance",
+        label: "Sender identity",
         status: identityReady ? "ready" : "pending",
         detail: identityReady
           ? `From ${identity.fromEmail}, Reply-To ${identity.replyToEmail}.`
@@ -649,7 +647,7 @@ async function readinessResponse() {
     ],
     volume_plan: {
       goal: `${config.dailyLimit.toLocaleString()} emails/day`,
-      launch_policy: "Increase volume only after delivery and complaint signals remain healthy and webhook correlation is complete.",
+      launch_policy: "Increase volume only after bounce, complaint, and unsubscribe signals remain healthy within Spacemail SMTP limits.",
     },
     identity_gaps: gaps,
   });
@@ -1664,7 +1662,7 @@ export async function handleApi(request: Request, path: string[]) {
         });
         if (cancel.error && cancel.providerCancelled === false) {
           return json(409, {
-            error: `Provider can no longer stop this broadcast: ${cancel.error}`,
+            error: `Spacemail cannot recall mail it already accepted. Only unsent recipients can be stopped: ${cancel.error}`,
             status: cancel.campaignStatus,
             provider_cancelled: false,
             cancellable: false,
@@ -1686,7 +1684,7 @@ export async function handleApi(request: Request, path: string[]) {
       }
       if (campaign.provider_broadcast_id) {
         return json(409, {
-          error: "A provider broadcast already exists. Create a new campaign draft instead of resuming a cancelled or partially sent broadcast.",
+          error: "This send already started through Spacemail SMTP. Create a new draft instead of resuming a partial send.",
         });
       }
       await query(`UPDATE campaigns SET status = 'draft', updated_at = NOW() WHERE id = $1`, [campaign.id]);
@@ -1704,7 +1702,7 @@ export async function handleApi(request: Request, path: string[]) {
       }
       if (isLive) {
         if (!identityConfigured(identity)) {
-          return json(403, { error: "Identity and compliance settings are required before live test sends." });
+          return json(403, { error: "Sender identity settings are required before live test sends." });
         }
         if (!isTestRecipientAllowed(targetEmail, identity)) {
           return json(403, { error: "Test recipient is not on SENDSTACK_TEST_RECIPIENT_ALLOWLIST." });
@@ -1734,7 +1732,7 @@ export async function handleApi(request: Request, path: string[]) {
       try {
         footered = applyComplianceFooter(campaign.html_body, campaign.text_body, identity);
       } catch (error) {
-        return json(400, { error: error instanceof Error ? error.message : "Compliance footer could not be applied." });
+        return json(400, { error: error instanceof Error ? error.message : "Campaign content could not be prepared." });
       }
 
       const preflight = runCampaignPreflight({
@@ -2000,7 +1998,7 @@ export async function handleApi(request: Request, path: string[]) {
     try {
       footered = applyComplianceFooter(campaign.html_body, campaign.text_body, identity);
     } catch (error) {
-      return json(400, { error: error instanceof Error ? error.message : "Compliance footer could not be applied." });
+      return json(400, { error: error instanceof Error ? error.message : "Campaign content could not be prepared." });
     }
 
     const preflight = runCampaignPreflight({
@@ -2031,7 +2029,7 @@ export async function handleApi(request: Request, path: string[]) {
 
     if (isSmtpLaunch && isLive) {
       if (!identityConfigured(identity)) {
-        return json(403, { error: "Identity and compliance settings are incomplete. Live launch is blocked." });
+          return json(403, { error: "Sender identity settings are incomplete. Live launch is blocked." });
       }
     }
 

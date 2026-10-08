@@ -41,9 +41,6 @@ describe("delivery health 100% complaint/bounce gate", () => {
       if (sql.includes("FROM suppressions") || sql.includes("reason = 'complaint'")) {
         return { rows: [{ complained: "10", unsubscribed: "0", suppressed: "0" }] };
       }
-      if (sql.includes("COUNT(*)::int AS received")) {
-        return { rows: [{ received: "0", processed: "0" }] };
-      }
       return { rows: [{ count: "0" }] };
     });
   }
@@ -75,9 +72,6 @@ describe("delivery health 100% complaint/bounce gate", () => {
       if (sql.includes("FROM suppressions") || sql.includes("reason = 'complaint'")) {
         return { rows: [{ complained: "0", unsubscribed: "0", suppressed: "0" }] };
       }
-      if (sql.includes("COUNT(*)::int AS received")) {
-        return { rows: [{ received: "0", processed: "0" }] };
-      }
       return { rows: [{ count: "0" }] };
     });
 
@@ -97,9 +91,6 @@ describe("delivery health 100% complaint/bounce gate", () => {
       if (sql.includes("FROM suppressions") || sql.includes("reason = 'complaint'")) {
         return { rows: [{ complained: "0", unsubscribed: "0", suppressed: "0" }] };
       }
-      if (sql.includes("COUNT(*)::int AS received")) {
-        return { rows: [{ received: "0", processed: "0" }] };
-      }
       if (sql.includes("FROM launch_jobs")) {
         // Unrelated unresolved job still counted because ignore filter excludes only current id.
         return { rows: [{ count: "1" }] };
@@ -112,7 +103,7 @@ describe("delivery health 100% complaint/bounce gate", () => {
     ).rejects.toThrow(/unresolved launch job/i);
   });
 
-  it("unprocessed webhooks remain blocking without aging out", async () => {
+  it("does not query or block on provider webhook correlation under Spacemail SMTP", async () => {
     queryMock.mockImplementation(async (sql: string) => {
       if (sql.includes("FROM messages") && sql.includes("FILTER")) {
         return {
@@ -122,17 +113,16 @@ describe("delivery health 100% complaint/bounce gate", () => {
       if (sql.includes("FROM suppressions") || sql.includes("reason = 'complaint'")) {
         return { rows: [{ complained: "0", unsubscribed: "0", suppressed: "0" }] };
       }
-      if (sql.includes("COUNT(*)::int AS received")) {
-        return { rows: [{ received: "3", processed: "1" }] };
-      }
-      if (sql.includes("provider_events") && sql.includes("processed_at IS NULL")) {
-        return { rows: [{ count: "2" }] };
-      }
       return { rows: [{ count: "0" }] };
     });
 
     const health = await getDeliveryHealthSnapshot();
-    expect(health.launch_blocked).toBe(true);
-    expect(health.blocking_reasons.join(" ")).toMatch(/unprocessed|Suppression|webhook/i);
+    expect(health.launch_blocked).toBe(false);
+    expect(health.webhook_correlation_complete).toBe(true);
+    expect(health.webhook_events_received).toBe(0);
+    expect(health.blocking_reasons.join(" ")).not.toMatch(/webhook/i);
+    expect(
+      queryMock.mock.calls.some(([sql]) => String(sql).includes("provider_events")),
+    ).toBe(false);
   });
 });

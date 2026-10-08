@@ -29,7 +29,7 @@ export function liveSendBootIssues(): string[] {
   const gaps = identityComplianceGaps();
   if (gaps.length) {
     issues.push(
-      `Live sending requires identity/compliance settings: ${gaps.map((gap) => gap.id).join(", ")}`,
+      `Live sending requires identity settings: ${gaps.map((gap) => gap.id).join(", ")}`,
     );
   }
   const smtpReady = Boolean(

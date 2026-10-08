@@ -204,10 +204,10 @@ describe("production readiness identity gate", () => {
     delete process.env.SENDSTACK_REPLY_TO_EMAIL;
     delete process.env.SENDSTACK_ALLOWED_LINK_DOMAINS;
     const issues = liveSendBootIssues();
-    expect(issues.some((issue) => /identity\/compliance/i.test(issue))).toBe(true);
+    expect(issues.some((issue) => /identity settings/i.test(issue))).toBe(true);
     const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     expect(() => validateProductionEnv()).not.toThrow();
-    expect(errorSpy.mock.calls.some((call) => String(call[0]).includes("identity/compliance"))).toBe(
+    expect(errorSpy.mock.calls.some((call) => String(call[0]).includes("identity settings"))).toBe(
       true,
     );
     errorSpy.mockRestore();

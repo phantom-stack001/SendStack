@@ -314,13 +314,13 @@ function deliveryStatusMeaning(status) {
     case "sandboxed":
       return "Stored in this workspace only — no email left the app";
     case "submitted":
-      return "Accepted by the delivery service — not proof it reached the inbox";
+      return "Accepted by Spacemail SMTP — not proof it reached the inbox";
     case "delivered":
-      return "Delivery provider confirmed handoff to the recipient mailbox";
+      return "Legacy status — Spacemail SMTP does not report inbox delivery";
     case "delayed":
-      return "Provider reported a temporary delivery delay";
+      return "Legacy status — Spacemail SMTP does not report delays";
     case "failed":
-      return "Send attempt failed before the provider accepted it";
+      return "Send attempt failed before Spacemail accepted it";
     case "bounced":
       return "Hard bounce — address rejected; recipient is suppressed";
     case "complained":
@@ -330,9 +330,9 @@ function deliveryStatusMeaning(status) {
     case "suppressed":
       return "Skipped because the address is on the suppression list";
     case "cancelled":
-      return "Provider broadcast cancelled for remaining recipients";
+      return "Unsent recipients cancelled locally — already-accepted mail cannot be recalled";
     case "paused":
-      return "Local sandbox pause — live broadcasts must be cancelled at the provider";
+      return "Launch paused locally — unsent recipients will not be submitted";
     default:
       return "";
   }
@@ -341,15 +341,15 @@ function deliveryStatusMeaning(status) {
 function deliveryStatusLegend(live) {
   const items = live
     ? [
-        ["submitted", "Accepted by provider — not inbox proof"],
-        ["delivered", "Confirmed handoff to the mailbox"],
+        ["submitted", "Accepted by Spacemail SMTP — not inbox proof"],
         ["bounced", "Rejected address · suppressed"],
         ["complained", "Marked spam · suppressed"],
-        ["failed", "Send failed before accept"],
+        ["failed", "Send failed before SMTP accept"],
+        ["unsubscribed", "Opted out via unsubscribe"],
       ]
     : [
         ["captured", "Stored here only — not mailed"],
-        ["submitted", "Accepted by provider"],
+        ["submitted", "Accepted by Spacemail SMTP"],
         ["bounced", "Rejected address · suppressed"],
         ["failed", "Send failed before accept"],
       ];
@@ -359,45 +359,41 @@ function deliveryStatusLegend(live) {
 
 function deliveryModeLabel(mode) {
   if (mode === "smtp") return "Spacemail SMTP";
-  if (mode === "smtp") return "Allowlisted SMTP";
   return "Preview";
 }
 
 function deliveryStatusLabel(mode = state.session?.delivery_mode) {
-  return mode === "resend" ? "LIVE" : "Dev Mode";
+  return isLiveDelivery(mode) ? "LIVE" : "Dev Mode";
 }
 
 function isLiveDelivery(mode = state.session?.delivery_mode) {
-  return mode === "resend";
+  return mode === "smtp";
 }
 
 function testSendNotice(mode = state.session?.delivery_mode) {
   if (isLiveDelivery(mode)) {
-    return "LIVE: this sends a real email to the address you enter. It will leave this workspace.";
+    return "This sends a real test through your Spacemail mailbox to the address you enter.";
   }
-  if (mode === "smtp") {
-    return "Dev Mode: delivery is limited to approved test addresses.";
-  }
-  return "Dev Mode: the message is captured in Deliveries. No email leaves the app.";
+  return "Dev Mode: the message is captured in Deliveries. Nothing is mailed externally.";
 }
 
 function testSendSuccessMessage(email, mode = state.session?.delivery_mode) {
   if (isLiveDelivery(mode)) {
-    return `Live preview submitted to ${email}`;
+    return `Test sent via Spacemail to ${email}`;
   }
-  return `Preview captured for ${email} — open Deliveries to inspect it`;
+  return `Test captured for ${email} — open Deliveries to inspect it`;
 }
 
 function launchConfirmCopy(mode = state.session?.delivery_mode) {
   const live = isLiveDelivery(mode);
   return {
-    title: live ? "Send live to audience?" : "Send in Dev Mode?",
+    title: live ? "Send to audience?" : "Send in Dev Mode?",
     notice: live
-      ? "LIVE: eligible recipients will receive a real email."
+      ? "Eligible recipients will receive a real email through Spacemail SMTP."
       : "Dev Mode: messages are captured in this workspace. No email leaves the app.",
-    confirm: live ? "Send to real recipients" : "Start Dev Mode send",
+    confirm: live ? "Send to audience" : "Capture in Dev Mode",
     outcome: live
-      ? "After you confirm, delivery starts immediately for eligible recipients."
+      ? "After you confirm, Spacemail begins accepting one message per recipient."
       : "After you confirm, messages appear in Deliveries as Captured.",
   };
 }
@@ -407,11 +403,11 @@ function launchOutcomeMessage(result, mode = state.session?.delivery_mode) {
   const sent = Number(result?.sent ?? queued);
   const failed = Number(result?.failed ?? 0);
   if (isLiveDelivery(mode)) {
-    if (failed) return `Live send started: ${queued} queued · ${failed} failed`;
-    return queued === 1 ? "Live send started for 1 recipient" : `Live send started for ${queued} recipients`;
+    if (failed) return `Sending via Spacemail: ${queued} queued · ${failed} failed`;
+    return queued === 1 ? "Sending via Spacemail to 1 recipient" : `Sending via Spacemail to ${queued} recipients`;
   }
-  if (failed) return `Dev Mode send finished: ${sent} captured · ${failed} failed`;
-  if (sent === 0) return "Dev Mode send finished — no eligible recipients";
+  if (failed) return `Dev Mode finished: ${sent} captured · ${failed} failed`;
+  if (sent === 0) return "Dev Mode finished — no eligible recipients";
   return sent === 1 ? "Dev Mode: 1 message captured in Deliveries" : `Dev Mode: ${sent} messages captured in Deliveries`;
 }
 
@@ -469,7 +465,7 @@ function formatByteSize(bytes) {
 
 function attachmentListMarkup(attachments, { editable = false } = {}) {
   if (!attachments?.length) {
-    return `<p class="help attachment-empty">${editable ? "No files attached yet. Drop files here or use Add files." : "No attachments."}</p>`;
+    return editable ? "" : `<p class="help attachment-empty">No attachments.</p>`;
   }
   return `<ul class="attachment-list">${attachments.map((file) => `
     <li class="attachment-item">
@@ -479,28 +475,12 @@ function attachmentListMarkup(attachments, { editable = false } = {}) {
 }
 
 function pendingAttachmentListMarkup(pendingFiles) {
-  if (!pendingFiles.length) {
-    return `<p class="help attachment-empty">No files yet. Drop files here or use Add files — they upload when you save the draft.</p>`;
-  }
+  if (!pendingFiles.length) return "";
   return `<ul class="attachment-list">${pendingFiles.map((file, index) => `
     <li class="attachment-item pending">
       <div><strong>${escapeHtml(file.name)}</strong><span class="subtext">${escapeHtml(formatByteSize(file.size))} · uploads on save</span></div>
       <button type="button" class="button small ghost" data-remove-pending="${index}">Remove</button>
     </li>`).join("")}</ul>`;
-}
-
-function attachmentMeterMarkup(count, bytes) {
-  const countPct = Math.min(100, Math.round((count / ATTACHMENT_MAX_COUNT) * 100));
-  const bytesPct = Math.min(100, Math.round((bytes / ATTACHMENT_MAX_TOTAL_BYTES) * 100));
-  const remaining = Math.max(0, ATTACHMENT_MAX_TOTAL_BYTES - bytes);
-  return `<div class="attachment-meter" aria-live="polite">
-    <div class="attachment-meter-row"><span>${count} / ${ATTACHMENT_MAX_COUNT} files</span><span>${formatByteSize(bytes)} / ${formatByteSize(ATTACHMENT_MAX_TOTAL_BYTES)}</span></div>
-    <div class="attachment-meter-bars" aria-hidden="true">
-      <span class="attachment-meter-bar" style="width:${countPct}%"></span>
-      <span class="attachment-meter-bar bytes" style="width:${bytesPct}%"></span>
-    </div>
-    <p class="help">${remaining > 0 ? `${formatByteSize(remaining)} remaining · PNG, JPG, GIF, WebP, PDF, or ZIP · 5 MB per file` : "Attachment limit reached"}</p>
-  </div>`;
 }
 
 function showLogin() {
@@ -525,7 +505,7 @@ function showApp(sessionData) {
     element.hidden = !can(element.dataset.permission);
   });
   els.modePill.innerHTML = `<span></span> ${deliveryStatusLabel(sessionData.delivery_mode)}`;
-  els.modePill.dataset.status = sessionData.delivery_mode === "resend" ? "live" : "dev";
+  els.modePill.dataset.status = isLiveDelivery(sessionData.delivery_mode) ? "live" : "dev";
   if (sessionData.must_change_password || user?.must_change_password) {
     openChangePasswordModal(true);
     return;
@@ -539,7 +519,7 @@ function openChangePasswordModal(required = false) {
     "Change password",
     required ? "Security" : "Account",
     `<form id="change-password-form" class="stack">
-      <p class="subtext">${required ? "You must set a new password before using SendStack." : "Update your account password."}</p>
+      <p class="subtext">${required ? "You must set a new password before using this workspace." : "Update your account password."}</p>
       <label>Current password<input name="current_password" type="password" autocomplete="current-password" required /></label>
       <label>New password<input name="new_password" type="password" autocomplete="new-password" minlength="12" required /></label>
       <p class="form-error" role="alert"></p>
@@ -658,11 +638,11 @@ async function renderDashboard() {
         <div class="panel-body">${renderRecentMessages(data.recent_messages)}</div>
       </section>` : `<section class="panel access-summary"><div class="panel-body"><div class="access-lock">◌</div><h2>Recipient data is protected</h2><p>Your Analyst role includes aggregate campaign reporting without contact addresses or message contents.</p></div></section>`}
     </div>
-    ${can("sending.view") ? `<section class="production-target-strip" data-status="${data.delivery_mode === "resend" ? "live" : "dev"}">
-      <div class="target-strip-copy"><span class="readiness-status ${data.delivery_mode === "resend" ? "ready" : "pending"}">${escapeHtml(deliveryStatusLabel(data.delivery_mode))}</span><div><strong>${data.delivery_mode === "resend" ? "Live delivery is on" : "Workspace is in Dev Mode"}</strong><p>${data.delivery_mode === "resend" ? "Campaigns and previews can reach real mailboxes. Review setup anytime if something looks off." : "Messages stay inside this workspace until an administrator turns on live delivery."}</p></div></div>
+    ${can("sending.view") ? `<section class="production-target-strip" data-status="${isLiveDelivery(data.delivery_mode) ? "live" : "dev"}">
+      <div class="target-strip-copy"><span class="readiness-status ${isLiveDelivery(data.delivery_mode) ? "ready" : "pending"}">${escapeHtml(deliveryStatusLabel(data.delivery_mode))}</span><div><strong>${isLiveDelivery(data.delivery_mode) ? "Live Spacemail SMTP is on" : "Workspace is in Dev Mode"}</strong><p>${isLiveDelivery(data.delivery_mode) ? "Campaigns and previews can reach real mailboxes through Spacemail. Review setup anytime if something looks off." : "Messages stay inside this workspace until an administrator turns on live delivery."}</p></div></div>
       <button class="button" data-go="sending">Open setup</button>
     </section>` : ""}
-    <div class="notice" style="margin-top:16px"><span>i</span><div><strong>${data.delivery_mode === "resend" ? "Live delivery is active." : "Dev Mode is active."}</strong> ${data.delivery_mode === "resend" ? "Outbound messages can leave this workspace." : "Messages stay within this workspace until live delivery is enabled."}</div></div>`;
+    <div class="notice" style="margin-top:16px"><span>i</span><div><strong>${isLiveDelivery(data.delivery_mode) ? "Live delivery is active." : "Dev Mode is active."}</strong> ${isLiveDelivery(data.delivery_mode) ? "Outbound messages leave this workspace through Spacemail SMTP." : "Messages stay within this workspace until live delivery is enabled."}</div></div>`;
 }
 
 function readinessStatusLabel(status) {
@@ -715,10 +695,9 @@ async function renderSendingSetup() {
       <div class="panel-body">
         <div class="stat-grid" style="margin:0">
           <article class="stat-card"><span class="stat-label">Submitted</span><strong class="stat-value">${Number(health.submitted || 0).toLocaleString()}</strong></article>
-          <article class="stat-card"><span class="stat-label">Delivered</span><strong class="stat-value">${Number(health.delivered || 0).toLocaleString()}</strong></article>
-          <article class="stat-card"><span class="stat-label">Delayed</span><strong class="stat-value">${Number(health.delayed || 0).toLocaleString()}</strong></article>
           <article class="stat-card"><span class="stat-label">Bounced</span><strong class="stat-value">${Number(health.bounced || 0).toLocaleString()}</strong></article>
           <article class="stat-card"><span class="stat-label">Complained</span><strong class="stat-value">${Number(health.complained || 0).toLocaleString()}</strong></article>
+          <article class="stat-card"><span class="stat-label">Failed</span><strong class="stat-value">${Number(health.failed || 0).toLocaleString()}</strong></article>
           <article class="stat-card"><span class="stat-label">Suppressed</span><strong class="stat-value">${Number(health.suppressed || 0).toLocaleString()}</strong></article>
           <article class="stat-card"><span class="stat-label">Unsubscribed</span><strong class="stat-value">${Number(health.unsubscribed || 0).toLocaleString()}</strong></article>
         </div>
@@ -728,7 +707,7 @@ async function renderSendingSetup() {
 
     <div class="readiness-layout">
       <section class="panel">
-        <div class="panel-head"><div><h2>Delivery readiness</h2><p>Every item is checked before production delivery is enabled</p></div><span class="readiness-status ${liveReady ? "ready" : "locked"}">${liveReady ? "Ready for delivery" : "Preview mode"}</span></div>
+        <div class="panel-head"><div><h2>Delivery readiness</h2><p>Every item is checked before production delivery is enabled</p></div><span class="readiness-status ${liveReady ? "ready" : "locked"}">${liveReady ? "Ready for delivery" : "Dev Mode"}</span></div>
         <div class="readiness-list">${data.checks.map((check) => `
           <div class="readiness-item">
             <span class="readiness-marker ${escapeHtml(check.status)}">${check.status === "ready" ? "✓" : ""}</span>
@@ -753,7 +732,7 @@ async function renderSendingSetup() {
 }
 
 function renderRecentCampaignTable(campaigns) {
-  if (!campaigns.length) return `<div class="empty-state"><div><p>No campaigns yet.</p>${can("campaigns.manage") ? `<button class="button primary" data-new-campaign>Create campaign</button>` : ""}</div></div>`;
+  if (!campaigns.length) return `<div class="empty-state"><div><p>No messages yet.</p>${can("campaigns.manage") ? `<button class="button primary" data-new-campaign>New message</button>` : ""}</div></div>`;
   return `<div class="table-wrap"><table><thead><tr><th>Campaign</th><th>Status</th><th>Progress</th><th>Issues</th></tr></thead><tbody>${campaigns.map((campaign) => {
     const recipients = Number(campaign.recipients || 0);
     const sent = Number(campaign.sent || 0);
@@ -1175,8 +1154,8 @@ async function renderCampaigns() {
   const data = await api("/api/campaigns");
   await getLists();
   els.content.innerHTML = `
-    <div class="section-lead"><div><h2>${data.campaigns.length} campaign${data.campaigns.length === 1 ? "" : "s"}</h2><p>${can("campaigns.manage") ? (can("campaigns.send") ? "Create, preview, and deliver messages to your selected audience." : "Create and edit drafts, and send previews. An administrator launches delivery.") : "Read-only campaign reporting without recipient-level personal data."}</p></div>${can("campaigns.manage") ? `<button class="button primary" data-new-campaign>New campaign</button>` : ""}</div>
-    ${data.campaigns.length ? `<section class="campaign-grid">${data.campaigns.map(renderCampaignCard).join("")}</section>` : `<section class="panel empty-state"><div><div class="empty-mark">✦</div><h2>No campaigns yet</h2><p>${can("campaigns.manage") ? "Create your first message, preview personalization, and prepare it for delivery." : "Campaign reports will appear here after a campaign is created."}</p>${can("campaigns.manage") ? `<button class="button primary" data-new-campaign>New campaign</button>` : ""}</div></section>`}`;
+    <div class="section-lead"><div><h2>${data.campaigns.length} message${data.campaigns.length === 1 ? "" : "s"}</h2><p>${can("campaigns.manage") ? (can("campaigns.send") ? "Write mail, send a Spacemail test, then deliver to your audience." : "Create and edit drafts, and send tests. An administrator sends to the audience.") : "Read-only campaign reporting without recipient-level personal data."}</p></div>${can("campaigns.manage") ? `<button class="button primary" data-new-campaign>New message</button>` : ""}</div>
+    ${data.campaigns.length ? `<section class="campaign-grid">${data.campaigns.map(renderCampaignCard).join("")}</section>` : `<section class="panel empty-state"><div><div class="empty-mark">✦</div><h2>No messages yet</h2><p>${can("campaigns.manage") ? "Compose your first message through the Spacemail mailbox, then send a test." : "Messages will appear here after one is created."}</p>${can("campaigns.manage") ? `<button class="button primary" data-new-campaign>New message</button>` : ""}</div></section>`}`;
 }
 
 function renderCampaignCard(campaign) {
@@ -1189,49 +1168,31 @@ function renderCampaignCard(campaign) {
     || (campaign.status === "paused" && can("campaigns.send"))
   );
   const launchable = can("campaigns.send") && ["draft", "paused"].includes(campaign.status);
-  const canPreview = can("campaigns.send");
+  const canTest = can("campaigns.send");
   return `<article class="campaign-card" data-campaign-id="${escapeHtml(campaign.id)}">
-    <div class="campaign-card-top"><span class="subtext">${escapeHtml(campaign.list_name)} · ${escapeHtml(titleCase(campaign.content_mode || "custom_html"))}</span>${statusPill(campaign.status)}</div>
+    <div class="campaign-card-top"><span class="subtext">${escapeHtml(campaign.list_name)} · ${escapeHtml(contentModeLabel(campaign.content_mode))}</span>${statusPill(campaign.status)}</div>
     <h3>${escapeHtml(campaign.name)}</h3><p>${escapeHtml(campaign.subject)}</p>
     <div class="campaign-stats"><div><span>Recipients</span><strong>${recipients}</strong></div><div><span>${isLiveDelivery() ? "Sent" : "Captured"}</span><strong>${sent}</strong></div><div><span>Issues</span><strong>${issues}</strong></div></div>
     ${queued ? `<div class="progress" style="margin-bottom:14px"><span style="width:${recipients ? Math.round((sent / recipients) * 100) : 0}%"></span></div>` : ""}
     <div class="campaign-card-actions">
       <button class="button small" data-action="view" data-id="${escapeHtml(campaign.id)}">Details</button>
       ${editable ? `<button class="button small ghost" data-action="edit" data-id="${escapeHtml(campaign.id)}">Edit</button>` : ""}
-      ${canPreview ? `<button class="button small ghost" data-action="test" data-id="${escapeHtml(campaign.id)}">Preview</button>` : ""}
-      ${can("campaigns.send") && campaign.status === "sending" ? `<button class="button small" data-action="pause" data-id="${escapeHtml(campaign.id)}">${isLiveDelivery() ? "Cancel at provider" : "Pause"}</button>` : ""}
-      ${launchable ? `<button class="button small primary" data-action="${campaign.status === "paused" ? "resume" : "launch"}" data-id="${escapeHtml(campaign.id)}">${campaign.status === "paused" ? "Return to draft" : (isLiveDelivery() ? "Start delivery" : "Send in Dev Mode")}</button>` : ""}
+      ${canTest ? `<button class="button small ghost" data-action="test" data-id="${escapeHtml(campaign.id)}">Send test</button>` : ""}
+      ${can("campaigns.send") && campaign.status === "sending" ? `<button class="button small" data-action="pause" data-id="${escapeHtml(campaign.id)}">${isLiveDelivery() ? "Cancel unsent" : "Pause"}</button>` : ""}
+      ${launchable ? `<button class="button small primary" data-action="${campaign.status === "paused" ? "resume" : "launch"}" data-id="${escapeHtml(campaign.id)}">${campaign.status === "paused" ? "Return to draft" : (isLiveDelivery() ? "Send" : "Send in Dev Mode")}</button>` : ""}
     </div>
   </article>`;
 }
 
 const contentModes = [
-  { id: "visual", icon: "▦", title: "Visual builder", copy: "Fill in brand, headline, and CTA — we build the email.", recommended: true },
-  { id: "rich_text", icon: "Aa", title: "Rich text", copy: "Write like a doc. Bold, lists, and links — no HTML." },
-  { id: "custom_html", icon: "</>", title: "Custom HTML", copy: "Paste a full template when you need full control." },
-  { id: "plain_text", icon: "¶", title: "Plain text", copy: "Text-only for maximum deliverability." },
+  { id: "rich_text", title: "Message" },
+  { id: "visual", title: "Template" },
+  { id: "custom_html", title: "HTML" },
+  { id: "plain_text", title: "Plain text" },
 ];
 
-const contentModeHints = {
-  visual: "Best for most campaigns. Layout, colors, and unsubscribe are handled for you.",
-  rich_text: "Good when the message is mostly prose and you want light formatting.",
-  custom_html: "Use when you already have HTML from a designer or another tool.",
-  plain_text: "Simplest format. A basic HTML wrapper is still generated for clients that need it.",
-};
-
-function contentModePicker(selectedMode) {
-  return `<div class="content-mode-section">
-    <span class="field-label">How do you want to write this email?</span>
-    <div class="content-mode-grid" role="radiogroup" aria-label="Message format">${contentModes.map((mode) => `
-      <button class="content-mode-card ${mode.id === selectedMode ? "selected" : ""}" type="button" data-content-mode="${mode.id}" role="radio" aria-checked="${mode.id === selectedMode}">
-        <span class="content-mode-icon">${escapeHtml(mode.icon)}</span>
-        <span>
-          <strong>${escapeHtml(mode.title)}${mode.recommended ? `<em class="content-mode-badge">Recommended</em>` : ""}</strong>
-          <small>${escapeHtml(mode.copy)}</small>
-        </span>
-      </button>`).join("")}</div>
-    <p class="help content-mode-hint" id="content-mode-hint">${escapeHtml(contentModeHints[selectedMode] || "")}</p>
-  </div>`;
+function contentModeLabel(mode) {
+  return contentModes.find((entry) => entry.id === mode)?.title || titleCase(mode || "message");
 }
 
 function modeEditorMarkup(mode, draft) {
@@ -1244,18 +1205,17 @@ function modeEditorMarkup(mode, draft) {
       <label>Headline<input data-visual-field="headline" maxlength="180" value="${escapeHtml(data.headline)}" /></label>
       <label>Message<textarea data-visual-field="body" rows="7">${escapeHtml(data.body)}</textarea></label>
       <div class="form-grid"><label>Button label<input data-visual-field="cta_label" maxlength="80" value="${escapeHtml(data.cta_label)}" /></label><label>Button link<input data-visual-field="cta_url" type="url" value="${escapeHtml(data.cta_url)}" placeholder="https://" /></label></div>
-      <label>Footer note<input data-visual-field="footer" maxlength="240" value="${escapeHtml(data.footer)}" /></label>
-      <p class="help">Personalized greeting and unsubscribe link are added automatically.</p>
+      <label>Closing line<input data-visual-field="footer" maxlength="240" value="${escapeHtml(data.footer)}" /></label>
     </div>`;
   }
   if (mode === "rich_text") {
     const richHtml = sanitizeRichHtml(draft?.rich_html || defaultRichContent);
-    return `<div class="mode-editor" data-mode-editor="rich_text"><span class="field-label">Message</span><div class="rich-toolbar" role="toolbar" aria-label="Text formatting"><button type="button" data-rich-command="bold" aria-label="Bold"><strong>B</strong></button><button type="button" data-rich-command="italic" aria-label="Italic"><em>I</em></button><button type="button" data-rich-command="underline" aria-label="Underline"><u>U</u></button><button type="button" data-rich-command="insertUnorderedList" aria-label="Bulleted list">• List</button></div><div id="rich-editor" class="rich-editor" contenteditable="true" role="textbox" aria-multiline="true" aria-label="Rich text message">${richHtml}</div><p class="help">Formatting is limited to email-safe text, headings, links, and lists. Unsubscribe is added automatically.</p></div>`;
+    return `<div class="mode-editor" data-mode-editor="rich_text"><div class="rich-toolbar" role="toolbar" aria-label="Text formatting"><button type="button" data-rich-command="bold" aria-label="Bold"><strong>B</strong></button><button type="button" data-rich-command="italic" aria-label="Italic"><em>I</em></button><button type="button" data-rich-command="underline" aria-label="Underline"><u>U</u></button><button type="button" data-rich-command="insertUnorderedList" aria-label="Bulleted list">• List</button></div><div id="rich-editor" class="rich-editor" contenteditable="true" role="textbox" aria-multiline="true" aria-label="Message body">${richHtml}</div></div>`;
   }
   if (mode === "plain_text") {
-    return `<div class="mode-editor" data-mode-editor="plain_text"><label>Plain-text message<textarea id="plain-editor" class="plain-editor" rows="15">${escapeHtml(draft?.plain_text || defaultPlainContent)}</textarea><span class="help">Line breaks are preserved. A safe HTML wrapper is generated for clients that require it.</span></label></div>`;
+    return `<div class="mode-editor" data-mode-editor="plain_text"><label>Message<textarea id="plain-editor" class="plain-editor" rows="15">${escapeHtml(draft?.plain_text || defaultPlainContent)}</textarea></label></div>`;
   }
-  return `<div class="mode-editor" data-mode-editor="custom_html"><label>HTML message<textarea id="html-editor" class="code-area" rows="16" required>${escapeHtml(draft?.html_body || defaultTemplate)}</textarea><span class="help">Scripts, forms, embedded objects, unsafe URLs, and event handlers are blocked.</span></label><label>Plain-text alternative<textarea id="html-text-fallback" rows="8">${escapeHtml(draft?.text_body || defaultPlainContent)}</textarea></label></div>`;
+  return `<div class="mode-editor" data-mode-editor="custom_html"><label>HTML<textarea id="html-editor" class="code-area" rows="16" required>${escapeHtml(draft?.html_body || defaultTemplate)}</textarea></label><label>Plain-text alternative<textarea id="html-text-fallback" rows="8">${escapeHtml(draft?.text_body || defaultPlainContent)}</textarea></label></div>`;
 }
 
 async function openCampaignComposer(campaignId = null) {
@@ -1268,48 +1228,42 @@ async function openCampaignComposer(campaignId = null) {
   let attachments = Array.isArray(campaign.attachments) ? [...campaign.attachments] : [];
   let pendingFiles = [];
   const storedContent = safeContentObject(campaign.content_json);
-  let selectedMode = contentModes.some((mode) => mode.id === campaign.content_mode) ? campaign.content_mode : (campaignId ? "custom_html" : "visual");
+  const selectedMode = contentModes.some((mode) => mode.id === campaign.content_mode)
+    ? campaign.content_mode
+    : "rich_text";
   const modeDrafts = {
     visual: selectedMode === "visual" ? { ...defaultVisualContent, ...storedContent } : { ...defaultVisualContent },
     rich_text: selectedMode === "rich_text" ? { schema_version: 1, rich_html: storedContent.rich_html || defaultRichContent } : { schema_version: 1, rich_html: defaultRichContent },
     custom_html: { schema_version: 1, html_body: campaign.html_body || defaultTemplate, text_body: campaign.text_body || defaultPlainContent },
     plain_text: selectedMode === "plain_text" ? { schema_version: 1, plain_text: storedContent.plain_text || campaign.text_body || defaultPlainContent } : { schema_version: 1, plain_text: defaultPlainContent },
   };
-  const defaultFromName = campaign.from_name || state.session?.user?.name || state.session?.company_name || "Sender";
+  const defaultFromName = campaign.from_name || state.session?.user?.name || "CTN";
   const enforcedFrom = state.session?.enforced_from_email || "";
   const defaultFromEmail = campaign.from_email || enforcedFrom || "";
-  const defaultCampaignName = campaign.name || (campaignId ? "" : "Untitled campaign");
+  const existingCampaignName = campaign.name || "";
+  const fromIdentity = defaultFromEmail
+    ? `From: ${escapeHtml(defaultFromName)} &lt;${escapeHtml(defaultFromEmail)}&gt;`
+    : "From address is not configured — set it in Sending setup before live send.";
   const totalAttachmentCount = () => attachments.length + pendingFiles.length;
   const totalAttachmentBytes = () => (
     attachments.reduce((sum, file) => sum + Number(file.byte_size || 0), 0)
     + pendingFiles.reduce((sum, file) => sum + Number(file.size || 0), 0)
   );
-  openModal(campaignId ? "Edit campaign" : "New campaign", "Composer", `
+  openModal(campaignId ? "Edit message" : "New message", "Compose", `
     <form id="campaign-form" class="composer">
       <div class="composer-fields">
-        <label>Internal campaign name<input name="name" maxlength="160" value="${escapeHtml(defaultCampaignName)}" placeholder="Untitled campaign" required /></label>
-        <label>Audience<select name="list_id" required>${listOptions(lists, campaign.list_id || lists[0]?.id)}</select><span class="help">Suppression is checked again immediately before delivery.</span></label>
-        <div class="form-grid"><label>From name<input name="from_name" value="${escapeHtml(defaultFromName)}" placeholder="Name the receiver will see" required /></label><label>From email<input name="from_email" type="email" value="${escapeHtml(defaultFromEmail)}" ${enforcedFrom ? "readonly" : ""} required /><span class="help">${enforcedFrom ? `Enforced sender: ${escapeHtml(enforcedFrom)}` : "Set SENDSTACK_FROM_EMAIL to lock the production From address."}</span></label></div>
-        ${state.session?.reply_to_email ? `<p class="help">Reply-To: ${escapeHtml(state.session.reply_to_email)}</p>` : `<p class="help">Configure SENDSTACK_REPLY_TO_EMAIL before live sending.</p>`}
-        <label>Subject<input name="subject" maxlength="250" value="${escapeHtml(campaign.subject || "An update from CTN")}" required /></label>
-        ${contentModePicker(selectedMode)}
+        <label>To<select name="list_id" required>${listOptions(lists, campaign.list_id || lists[0]?.id)}</select></label>
+        <label>Subject<input name="subject" maxlength="250" value="${escapeHtml(campaign.subject || "")}" placeholder="Subject" required /></label>
+        <p class="help compose-from-line">${fromIdentity}</p>
         <div id="mode-editor-host">${modeEditorMarkup(selectedMode, modeDrafts[selectedMode])}</div>
-        <p class="help variable-help">Personalization: {{first_name}}, {{last_name}}, {{email}}, {{unsubscribe_url}}</p>
-        <section class="attachment-panel" id="attachment-panel">
-          <div class="attachment-panel-head">
-            <div><strong>Attachments</strong></div>
-            <div id="attachment-meter">${attachmentMeterMarkup(totalAttachmentCount(), totalAttachmentBytes())}</div>
-          </div>
-          <div class="attachment-dropzone" id="attachment-dropzone" tabindex="0" aria-label="Attachment drop zone">
-            <div id="attachment-list">${activeCampaignId ? attachmentListMarkup(attachments, { editable: true }) : pendingAttachmentListMarkup(pendingFiles)}</div>
-            <label class="attachment-upload button small">Add files<input id="attachment-input" type="file" accept="${ATTACHMENT_ACCEPT}" multiple ${totalAttachmentCount() >= ATTACHMENT_MAX_COUNT ? "disabled" : ""} /></label>
-          </div>
+        <section class="compose-attach" id="attachment-panel">
+          <div id="attachment-list">${activeCampaignId ? attachmentListMarkup(attachments, { editable: true }) : pendingAttachmentListMarkup(pendingFiles)}</div>
+          <label class="attachment-upload button small">Add files<input id="attachment-input" type="file" accept="${ATTACHMENT_ACCEPT}" multiple ${totalAttachmentCount() >= ATTACHMENT_MAX_COUNT ? "disabled" : ""} /></label>
           <p class="form-error" id="attachment-error" role="alert"></p>
         </section>
         <p class="form-error" data-form-error role="alert"></p>
         <div class="form-actions"><button type="button" class="button" data-close-modal>Cancel</button><button class="button primary" type="submit">${campaignId ? "Save changes" : "Save draft"}</button></div>
       </div>
-      <div class="preview-shell"><div class="preview-bar"><span>PERSONALIZED PREVIEW</span><div class="preview-dots"><span></span><span></span><span></span></div></div><iframe class="email-preview" title="Email preview" sandbox=""></iframe></div>
     </form>`, false);
   const form = document.querySelector("#campaign-form");
   const editorHost = form.querySelector("#mode-editor-host");
@@ -1326,21 +1280,7 @@ async function openCampaignComposer(campaignId = null) {
       modeDrafts.custom_html = { schema_version: 1, html_body: form.querySelector("#html-editor")?.value || "", text_body: form.querySelector("#html-text-fallback")?.value || "" };
     }
   };
-  const updatePreview = () => {
-    captureModeDraft();
-    const substitutions = {
-      "{{first_name}}": "Alex",
-      "{{last_name}}": "Morgan",
-      "{{email}}": "alex@example.test",
-      "{{unsubscribe_url}}": "#unsubscribe",
-    };
-    let markup = buildCampaignContent(selectedMode, modeDrafts[selectedMode]).html_body;
-    Object.entries(substitutions).forEach(([key, value]) => { markup = markup.split(key).join(value); });
-    const policy = `<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src data:">`;
-    form.querySelector("iframe").srcdoc = policy + markup;
-  };
   const attachEditorEvents = () => {
-    editorHost.querySelectorAll("input, select, textarea, [contenteditable]").forEach((field) => field.addEventListener("input", updatePreview));
     const richEditor = editorHost.querySelector("#rich-editor");
     richEditor?.addEventListener("paste", (event) => {
       event.preventDefault();
@@ -1349,38 +1289,18 @@ async function openCampaignComposer(campaignId = null) {
     editorHost.querySelectorAll("[data-rich-command]").forEach((button) => button.addEventListener("click", () => {
       richEditor?.focus();
       document.execCommand(button.dataset.richCommand, false);
-      updatePreview();
     }));
   };
-  form.querySelectorAll("[data-content-mode]").forEach((button) => button.addEventListener("click", () => {
-    captureModeDraft();
-    selectedMode = button.dataset.contentMode;
-    form.querySelectorAll("[data-content-mode]").forEach((item) => {
-      const active = item.dataset.contentMode === selectedMode;
-      item.classList.toggle("selected", active);
-      item.setAttribute("aria-checked", String(active));
-    });
-    const hint = form.querySelector("#content-mode-hint");
-    if (hint) hint.textContent = contentModeHints[selectedMode] || "";
-    editorHost.innerHTML = modeEditorMarkup(selectedMode, modeDrafts[selectedMode]);
-    attachEditorEvents();
-    updatePreview();
-  }));
   attachEditorEvents();
-  updatePreview();
   const refreshAttachmentUi = () => {
     const listHost = form.querySelector("#attachment-list");
-    const meterHost = form.querySelector("#attachment-meter");
     const input = form.querySelector("#attachment-input");
-    const dropzone = form.querySelector("#attachment-dropzone");
     if (listHost) {
       listHost.innerHTML = activeCampaignId
         ? attachmentListMarkup(attachments, { editable: true })
         : pendingAttachmentListMarkup(pendingFiles);
     }
-    if (meterHost) meterHost.innerHTML = attachmentMeterMarkup(totalAttachmentCount(), totalAttachmentBytes());
     if (input) input.disabled = totalAttachmentCount() >= ATTACHMENT_MAX_COUNT;
-    dropzone?.classList.toggle("is-full", totalAttachmentCount() >= ATTACHMENT_MAX_COUNT);
   };
   const queueOrUploadFiles = async (fileList) => {
     const errorEl = form.querySelector("#attachment-error");
@@ -1445,31 +1365,11 @@ async function openCampaignComposer(campaignId = null) {
   };
   const bindAttachmentControls = () => {
     const input = form.querySelector("#attachment-input");
-    const dropzone = form.querySelector("#attachment-dropzone");
     input?.addEventListener("change", async () => {
       const files = input.files;
       input.value = "";
       await queueOrUploadFiles(files);
     });
-    if (dropzone) {
-      ["dragenter", "dragover"].forEach((type) => {
-        dropzone.addEventListener(type, (event) => {
-          event.preventDefault();
-          event.stopPropagation();
-          if (totalAttachmentCount() < ATTACHMENT_MAX_COUNT) dropzone.classList.add("is-dragover");
-        });
-      });
-      ["dragleave", "drop"].forEach((type) => {
-        dropzone.addEventListener(type, (event) => {
-          event.preventDefault();
-          event.stopPropagation();
-          dropzone.classList.remove("is-dragover");
-        });
-      });
-      dropzone.addEventListener("drop", async (event) => {
-        await queueOrUploadFiles(event.dataTransfer?.files);
-      });
-    }
     form.querySelector("#attachment-list")?.addEventListener("click", async (event) => {
       const pendingButton = event.target.closest("[data-remove-pending]");
       if (pendingButton) {
@@ -1500,11 +1400,17 @@ async function openCampaignComposer(campaignId = null) {
     const content = buildCampaignContent(selectedMode, modeDrafts[selectedMode]);
     const payload = Object.fromEntries(new FormData(form));
     delete payload.file;
+    const subject = String(payload.subject || "").trim();
+    const creating = !activeCampaignId;
+    payload.from_name = defaultFromName;
+    payload.from_email = defaultFromEmail;
+    payload.name = creating
+      ? (subject || "Untitled message").slice(0, 160)
+      : (existingCampaignName || subject || "Untitled message").slice(0, 160);
     payload.content_mode = selectedMode;
     payload.content_json = content.content_json;
     payload.html_body = content.html_body;
     payload.text_body = content.text_body;
-    const creating = !activeCampaignId;
     const path = activeCampaignId ? `/api/campaigns/${activeCampaignId}` : "/api/campaigns";
     const method = activeCampaignId ? "PATCH" : "POST";
     const result = await submitForm(form, () => api(path, { method, body: payload }), creating ? "Draft saved" : "Campaign updated");
@@ -1568,15 +1474,15 @@ async function openTestSend(campaignId) {
     ? (state.session?.user?.email || "")
     : (state.session?.user?.email || "");
   const noticeClass = live ? "notice warning" : "notice";
-  const submitLabel = live ? "Send live preview" : "Capture preview";
-  openModal("Send a preview", "Before you send", `
+  const submitLabel = live ? "Send test via Spacemail" : "Capture test locally";
+  openModal("Send a test", "Before you send", `
     <form id="test-send-form" class="stack">
       <div class="${noticeClass}"><span>${live ? "!" : "i"}</span><div><strong>${escapeHtml(testSendNotice())}</strong></div></div>
-      <div class="metric-line"><span>Campaign</span><strong>${escapeHtml(campaign.name)}</strong></div>
+      <div class="metric-line"><span>Message</span><strong>${escapeHtml(campaign.name)}</strong></div>
       <div class="metric-line"><span>Subject</span><strong>${escapeHtml(campaign.subject)}</strong></div>
       <div class="metric-line"><span>Status</span><strong>${escapeHtml(deliveryStatusLabel())}</strong></div>
-      <label>Preview recipient<input name="email" type="email" value="${escapeHtml(defaultEmail)}" placeholder="name@example.com" required autocomplete="email" /><span class="help">${live ? "Must be on SENDSTACK_TEST_RECIPIENT_ALLOWLIST and counts toward the daily limit." : "Counts toward the daily limit. Special-use domains are rejected."}</span></label>
-      ${live ? `<label class="confirm-ack"><input type="checkbox" name="ack_live" required /><span>I understand this sends a real email to the address above.</span></label>` : `<p class="help">Result appears in Deliveries as Captured — nothing is mailed externally.</p>`}
+      <label>Test recipient<input name="email" type="email" value="${escapeHtml(defaultEmail)}" placeholder="name@example.com" required autocomplete="email" /><span class="help">${live ? "Must be on the test allowlist in Sending setup. Counts toward the daily limit." : "Counts toward the daily limit. Special-use domains are rejected."}</span></label>
+      ${live ? `<label class="confirm-ack"><input type="checkbox" name="ack_live" required /><span>I understand this sends a real email through Spacemail.</span></label>` : `<p class="help">Result appears in Deliveries as Captured — nothing is mailed externally.</p>`}
       <p class="form-error" role="alert"></p>
       <div class="form-actions">
         <button type="button" class="button" data-close-modal>Cancel</button>
@@ -1606,23 +1512,23 @@ async function openLaunchConfirm(campaignId) {
   const eligible = Number(campaign.eligible_recipients || 0);
   const noticeClass = live ? "notice warning" : "notice";
   const setupHelp = can("sending.view") && !live
-    ? `<p class="help">Turn on live delivery in Sending setup when you are ready for real recipients.</p>`
+    ? `<p class="help">Enable live Spacemail delivery in Sending setup when you are ready for real recipients.</p>`
     : "";
   const emptyWarn = eligible === 0
-    ? `<div class="notice warning"><span>!</span><div>No eligible recipients on this list (active and not suppressed). Launch will complete with nothing sent.</div></div>`
+    ? `<div class="notice warning"><span>!</span><div>No eligible recipients on this list (active and not suppressed). Send will complete with nothing mailed.</div></div>`
     : "";
-  openModal(copy.title, "Confirm delivery", `
+  openModal(copy.title, "Confirm send", `
     <div class="stack" id="launch-confirm">
       <div class="${noticeClass}"><span>!</span><div><strong>${escapeHtml(copy.notice)}</strong><br>${escapeHtml(copy.outcome)}</div></div>
       ${emptyWarn}
-      <div class="metric-line"><span>Campaign</span><strong>${escapeHtml(campaign.name)}</strong></div>
+      <div class="metric-line"><span>Message</span><strong>${escapeHtml(campaign.name)}</strong></div>
       <div class="metric-line"><span>Subject</span><strong>${escapeHtml(campaign.subject)}</strong></div>
-      <div class="metric-line"><span>Audience</span><strong>${escapeHtml(campaign.list_name)}</strong></div>
+      <div class="metric-line"><span>To</span><strong>${escapeHtml(campaign.list_name)}</strong></div>
       <div class="metric-line"><span>Eligible now</span><strong>${eligible.toLocaleString()}</strong></div>
       <div class="metric-line"><span>Status</span><strong>${escapeHtml(deliveryStatusLabel())}</strong></div>
       <div class="metric-line"><span>Daily send limit</span><strong>${Number(state.session.daily_limit).toLocaleString()}</strong></div>
       ${setupHelp}
-      ${live ? `<label class="confirm-ack"><input type="checkbox" id="launch-ack" /><span>I understand this will email up to ${eligible.toLocaleString()} real recipient${eligible === 1 ? "" : "s"}.</span></label>` : ""}
+      ${live ? `<label class="confirm-ack"><input type="checkbox" id="launch-ack" /><span>I understand this will email up to ${eligible.toLocaleString()} real recipient${eligible === 1 ? "" : "s"} through Spacemail.</span></label>` : ""}
       <p class="form-error" id="launch-error" role="alert"></p>
       <div class="form-actions">
         <button class="button" data-close-modal type="button">Cancel</button>
@@ -1681,7 +1587,7 @@ async function executeCampaignAction(action, id) {
   try {
     const result = await api(`/api/campaigns/${id}/${action}`, { method: "POST", body: {} });
     if (action === "launch") toast(launchOutcomeMessage(result));
-    else if (action === "pause") toast(isLiveDelivery() ? "Provider cancel requested" : "Delivery paused");
+    else if (action === "pause") toast(isLiveDelivery() ? "Unsent recipients cancelled" : "Delivery paused");
     else if (action === "resume") toast("Delivery resumed");
     else toast(`Campaign ${action}d`);
     await renderCampaigns();
@@ -1720,7 +1626,7 @@ async function renderDeliveries() {
       ? `${count.toLocaleString()} deliver${count === 1 ? "y" : "ies"}`
       : `${count.toLocaleString()} captured message${count === 1 ? "" : "s"}`;
   const lead = live
-    ? "Review outbound results, open rendered content, and check delivery status."
+    ? "Review Spacemail SMTP acceptance, open rendered content, and check durable bounce or complaint signals."
     : "Inspect rendered content captured in this workspace. No email leaves the app in Dev Mode.";
   const emptyCopy = filtering
     ? "Nothing matches these filters. Try clearing search, status, or date range."
@@ -1739,7 +1645,7 @@ async function renderDeliveries() {
     : "";
   const emptyMarkup = filtering
     ? `<div class="empty-state"><div><div class="empty-mark">⌕</div><h2>No matching deliveries</h2><p>${emptyCopy}</p><button class="button" id="clear-delivery-filters">Clear filters</button></div></div>`
-    : `<div class="empty-state"><div><div class="empty-mark">↗</div><h2>No deliveries yet</h2><p>${emptyCopy}</p><button class="button primary" data-new-campaign>Create campaign</button></div></div>`;
+    : `<div class="empty-state"><div><div class="empty-mark">↗</div><h2>No deliveries yet</h2><p>${emptyCopy}</p><button class="button primary" data-new-campaign>New message</button></div></div>`;
 
   const tableRows = data.messages.map((message) => `<tr>
       <td class="delivery-recipient"><strong class="email">${escapeHtml(message.to_email)}</strong></td>
@@ -1983,13 +1889,6 @@ const AUDIT_ACTION_OPTIONS = [
   ["suppression_created", "Suppression added"],
   ["suppression_deleted", "Suppression removed"],
   ["message_deleted", "Message deleted"],
-  ["resend_email.sent", "Sent"],
-  ["resend_email.delivered", "Delivered"],
-  ["resend_email.delivery_delayed", "Delayed"],
-  ["resend_email.bounced", "Bounced"],
-  ["resend_email.complained", "Complained"],
-  ["resend_email.opened", "Opened"],
-  ["resend_email.clicked", "Clicked"],
 ];
 
 const AUDIT_ACTION_LABELS = Object.fromEntries(
@@ -2011,7 +1910,6 @@ const AUDIT_ENTITY_OPTIONS = [
   ["campaign", "Campaign"],
   ["suppression", "Suppression"],
   ["message", "Message"],
-  ["provider_event", "Provider event"],
 ];
 
 async function renderAudit() {

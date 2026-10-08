@@ -4,7 +4,6 @@ import { publicSiteIdentity } from "./sending-identity";
 export function getPublicSiteCopy() {
   const identity = publicSiteIdentity();
   return {
-    ...identity,
     displayCompany: "CTN",
     displayEmail: identity.contactEmail,
     setupRequired: !identity.configured,

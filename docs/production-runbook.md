@@ -7,7 +7,7 @@ The application code does **not** perform these steps. Agents and automation mus
 
 1. Backup the database and confirm restore works.
 2. Apply SQL migrations through `0007_submission_state_machine.sql`.
-3. Set identity env vars (`SENDSTACK_FROM_EMAIL`, `SENDSTACK_REPLY_TO_EMAIL`, company/postal address, allowed link domains).
+3. Set identity env vars (`SENDSTACK_FROM_EMAIL`, `SENDSTACK_REPLY_TO_EMAIL`, `SENDSTACK_ALLOWED_LINK_DOMAINS`).
 4. Set Spacemail SMTP env vars (`SENDSTACK_SMTP_HOST=mail.spacemail.com`, port `465`, username, password).
 5. Confirm Spacemail DNS (MX/SPF/DKIM/DMARC) for the sending domain.
 6. Set `CRON_SECRET` and point an external scheduler at `GET /api/cron/launch-jobs` every minute.

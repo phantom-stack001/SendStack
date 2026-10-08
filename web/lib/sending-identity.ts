@@ -14,8 +14,6 @@ function parseCsvList(value: string): string[] {
 export type SendingIdentity = {
   fromEmail: string;
   replyToEmail: string;
-  companyName: string;
-  postalAddress: string;
   allowedLinkDomains: string[];
   testRecipientAllowlist: string[];
 };
@@ -24,8 +22,6 @@ export function loadSendingIdentity(): SendingIdentity {
   return {
     fromEmail: normalizeEmail(envTrim("SENDSTACK_FROM_EMAIL")),
     replyToEmail: normalizeEmail(envTrim("SENDSTACK_REPLY_TO_EMAIL")),
-    companyName: envTrim("SENDSTACK_COMPANY_NAME"),
-    postalAddress: envTrim("SENDSTACK_POSTAL_ADDRESS"),
     allowedLinkDomains: parseCsvList(envTrim("SENDSTACK_ALLOWED_LINK_DOMAINS")),
     testRecipientAllowlist: parseCsvList(envTrim("SENDSTACK_TEST_RECIPIENT_ALLOWLIST")).map(normalizeEmail),
   };
@@ -93,8 +89,6 @@ export function isTestRecipientAllowed(email: string, identity = loadSendingIden
 export function publicSiteIdentity(identity = loadSendingIdentity()) {
   const contactEmail = identity.replyToEmail || identity.fromEmail || null;
   return {
-    companyName: identity.companyName || null,
-    postalAddress: identity.postalAddress || null,
     contactEmail,
     configured: Boolean(contactEmail),
   };

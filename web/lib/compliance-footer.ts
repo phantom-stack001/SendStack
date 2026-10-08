@@ -1,4 +1,3 @@
-import { escapeHtml } from "./html-escape";
 import { loadSendingIdentity, type SendingIdentity } from "./sending-identity";
 
 /** Legacy markers kept for detecting old author content that still embeds them. */
@@ -6,17 +5,6 @@ export const COMPLIANCE_HTML_START = "<!-- SENDSTACK_COMPLIANCE_FOOTER_START -->
 export const COMPLIANCE_HTML_END = "<!-- SENDSTACK_COMPLIANCE_FOOTER_END -->";
 export const COMPLIANCE_TEXT_START = "[[SENDSTACK_COMPLIANCE_FOOTER_START]]";
 export const COMPLIANCE_TEXT_END = "[[SENDSTACK_COMPLIANCE_FOOTER_END]]";
-
-export type ComplianceFooterParts = {
-  companyName: string;
-  postalAddress: string;
-  contactEmail: string;
-  unsubscribeUrlToken: string;
-};
-
-export function escapeIdentity(value: string): string {
-  return escapeHtml(value);
-}
 
 /**
  * Pass-through: outbound mail is the authored body only (plus merge fields at send time).

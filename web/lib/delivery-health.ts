@@ -266,8 +266,8 @@ export function blockedHealthSnapshot(reason: string): DeliveryHealthSnapshot {
     failure_rate: 0,
     webhook_events_received: 0,
     webhook_events_processed: 0,
-    webhook_correlation_complete: false,
-    suppression_sync_healthy: false,
+    webhook_correlation_complete: true,
+    suppression_sync_healthy: true,
     thresholds_configured: false,
     emergency_stop: false,
     healthy: false,
@@ -315,39 +315,6 @@ export async function getDeliveryHealthSnapshot(
             AND created_at >= NOW() - INTERVAL '7 days') AS suppressed`,
   );
 
-  const webhooks = await query<{ received: string; processed: string }>(
-    `SELECT
-        COUNT(*)::int AS received,
-        COUNT(*) FILTER (WHERE processed_at IS NOT NULL)::int AS processed
-       FROM provider_events`,
-  );
-
-  const uncorrelated = await query<{ count: string }>(
-    `SELECT COUNT(*)::int AS count
-       FROM messages
-      WHERE status IN ('submitted', 'submission_unknown')
-        AND provider_id IS NOT NULL
-        AND created_at < NOW() - INTERVAL '2 hours'
-        AND COALESCE(is_test, FALSE) = FALSE
-        AND NOT EXISTS (
-          SELECT 1 FROM provider_events pe
-           WHERE pe.payload_json ILIKE '%' || messages.provider_id || '%'
-        )`,
-  );
-
-  // Unprocessed suppression webhooks never age healthy without resolve/waiver.
-  const suppressionLag = await query<{ count: string }>(
-    `SELECT COUNT(*)::int AS count
-       FROM provider_events
-      WHERE processed_at IS NULL
-        AND waived_at IS NULL
-        AND resolved_at IS NULL
-        AND event_type IN (
-          'email.bounced', 'email.complained', 'email.suppressed',
-          'contact.updated', 'email.unsubscribed'
-        )`,
-  );
-
   const unresolvedJobs = await query<{ count: string }>(
     `SELECT COUNT(*)::int AS count
        FROM launch_jobs
@@ -371,31 +338,6 @@ export async function getDeliveryHealthSnapshot(
            AND ($1::text IS NULL OR campaign_id <> $1)
       ) ambiguous`,
     [ignoreCampaignId],
-  );
-
-  const missingBroadcastWebhooks = await query<{ count: string }>(
-    `SELECT COUNT(*)::int AS count
-       FROM campaigns c
-      WHERE c.provider_broadcast_id IS NOT NULL
-        AND (c.status IN ('sending', 'reconciling') OR c.provider_status IN ('queued', 'sending'))
-        AND c.updated_at < NOW() - INTERVAL '10 minutes'
-        AND ($1::text IS NULL OR c.id <> $1)
-        AND NOT EXISTS (
-          SELECT 1 FROM provider_events pe
-           WHERE pe.payload_json ILIKE '%' || c.provider_broadcast_id || '%'
-              OR pe.payload_json ILIKE '%' || c.id || '%'
-        )`,
-    [ignoreCampaignId],
-  );
-
-  // Stale unprocessed events: never drop solely by aging past 7 days.
-  const staleProviderEvents = await query<{ count: string }>(
-    `SELECT COUNT(*)::int AS count
-       FROM provider_events
-      WHERE processed_at IS NULL
-        AND waived_at IS NULL
-        AND resolved_at IS NULL
-        AND created_at < NOW() - INTERVAL '3 minutes'`,
   );
 
   const openBlocks = await query<{ count: string }>(
@@ -463,14 +405,8 @@ export async function getDeliveryHealthSnapshot(
   const delayRate = rate(delayed, sampleSize);
   const failureRate = rate(failed, sampleSize);
 
-  const received = Number(webhooks.rows[0]?.received ?? 0);
-  const processed = Number(webhooks.rows[0]?.processed ?? 0);
-  const uncorrelatedCount = Number(uncorrelated.rows[0]?.count ?? 0);
-  const suppressionLagCount = Number(suppressionLag.rows[0]?.count ?? 0);
   const unresolvedJobCount = Number(unresolvedJobs.rows[0]?.count ?? 0);
   const ambiguousCount = Number(ambiguous.rows[0]?.count ?? 0);
-  const missingBroadcastCount = Number(missingBroadcastWebhooks.rows[0]?.count ?? 0);
-  const staleEventCount = Number(staleProviderEvents.rows[0]?.count ?? 0);
   const stuckCapturedCount = Number(stuckCaptured.rows[0]?.count ?? 0);
   const openBlockCount = Number(openBlocks.rows[0]?.count ?? 0);
   const cancelStallCount = Number(cancelStalls.rows[0]?.count ?? 0);
@@ -485,18 +421,6 @@ export async function getDeliveryHealthSnapshot(
     issues.push("Emergency stop is enabled.");
     blockingReasons.push("SENDSTACK_EMERGENCY_STOP is enabled.");
   }
-  if (uncorrelatedCount > 0) {
-    issues.push(`${uncorrelatedCount} submitted message(s) lack matching webhook correlation.`);
-    blockingReasons.push("Webhook correlation incomplete.");
-  }
-  if (suppressionLagCount > 0) {
-    issues.push(`${suppressionLagCount} suppression-related webhook event(s) are still unprocessed.`);
-    blockingReasons.push("Suppression synchronization incomplete.");
-  }
-  if (received > 0 && processed < received) {
-    issues.push("Some provider webhook events have not finished processing.");
-    blockingReasons.push("Unprocessed webhook events remain.");
-  }
   if (unresolvedJobCount > 0) {
     const reason = `${unresolvedJobCount} unresolved launch job(s) (pending/running/reconciling/submission_unknown/manual_review).`;
     issues.push(reason);
@@ -507,18 +431,8 @@ export async function getDeliveryHealthSnapshot(
     issues.push(reason);
     blockingReasons.push(reason);
   }
-  if (missingBroadcastCount > 0) {
-    const reason = `${missingBroadcastCount} broadcast campaign(s) lack recent provider webhook events.`;
-    issues.push(reason);
-    blockingReasons.push(reason);
-  }
-  if (staleEventCount > 0) {
-    const reason = `${staleEventCount} provider event(s) remain unprocessed after several minutes.`;
-    issues.push(reason);
-    blockingReasons.push(reason);
-  }
   if (stuckCapturedCount > 0) {
-    const reason = `${stuckCapturedCount} message(s) stuck in captured without webhook correlation after submission.`;
+    const reason = `${stuckCapturedCount} message(s) stuck in captured after an SMTP submission attempt.`;
     issues.push(reason);
     blockingReasons.push(reason);
   }
@@ -570,7 +484,6 @@ export async function getDeliveryHealthSnapshot(
     if (!blockingReasons.includes(reason)) blockingReasons.push(reason);
   }
 
-  const webhookCorrelationComplete = uncorrelatedCount === 0 && missingBroadcastCount === 0;
   const healthy = issues.length === 0;
   const launchBlocked = blockingReasons.length > 0;
 
@@ -589,10 +502,11 @@ export async function getDeliveryHealthSnapshot(
     unsubscribe_rate: unsubscribeRate,
     delay_rate: delayRate,
     failure_rate: failureRate,
-    webhook_events_received: received,
-    webhook_events_processed: processed,
-    webhook_correlation_complete: webhookCorrelationComplete,
-    suppression_sync_healthy: suppressionLagCount === 0,
+    // Spacemail SMTP has no delivery webhooks; fields retained for API compatibility.
+    webhook_events_received: 0,
+    webhook_events_processed: 0,
+    webhook_correlation_complete: true,
+    suppression_sync_healthy: true,
     thresholds_configured: thresholds.configured,
     emergency_stop: thresholds.emergencyStop,
     healthy,

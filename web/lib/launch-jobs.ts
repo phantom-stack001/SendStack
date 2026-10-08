@@ -45,8 +45,8 @@ export type LaunchJobRow = {
 };
 
 /**
- * The worker sends the frozen snapshot bytes. It does not reload company identity
- * or reapply the compliance footer. Empty text is still a frozen snapshot.
+ * The worker sends the frozen snapshot bytes. It does not reload sender identity
+ * or re-render campaign content. Empty text is still a frozen snapshot.
  */
 function frozenLaunchContent(
   snapshot: LaunchSnapshot | null,

@@ -833,7 +833,7 @@ describe.skipIf(!dbAvailable)("PostgreSQL integration / concurrency", () => {
     const listId = await seedList();
     const campaignId = await seedDraftCampaign({ listId, createdBy: userId });
 
-    process.env.SENDSTACK_DELIVERY_MODE = "resend";
+    process.env.SENDSTACK_DELIVERY_MODE = "smtp";
     process.env.SENDSTACK_TEST_RECIPIENT_ALLOWLIST = "canary@ctn-sk.com";
     process.env.SENDSTACK_LIVE_SEND_ENABLED = "1";
 
@@ -881,7 +881,7 @@ describe.skipIf(!dbAvailable)("PostgreSQL integration / concurrency", () => {
     const listId = await seedList();
     const campaignId = await seedDraftCampaign({ listId, createdBy: userId });
     process.env.SENDSTACK_EMERGENCY_STOP = "1";
-    process.env.SENDSTACK_DELIVERY_MODE = "resend";
+    process.env.SENDSTACK_DELIVERY_MODE = "smtp";
     process.env.SENDSTACK_TEST_RECIPIENT_ALLOWLIST = "canary@ctn-sk.com";
 
     const response = await handleApi(
