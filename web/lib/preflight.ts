@@ -1,5 +1,4 @@
 import { parse as parsePublicSuffix } from "tldts";
-import { assertComplianceFooterPresent } from "./compliance-footer";
 import { loadSendingIdentity, type SendingIdentity } from "./sending-identity";
 import { validateEmailContent } from "./templates";
 
@@ -17,7 +16,7 @@ const PLACEHOLDER_PATTERNS: Array<{ pattern: RegExp; label: string }> = [
 const FAKE_THREAD_SUBJECT = /^(re|fw|fwd)\s*:/i;
 
 /** Only these merge tokens are permitted inside href / URL fields. */
-const SAFE_URL_MERGE_TOKENS = new Set(["{{unsubscribe_url}}", "{{{RESEND_UNSUBSCRIBE_URL}}}"]);
+const SAFE_URL_MERGE_TOKENS = new Set(["{{unsubscribe_url}}"]);
 
 /**
  * True when the hostname is itself a public suffix (e.g. github.io, co.uk, com)
@@ -133,7 +132,7 @@ export function validateCampaignLink(raw: string, allowedDomains: string[]): Lin
     }
     return {
       ok: false,
-      error: `Merge token “${raw}” is not permitted in URLs/hrefs. Only {{unsubscribe_url}} or {{{RESEND_UNSUBSCRIBE_URL}}} are allowed.`,
+      error: `Merge token “${raw}” is not permitted in URLs/hrefs. Only {{unsubscribe_url}} is allowed.`,
     };
   }
   if (trimmed.startsWith("#")) return { ok: true, host: null, skipped: "anchor" };
@@ -191,9 +190,8 @@ export function hasVisibleUnsubscribe(html: string, text: string): boolean {
     .replace(/<[^>]+hidden[^>]*>[\s\S]*?<\/[^>]+>/gi, "")
     .replace(/style\s*=\s*["'][^"']*display\s*:\s*none[^"']*["'][^>]*>[\s\S]*?<\/[^>]+>/gi, "");
   const htmlVisible =
-    /<a\b[^>]*href\s*=\s*["']?\{\{\{?RESEND_UNSUBSCRIBE_URL\}?\}\}["']?[^>]*>[\s\S]*?<\/a>/i.test(hiddenStripped) ||
     /<a\b[^>]*href\s*=\s*["']?\{\{unsubscribe_url\}\}["']?[^>]*>[\s\S]*?<\/a>/i.test(hiddenStripped);
-  const textVisible = /\{\{\{?RESEND_UNSUBSCRIBE_URL\}?\}\}/.test(text) || /\{\{unsubscribe_url\}\}/.test(text);
+  const textVisible = /\{\{unsubscribe_url\}\}/.test(text);
   return htmlVisible && textVisible;
 }
 
@@ -205,7 +203,6 @@ export type PreflightInput = {
   fromName: string;
   attachmentExtensions?: string[];
   attachmentCount?: number;
-  forBroadcast?: boolean;
   identity?: SendingIdentity;
   requirePublicHttps?: boolean;
 };
@@ -250,8 +247,6 @@ export function runCampaignPreflight(input: PreflightInput): PreflightResult {
     errors.push(`From address must be the enforced sender (${identity.fromEmail}).`);
   }
   if (!identity.replyToEmail) errors.push("SENDSTACK_REPLY_TO_EMAIL must be configured before launch.");
-  if (!identity.companyName) errors.push("SENDSTACK_COMPANY_NAME must be configured before launch.");
-  if (!identity.postalAddress) errors.push("SENDSTACK_POSTAL_ADDRESS must be configured before launch.");
   if (!identity.allowedLinkDomains.length) {
     errors.push("SENDSTACK_ALLOWED_LINK_DOMAINS must be configured before launch.");
   } else {
@@ -278,21 +273,6 @@ export function runCampaignPreflight(input: PreflightInput): PreflightResult {
   for (const extension of input.attachmentExtensions ?? []) {
     if (["zip", "rar", "7z", "gz", "tgz", "tar"].includes(extension)) {
       errors.push("Archive attachments are not allowed. Remove ZIP/archive files before launch.");
-    }
-  }
-
-  if (input.forBroadcast && (input.attachmentCount ?? 0) > 0) {
-    errors.push(
-      "Resend Broadcasts do not support campaign attachments. Remove all attachments before live broadcast launch, or use a direct/test send for PDF/image attachments.",
-    );
-  }
-
-  // After footer application, verify compliance fields are actually present.
-  if (identity.companyName && identity.postalAddress) {
-    try {
-      assertComplianceFooterPresent(htmlBody, textBody, identity);
-    } catch (error) {
-      errors.push(error instanceof Error ? error.message : "Compliance footer verification failed.");
     }
   }
 

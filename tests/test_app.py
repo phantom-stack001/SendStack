@@ -29,7 +29,7 @@ class RunningApplication:
             admin_password="test-password",
             per_second_limit=100,
             daily_limit=500,
-            external_campaign_cap=10,
+            smtp_hourly_limit=500,
         )
         self.app = Application(self.config)
         self.server = self.app.make_server()
@@ -111,7 +111,7 @@ class SendStackIntegrationTests(unittest.TestCase):
         self.assertIn("users.manage", data["permissions"])
         self.assertIn("campaigns.send", data["permissions"])
         self.assertEqual(data["production_target"]["platform"], "Vercel")
-        self.assertEqual(data["production_target"]["provider"], "Resend Broadcasts")
+        self.assertEqual(data["production_target"]["provider"], "Spacemail SMTP")
         self.assertEqual(data["production_status"], "migration_required")
         status, _, _ = self.running.request(
             "POST", "/api/lists", {"name": "Blocked by CSRF"}, csrf=False
@@ -131,12 +131,12 @@ class SendStackIntegrationTests(unittest.TestCase):
         self.assertEqual(data["current"]["transport"], "Local sandbox")
         self.assertEqual(data["target"]["platform"], "Vercel")
         self.assertEqual(data["target"]["database"], "Managed PostgreSQL")
-        self.assertEqual(data["target"]["provider"], "Resend Broadcasts")
+        self.assertEqual(data["target"]["provider"], "Spacemail SMTP")
         checks = {check["id"]: check["status"] for check in data["checks"]}
         self.assertEqual(checks["local_test_build"], "ready")
         self.assertEqual(checks["vercel_runtime"], "migration_required")
         self.assertEqual(checks["postgres_database"], "migration_required")
-        self.assertEqual(checks["resend_broadcasts"], "not_connected")
+        self.assertEqual(checks["spacemail_smtp"], "not_connected")
         self.assertFalse(any("secret" in key.lower() for key in data))
 
     def test_user_administration_validates_and_revokes_access(self) -> None:
@@ -483,14 +483,26 @@ class SecurityPrimitiveTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             config.validate()
 
-    def test_smtp_allowlist_requires_exact_addresses(self) -> None:
+    def test_smtp_mode_requires_port_465(self) -> None:
         config = Config(
             delivery_mode="smtp",
-            smtp_host="smtp.example.com",
-            smtp_username="user",
+            smtp_host="mail.spacemail.com",
+            smtp_port=587,
+            smtp_username="user@example.com",
             smtp_password="secret",
-            smtp_from_email="sender@example.com",
-            smtp_starttls=True,
+            smtp_from_email="user@example.com",
+        )
+        with self.assertRaises(ValueError):
+            config.validate()
+
+    def test_smtp_test_allowlist_requires_exact_addresses(self) -> None:
+        config = Config(
+            delivery_mode="smtp",
+            smtp_host="mail.spacemail.com",
+            smtp_port=465,
+            smtp_username="user@example.com",
+            smtp_password="secret",
+            smtp_from_email="user@example.com",
             recipient_allowlist="@example.com",
         )
         config.validate()

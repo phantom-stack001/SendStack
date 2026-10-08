@@ -358,7 +358,7 @@ function deliveryStatusLegend(live) {
 }
 
 function deliveryModeLabel(mode) {
-  if (mode === "resend") return "Resend";
+  if (mode === "smtp") return "Spacemail SMTP";
   if (mode === "smtp") return "Allowlisted SMTP";
   return "Preview";
 }
@@ -688,7 +688,7 @@ async function renderSendingSetup() {
   const readyCount = data.checks.filter((check) => check.status === "ready").length;
   const vercel = checkById(data.checks, "vercel_runtime");
   const postgres = checkById(data.checks, "postgres_database");
-  const resend = checkById(data.checks, "resend_broadcasts");
+  const smtp = checkById(data.checks, "spacemail_smtp");
   const health = data.delivery_health || {};
   const liveReady = Boolean(data.ready_for_live_sending);
   const healthReady = Boolean(health.healthy);
@@ -707,7 +707,7 @@ async function renderSendingSetup() {
     <section class="target-grid" aria-label="Delivery architecture">
       <article class="target-card"><span class="target-card-index">01</span><h3>Vercel</h3><p>${escapeHtml(vercel.detail)}</p><span class="readiness-status ${vercel.status === "ready" ? "ready" : "pending"}">${escapeHtml(readinessStatusLabel(vercel.status))}</span></article>
       <article class="target-card"><span class="target-card-index">02</span><h3>PostgreSQL</h3><p>${escapeHtml(postgres.detail)}</p><span class="readiness-status ${postgres.status === "ready" ? "ready" : "pending"}">${escapeHtml(readinessStatusLabel(postgres.status))}</span></article>
-      <article class="target-card"><span class="target-card-index">03</span><h3>Resend Broadcasts</h3><p>${escapeHtml(resend.detail)}</p><span class="readiness-status ${resend.status === "ready" ? "ready" : "pending"}">${escapeHtml(readinessStatusLabel(resend.status))}</span></article>
+      <article class="target-card"><span class="target-card-index">03</span><h3>Spacemail SMTP</h3><p>${escapeHtml(smtp.detail)}</p><span class="readiness-status ${smtp.status === "ready" ? "ready" : "pending"}">${escapeHtml(readinessStatusLabel(smtp.status))}</span></article>
     </section>
 
     <section class="panel" style="margin-bottom:18px">
@@ -722,7 +722,7 @@ async function renderSendingSetup() {
           <article class="stat-card"><span class="stat-label">Suppressed</span><strong class="stat-value">${Number(health.suppressed || 0).toLocaleString()}</strong></article>
           <article class="stat-card"><span class="stat-label">Unsubscribed</span><strong class="stat-value">${Number(health.unsubscribed || 0).toLocaleString()}</strong></article>
         </div>
-        ${(health.issues || []).length ? `<div class="notice warning" style="margin-top:14px"><span>!</span><div>${(health.issues || []).map((issue) => escapeHtml(issue)).join("<br>")}</div></div>` : `<div class="notice" style="margin-top:14px"><span>i</span><div>Webhook correlation and suppression synchronization look complete.</div></div>`}
+        ${(health.issues || []).length ? `<div class="notice warning" style="margin-top:14px"><span>!</span><div>${(health.issues || []).map((issue) => escapeHtml(issue)).join("<br>")}</div></div>` : `<div class="notice" style="margin-top:14px"><span>i</span><div>Delivery health thresholds are configured. Spacemail reports acceptance at SMTP submit time.</div></div>`}
       </div>
     </section>
 
@@ -744,12 +744,12 @@ async function renderSendingSetup() {
         </section>
         <section class="panel volume-plan">
           <div class="panel-head"><div><h2>Volume goal</h2><p>Operating target after a careful ramp</p></div></div>
-          <div class="panel-body"><strong class="volume-goal">${escapeHtml(data.volume_plan.goal)}</strong><p>${escapeHtml(data.volume_plan.launch_policy)}</p><div class="notice warning"><span>!</span><div>Bounce, complaint, and unsubscribe signals must remain healthy before volume increases. The UI never reports healthy when webhook correlation is incomplete.</div></div></div>
+          <div class="panel-body"><strong class="volume-goal">${escapeHtml(data.volume_plan.goal)}</strong><p>${escapeHtml(data.volume_plan.launch_policy)}</p><div class="notice warning"><span>!</span><div>Bounce, complaint, and unsubscribe signals must remain healthy before volume increases. Spacemail paid mailboxes are limited to 500 outgoing messages per hour.</div></div></div>
         </section>
       </div>
     </div>
 
-    <div class="notice setup-note"><span>i</span><div><strong>DNS can remain with your existing provider.</strong> Vercel runs the application; Resend handles email delivery. DNS hosting does not replace either service.</div></div>`;
+    <div class="notice setup-note"><span>i</span><div><strong>DNS can remain with your existing provider.</strong> Vercel runs the application; Spacemail handles email delivery over SMTP. DNS hosting does not replace either service.</div></div>`;
 }
 
 function renderRecentCampaignTable(campaigns) {

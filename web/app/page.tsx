@@ -132,9 +132,8 @@ export default function LandingPage() {
               </div>
               <div className={styles.aboutCopy}>
                 <p>
-                  {site.displayCompany
-                    ? `${site.displayCompany} builds accountable delivery for teams that care about inbox placement, consent, and clear ownership.`
-                    : "Business identity is not configured yet. Set SENDSTACK_COMPANY_NAME before publishing operator details."}
+                  CTN builds accountable delivery for teams that care about inbox placement, consent, and
+                  clear ownership.
                 </p>
                 <p>
                   A public site, working contact details, and published policies help recipients and
@@ -152,9 +151,9 @@ export default function LandingPage() {
                 <p className={styles.kickerLight}>Contact</p>
                 <h2 id="contact-heading">Start a conversation</h2>
                 <p className={styles.contactLead}>
-                  {site.setupRequired
-                    ? "Contact details are unavailable until company name, postal address, and a monitored inbox are configured."
-                    : "Reach a monitored inbox. Postal details below come from the configured operator identity."}
+                  {site.displayEmail
+                    ? "Reach a monitored inbox, or sign in to the workspace."
+                    : "Sign in to the workspace, or configure a monitored contact email to publish it here."}
                 </p>
               </div>
               <ul className={styles.contactList}>
@@ -165,10 +164,6 @@ export default function LandingPage() {
                   ) : (
                     <span>Not configured</span>
                   )}
-                </li>
-                <li>
-                  <span>Postal</span>
-                  <span>{site.displayPostal || "Not configured"}</span>
                 </li>
                 <li>
                   <span>Workspace</span>
@@ -183,7 +178,7 @@ export default function LandingPage() {
       <footer className={styles.footer}>
         <div className={styles.shell}>
           <div className={styles.footerRow}>
-            <p>&copy; {new Date().getFullYear()} {site.displayCompany || "SendStack operator"}</p>
+            <p>&copy; {new Date().getFullYear()} CTN</p>
             <div className={styles.footerLinks}>
               <Link href="/privacy">Privacy</Link>
               <Link href="/terms">Terms</Link>

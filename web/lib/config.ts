@@ -21,9 +21,14 @@ function booleanEnv(name: string, fallback: boolean): boolean {
 const nodeEnv = process.env.NODE_ENV ?? "development";
 const vercelEnv = process.env.VERCEL_ENV ?? "";
 const liveSendEnabled = booleanEnv("SENDSTACK_LIVE_SEND_ENABLED", false);
+const smtpReady = Boolean(
+  (process.env.SENDSTACK_SMTP_HOST ?? "").trim() &&
+    (process.env.SENDSTACK_SMTP_USERNAME ?? "").trim() &&
+    (process.env.SENDSTACK_SMTP_PASSWORD ?? "").trim(),
+);
 const deliveryMode =
   process.env.SENDSTACK_DELIVERY_MODE?.trim().toLowerCase() ||
-  (liveSendEnabled && process.env.RESEND_API_KEY ? "resend" : "sandbox");
+  (liveSendEnabled && smtpReady ? "smtp" : "sandbox");
 
 const publicUrl = (process.env.SENDSTACK_PUBLIC_URL ?? "").trim();
 const cookieSecure =

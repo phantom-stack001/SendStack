@@ -1,7 +1,7 @@
 # SendStack web (Vercel)
 
 Next.js App Router runtime that preserves the existing `/api/*` SPA contract and targets
-**Vercel + managed PostgreSQL + Resend Broadcasts**.
+**Vercel + managed PostgreSQL + Spacemail SMTP**.
 
 The Python test build under `../app` remains available for local comparison. This `web/`
 app is the production-oriented runtime. Project docs: [`../docs/`](../docs/).
@@ -64,9 +64,7 @@ Never set application `DATABASE_URL` to the disposable test database.
 ## Delivery modes
 
 - **Sandbox (default):** campaign launch processes recipients inside the request and writes local `messages` rows. No external email is sent.
-- **Live Resend:** requires `RESEND_API_KEY`, `RESEND_WEBHOOK_SECRET`, enforced identity settings (`SENDSTACK_FROM_EMAIL`, `SENDSTACK_REPLY_TO_EMAIL`, `SENDSTACK_COMPANY_NAME`, `SENDSTACK_POSTAL_ADDRESS`, `SENDSTACK_ALLOWED_LINK_DOMAINS`), and `SENDSTACK_LIVE_SEND_ENABLED=true`. Keep live send locked until launch gates pass. Incomplete live-send config is logged at boot and blocks send/readiness APIs; it does **not** crash login or other routes. Vercel **preview** deployments cannot live-send even if those vars are present. Apply migrations through `0006_consent_volume_launch_hardening.sql` before live send (consent evidence, daily volume, durable launch jobs, webhook claims, health blocks). `0005_deliverability_hardening.sql` alone is not sufficient.
-
-Webhook endpoint: `POST /api/webhooks/resend`
+- **Live Spacemail SMTP:** requires `SENDSTACK_SMTP_HOST`, `SENDSTACK_SMTP_USERNAME`, `SENDSTACK_SMTP_PASSWORD`, `SENDSTACK_DELIVERY_MODE=smtp`, enforced identity settings (`SENDSTACK_FROM_EMAIL`, `SENDSTACK_REPLY_TO_EMAIL`, `SENDSTACK_ALLOWED_LINK_DOMAINS`), `CRON_SECRET`, and `SENDSTACK_LIVE_SEND_ENABLED=true`. Campaign HTML and text must include a visible `{{unsubscribe_url}}`. Keep live send locked until launch gates pass. Incomplete live-send config is logged at boot and blocks send/readiness APIs; it does **not** crash login or other routes. Vercel **preview** deployments cannot live-send even if those vars are present. Apply migrations through `0007_submission_state_machine.sql` before live send.
 
 ## Vercel deploy checklist
 
@@ -76,14 +74,14 @@ Webhook endpoint: `POST /api/webhooks/resend`
 4. Set `SENDSTACK_PUBLIC_URL` to the HTTPS production origin.
 5. Run `pnpm db:migrate` against production (and seed only with a non-default admin password). This applies all SQL under `drizzle/`, including `0003_campaign_attachments.sql` required for campaign file attachments.
 6. Deploy. Each build stamps `/app.js` and `/styles.css` with the git commit and serves the SPA shell with `Cache-Control: no-store`, so browsers pick up new UI after a push. Confirm `/healthz` returns ok.
-7. Add Resend keys later when ready; leave `SENDSTACK_LIVE_SEND_ENABLED=false` until domain + webhook gates pass.
-8. Register webhook URL `https://<your-domain>/api/webhooks/resend` in Resend after setting `RESEND_WEBHOOK_SECRET`.
+7. Add Spacemail SMTP credentials when ready; leave `SENDSTACK_LIVE_SEND_ENABLED=false` until the mailbox, DNS, and launch-job cron are verified.
+8. Point an external scheduler at `GET /api/cron/launch-jobs` with `Authorization: Bearer ${CRON_SECRET}` every minute.
 
-Preview deployments must not receive production Resend credentials.
+Preview deployments must not receive production SMTP credentials.
 
-## Cloudflare
+## DNS
 
-Cloudflare remains DNS-only for the app hostname and Resend SPF/DKIM/DMARC records. It does not host this runtime.
+DNS may remain with Cloudflare or Spaceship for the app hostname and Spacemail SPF/DKIM/DMARC records. It does not host this runtime.
 
 ## Production guards built into this app
 

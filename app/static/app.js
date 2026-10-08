@@ -374,10 +374,10 @@ async function renderDashboard() {
       </section>` : `<section class="panel access-summary"><div class="panel-body"><div class="access-lock">◌</div><h2>Recipient data is protected</h2><p>Your Analyst role includes aggregate campaign reporting without contact addresses or message contents.</p></div></section>`}
     </div>
     <section class="production-target-strip">
-      <div class="target-strip-copy"><span class="readiness-status pending">Migration required</span><div><strong>Production target: Vercel + PostgreSQL + Resend</strong><p>The architecture is selected, but live delivery is not connected to this local build yet.</p></div></div>
+      <div class="target-strip-copy"><span class="readiness-status pending">Migration required</span><div><strong>Production target: Vercel + PostgreSQL + Spacemail SMTP</strong><p>The architecture is selected, but live delivery is not connected to this local build yet.</p></div></div>
       <button class="button" data-go="sending">View readiness</button>
     </section>
-    <div class="notice" style="margin-top:16px"><span>i</span><div><strong>${data.delivery_mode === "sandbox" ? "Sandbox delivery is active." : "SMTP test delivery is active."}</strong> ${data.delivery_mode === "sandbox" ? "No message leaves this application; every send is captured in Deliveries." : "Only explicitly allowlisted recipients can receive messages."}</div></div>`;
+    <div class="notice" style="margin-top:16px"><span>i</span><div><strong>${data.delivery_mode === "sandbox" ? "Sandbox delivery is active." : "SMTP delivery is active."}</strong> ${data.delivery_mode === "sandbox" ? "No message leaves this application; every send is captured in Deliveries." : "Campaigns send through Spacemail SMTP. Administrator test sends still require the recipient allowlist."}</div></div>`;
 }
 
 function readinessStatusLabel(status) {
@@ -408,7 +408,7 @@ async function renderSendingSetup() {
     <section class="target-grid" aria-label="Production architecture">
       <article class="target-card"><span class="target-card-index">01</span><h3>Vercel</h3><p>Hosts the browser app and request-scoped API. The persistent local Python process must be migrated before deployment.</p><span class="readiness-status pending">Runtime migration</span></article>
       <article class="target-card"><span class="target-card-index">02</span><h3>PostgreSQL</h3><p>Becomes the durable source of truth for contacts, consent, campaigns, provider IDs, events, and suppressions.</p><span class="readiness-status pending">Database migration</span></article>
-      <article class="target-card"><span class="target-card-index">03</span><h3>Resend Broadcasts</h3><p>Owns production queueing and throttling. SendStack will sync Contacts to Segments and retain the local recipient ledger.</p><span class="readiness-status pending">Provider connection</span></article>
+      <article class="target-card"><span class="target-card-index">03</span><h3>Spacemail SMTP</h3><p>Accepts ordinary MIME messages one recipient at a time over mail.spacemail.com:465, the same path as a mail client.</p><span class="readiness-status pending">Provider connection</span></article>
     </section>
 
     <div class="readiness-layout">
@@ -424,7 +424,7 @@ async function renderSendingSetup() {
 
       <div class="readiness-side">
         <section class="panel">
-          <div class="panel-head"><div><h2>Production delivery path</h2><p>Resend owns the live queue after handoff</p></div></div>
+          <div class="panel-head"><div><h2>Production delivery path</h2><p>Spacemail accepts each message over SMTP</p></div></div>
           <ol class="delivery-path">${data.delivery_path.map((step, index) => `<li><span>${index + 1}</span><p>${escapeHtml(step)}</p></li>`).join("")}</ol>
         </section>
         <section class="panel volume-plan">
@@ -434,7 +434,7 @@ async function renderSendingSetup() {
       </div>
     </div>
 
-    <div class="notice setup-note"><span>i</span><div><strong>Cloudflare can stay in the stack for DNS and domain records.</strong> Vercel supplies the application runtime; Resend supplies email delivery. Cloudflare is not replacing either of those services.</div></div>`;
+    <div class="notice setup-note"><span>i</span><div><strong>DNS can stay with Cloudflare or Spaceship.</strong> Vercel supplies the application runtime; Spacemail supplies email delivery over SMTP.</div></div>`;
 }
 
 function renderRecentCampaignTable(campaigns) {
@@ -551,7 +551,7 @@ async function renderCampaigns() {
   const data = await api("/api/campaigns");
   await getLists();
   els.content.innerHTML = `
-    <div class="section-lead"><div><h2>${data.campaigns.length} campaign${data.campaigns.length === 1 ? "" : "s"}</h2><p>${can("campaigns.send") ? "Draft, preview, and run each audience in the sandbox. Live Resend delivery remains locked." : "Read-only campaign reporting without recipient-level personal data."}</p></div>${can("campaigns.manage") ? `<button class="button primary" data-new-campaign>New campaign</button>` : ""}</div>
+    <div class="section-lead"><div><h2>${data.campaigns.length} campaign${data.campaigns.length === 1 ? "" : "s"}</h2><p>${can("campaigns.send") ? "Draft, preview, and run each audience. Live Spacemail SMTP stays locked until configured." : "Read-only campaign reporting without recipient-level personal data."}</p></div>${can("campaigns.manage") ? `<button class="button primary" data-new-campaign>New campaign</button>` : ""}</div>
     ${data.campaigns.length ? `<section class="campaign-grid">${data.campaigns.map(renderCampaignCard).join("")}</section>` : `<section class="panel empty-state"><div><div class="empty-mark">✦</div><h2>No campaigns yet</h2><p>${can("campaigns.manage") ? "Build a message, preview personalization, and capture a sandbox delivery." : "Campaign reports will appear here after a marketer creates a campaign."}</p>${can("campaigns.manage") ? `<button class="button primary" data-new-campaign>New campaign</button>` : ""}</div></section>`}`;
 }
 
@@ -763,11 +763,11 @@ async function campaignAction(action, id) {
   if (action === "launch") {
     openModal(state.session.delivery_mode === "sandbox" ? "Run campaign in sandbox?" : "Launch controlled test?", "Delivery preflight", `
       <div class="stack">
-        <div class="notice ${state.session.delivery_mode === "smtp" ? "warning" : ""}"><span>!</span><div><strong>${state.session.delivery_mode === "sandbox" ? "Messages will stay inside the sandbox." : "Messages will be submitted to the configured SMTP test relay."}</strong><br>Eligibility and global suppression are checked again before every recipient is processed.</div></div>
+        <div class="notice ${state.session.delivery_mode === "smtp" ? "warning" : ""}"><span>!</span><div><strong>${state.session.delivery_mode === "sandbox" ? "Messages will stay inside the sandbox." : "Messages will be submitted through Spacemail SMTP."}</strong><br>Eligibility and global suppression are checked again before every recipient is processed.</div></div>
         <div class="metric-line"><span>Transport</span><strong>${escapeHtml(titleCase(state.session.delivery_mode))}</strong></div>
         <div class="metric-line"><span>Daily safety cap</span><strong>${Number(state.session.daily_limit).toLocaleString()}</strong></div>
-        <div class="metric-line"><span>Production provider</span><strong>Resend — not connected</strong></div>
-        <p class="help">Production campaigns will use Resend Broadcasts after Vercel, PostgreSQL, the sending domain, and signed webhooks are verified.</p>
+        <div class="metric-line"><span>Production provider</span><strong>Spacemail SMTP</strong></div>
+        <p class="help">Campaigns send one recipient at a time through mail.spacemail.com:465 after identity and SMTP credentials are configured.</p>
         <div class="form-actions"><button class="button" data-close-modal>Cancel</button><button class="button primary" id="confirm-launch">${state.session.delivery_mode === "sandbox" ? "Queue sandbox run" : "Queue controlled test"}</button></div>
       </div>`, true);
     document.querySelector("#confirm-launch").addEventListener("click", async () => {

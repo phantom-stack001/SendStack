@@ -9,7 +9,7 @@ import {
   isTimestampFresh,
   shouldReuseExistingBroadcast,
 } from "../lib/providers/webhook";
-import { liveSendAllowed } from "../lib/providers/resend";
+import { liveSendAllowed } from "../lib/live-send";
 import { validateProductionEnv } from "../lib/env";
 
 const sampleSession: SessionUser = {

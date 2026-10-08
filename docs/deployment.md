@@ -1,4 +1,4 @@
-# Production handover: Vercel + PostgreSQL + Resend
+# Production handover: Vercel + PostgreSQL + Spacemail SMTP
 
 See also: [Architecture](architecture.md) · [Product](product.md) · [`web/README.md`](../web/README.md)
 
@@ -6,23 +6,21 @@ See also: [Architecture](architecture.md) · [Product](product.md) · [`web/READ
 
 SendStack's selected production architecture is:
 
-- **Application runtime:** Vercel
+- **Application runtime:** Vercel (plus an external scheduler for launch-job ticks)
 - **System of record:** managed PostgreSQL
-- **Email delivery:** Resend Broadcasts
-- **Audience model:** Resend Contacts assigned to Segments
-- **DNS:** Cloudflare may remain the DNS host for the application and sending-domain records
+- **Email delivery:** Spacemail SMTP (`mail.spacemail.com:465`, implicit TLS)
+- **Audience model:** Local contacts, lists, and campaign recipient snapshots
+- **DNS:** Cloudflare or Spaceship may host DNS and Spacemail SPF/DKIM/DMARC records
 
-The Python test build under `app/` remains a local sandbox environment (SQLite, in-process queue). It is safe for product testing but is not ready to deploy to Vercel or send through Resend. Use `web/` for the Vercel path.
+The Python test build under `app/` remains a local sandbox environment (SQLite, in-process queue). It is safe for product testing. Use `web/` for the Vercel path.
 
 ## Production delivery contract
 
 1. SendStack creates an immutable recipient snapshot from active, consented, unsuppressed contacts.
-2. That snapshot is synchronized to a campaign-specific Resend Segment.
-3. SendStack creates a Resend Broadcast as a draft and stores the returned provider ID before requesting delivery.
-4. Resend queues and throttles the broadcast. SendStack does not run a long-lived delivery worker on Vercel.
-5. Signed webhook events update the local recipient ledger and global suppression state.
-
-Provider acceptance is **submitted**, not **delivered**. The UI must only show delivered after a verified delivery event.
+2. A durable launch job advances over that snapshot in small chunks.
+3. Each tick renders personalization and submits one ordinary MIME message per recipient through Spacemail SMTP.
+4. SMTP acceptance is **submitted**. There is no Spacemail delivery webhook; the UI does not claim inbox delivery from provider events.
+5. Cancel stops unsent recipients only. Messages Spacemail already accepted cannot be recalled.
 
 ## Fastest safe implementation sequence
 
@@ -40,78 +38,73 @@ Provider acceptance is **submitted**, not **delivered**. The UI must only show d
 - Move login throttling, sessions, launch locks, and all queue state out of process memory.
 - Add repeatable migrations and a one-time SQLite-to-PostgreSQL import with reconciliation.
 
-### 3. Add the Resend provider boundary
+### 3. Add the Spacemail SMTP boundary
 
 - Keep the sandbox provider for previews and automated tests.
-- Map SendStack lists and campaign snapshots to Resend Segments. Do not use deprecated Audiences.
-- Store Resend contact, segment, import, broadcast, and email identifiers locally.
-- Create the broadcast draft first, persist its ID, then submit that stored broadcast. Never create a second broadcast blindly after a timeout.
-- Translate SendStack personalization and unsubscribe tokens only at the provider boundary.
+- Authenticate to `mail.spacemail.com` on port 465 with the mailbox username and password.
+- Send one recipient per message; store Message-ID as `provider_id` on acceptance.
+- Enforce daily and hourly volume caps (`SENDSTACK_DAILY_LIMIT`, `SENDSTACK_SMTP_HOURLY_LIMIT`).
+- Render SendStack personalization and unsubscribe tokens locally before SMTP submit.
 
-### 4. Implement feedback and suppression
+### 4. Feedback and suppression
 
-- Expose a public Resend webhook endpoint that reads the raw body and verifies all signature headers before parsing JSON.
-- Store each provider event once using its unique event ID.
-- Handle duplicate and out-of-order delivery events without regressing terminal states.
-- Convert bounce, complaint, provider suppression, and unsubscribe events into immediate global SendStack suppressions.
-- Never re-subscribe an opted-out contact during an ordinary sync.
+- Administrator-simulated bounce/complaint feedback remains available for testing.
+- Global unsubscribe links continue to write local suppressions.
+- Automatic bounce ingestion from the Spacemail mailbox (IMAP) is out of scope for this handover.
 
 ### 5. Unlock live delivery only after verification
 
-- Verify the sending domain and allowed From address.
-- Register and test the production webhook.
+- Verify the Spacemail mailbox and DNS (SPF/DKIM/DMARC) for the sending domain.
 - Complete backup and restore testing.
 - Remove the default administrator password and require secure cookies over HTTPS.
+- Configure an external scheduler to hit `GET /api/cron/launch-jobs` every minute with `CRON_SECRET`.
 - Run a small internal or explicitly consented canary before increasing volume.
 
 ## Server-only production configuration
 
-The production implementation should consume these Vercel environment variables. Preview deployments must remain in sandbox mode and must not receive production provider credentials.
+The production implementation should consume these Vercel environment variables. Preview deployments must remain in sandbox mode and must not receive production SMTP credentials.
 
 | Variable | Purpose |
 | --- | --- |
 | `DATABASE_URL` | Pooled managed PostgreSQL connection |
-| `RESEND_API_KEY` | Server-side provider access; never expose to browser code |
-| `RESEND_WEBHOOK_SECRET` | Signature verification for the raw webhook request |
+| `SENDSTACK_SMTP_HOST` | SMTP host (`mail.spacemail.com`) |
+| `SENDSTACK_SMTP_PORT` | SMTP port (`465` for implicit TLS) |
+| `SENDSTACK_SMTP_USERNAME` | Full Spacemail mailbox address |
+| `SENDSTACK_SMTP_PASSWORD` | Mailbox password |
+| `SENDSTACK_SMTP_HOURLY_LIMIT` | Hourly outbound cap (default 500) |
 | `SENDSTACK_PUBLIC_URL` | HTTPS production origin used in links and callbacks |
 | `SENDSTACK_SESSION_SECRET` | Production session signing/encryption secret |
 | `SENDSTACK_FROM_EMAIL` | Enforced verified/monitored From address (not a readiness hint only) |
 | `SENDSTACK_REPLY_TO_EMAIL` | Enforced monitored Reply-To address |
-| `SENDSTACK_COMPANY_NAME` | Legal/trading name for compliance footers and public pages |
-| `SENDSTACK_POSTAL_ADDRESS` | Real postal address for compliance footers and public pages |
 | `SENDSTACK_ALLOWED_LINK_DOMAINS` | Comma-separated HTTP(S) link host allowlist for campaign content |
 | `SENDSTACK_TEST_RECIPIENT_ALLOWLIST` | Exact addresses permitted for administrator live test sends |
-| `SENDSTACK_DAILY_LIMIT` | Daily volume cap across direct, test, and broadcast recipient paths |
+| `SENDSTACK_DAILY_LIMIT` | Daily volume cap across direct, test, and campaign recipient paths |
 | `SENDSTACK_LIVE_SEND_ENABLED` | Explicit kill switch; default must be `false` |
+| `CRON_SECRET` | Bearer secret for authenticated launch-job ticks |
 
-If live send is enabled but identity/provider settings are incomplete, the app still boots (login and session keep working). Issues are logged at startup; readiness and send APIs keep live mail blocked until the gaps are fixed.
-
-See also [post-remediation.md](post-remediation.md) for operator-only DNS, DKIM, DMARC, Spamhaus, and warm-up steps.
+If live send is enabled but identity/SMTP settings are incomplete, the app still boots (login and session keep working). Issues are logged at startup; readiness and send APIs keep live mail blocked until the gaps are fixed.
 
 ## Launch gates
 
 Live sending stays locked until every item below passes:
 
 - PostgreSQL migration preserves row counts, IDs, consent, memberships, campaign content, statuses, and suppressions.
-- Concurrent launch requests create at most one provider broadcast.
-- A 10,000-recipient dry run against a fake provider produces no missing or duplicate recipients.
-- Contact import and Segment counts reconcile exactly with the immutable recipient snapshot.
-- Webhook signature, replay, duplicate, unknown-event, and out-of-order tests pass.
-- Bounce, complaint, provider suppression, and unsubscribe each block the next campaign locally and at the provider boundary.
-- Production and preview secrets are isolated; no API key or webhook secret appears in responses, browser bundles, logs, or audit details.
+- Concurrent launch requests create at most one active launch job per campaign.
+- A dry run against a fake SMTP sender produces no missing or duplicate recipients.
+- Production and preview secrets are isolated; no SMTP password appears in responses, browser bundles, logs, or audit details.
 - The verified From address is enforced server-side.
-- A tested emergency stop prevents new broadcasts.
-- A controlled canary confirms the full send, delivery, feedback, and unsubscribe loop.
+- A tested emergency stop prevents new SMTP submits.
+- A controlled canary confirms SMTP acceptance and unsubscribe.
 
 ## Volume ramp
 
-The business goal is 3,000–10,000 messages per day. Treat that as a steady-state target, not an immediate entitlement or deliverability guarantee.
+Steady-state volume is bounded by the Spacemail mailbox plan (**500 messages/hour** on paid plans) and `SENDSTACK_DAILY_LIMIT`. Treat higher marketing targets as requiring a different delivery product.
 
-Start with a small, engaged, consented segment. Increase volume only when authentication is valid, webhook processing is healthy, suppressions are synchronized, and bounce and complaint signals remain within the provider's acceptable range. Stop automatically when a safety threshold is exceeded.
+Start with a small, engaged, consented segment. Increase volume only when authentication is valid and bounce/complaint signals remain healthy. Stop automatically when a safety threshold is exceeded.
 
 ## Product behavior that changes in production
 
-- **Pause/resume:** local sandbox delivery may pause. Once a live broadcast is accepted, already-sent messages cannot be recalled. Production should offer cancel only while the provider can still stop remaining delivery.
-- **Queue:** Resend owns the live delivery queue; SendStack owns the campaign intent, recipient snapshot, safety gate, and audit trail.
-- **Deliveries:** local captures remain available for testing. Production delivery status comes from signed provider events.
-- **Unsubscribe:** the provider unsubscribe link is authoritative at send time and must synchronize back to SendStack's global suppression list.
+- **Pause/resume:** local sandbox delivery may pause. Cancel stops unsent recipients; accepted SMTP messages cannot be recalled.
+- **Queue:** SendStack owns the launch-job cursor; Spacemail accepts each message over SMTP.
+- **Deliveries:** local captures remain available for testing. Live status means Spacemail accepted the message.
+- **Unsubscribe:** SendStack unsubscribe links remain authoritative and write the global suppression list.

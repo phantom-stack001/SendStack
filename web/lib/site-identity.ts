@@ -5,8 +5,7 @@ export function getPublicSiteCopy() {
   const identity = publicSiteIdentity();
   return {
     ...identity,
-    displayCompany: identity.companyName,
-    displayPostal: identity.postalAddress,
+    displayCompany: "CTN",
     displayEmail: identity.contactEmail,
     setupRequired: !identity.configured,
   };

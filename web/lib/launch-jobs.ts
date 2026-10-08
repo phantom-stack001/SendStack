@@ -1,4 +1,5 @@
 import { applyComplianceFooter } from "./compliance-footer";
+import { config } from "./config";
 import {
   consumeDailyReservationsForCampaign,
   releaseDailyReservationsForCampaign,
@@ -8,27 +9,14 @@ import { getPool, query } from "./db";
 import { withSubmitBarrier } from "./submit-barrier";
 import { assertDeliveryHealthAllowsSubmit, ensureDeliveryHealthBlock } from "./delivery-health";
 import { makeId } from "./ids";
-import {
-  addContactToSegment,
-  buildIdempotencyKey,
-  cancelResendBroadcast,
-  createResendBroadcastDraft,
-  createResendSegment,
-  getResendBroadcast,
-  getResendContactImport,
-  importResendContactsCsv,
-  liveSendAllowed,
-  sendResendBroadcast,
-  toResendBroadcastHtml,
-  toResendBroadcastText,
-  upsertResendContact,
-} from "./providers/resend";
+import { buildIdempotencyKey, liveSendAllowed, smtpHourlyLimit } from "./live-send";
+import { sendSmtpEmail, smtpAcceptanceAmbiguous, type SmtpEmailInput } from "./providers/smtp";
 import { loadSendingIdentity } from "./sending-identity";
 import { isSpecialUseRecipientDomain, validateLiveRecipient } from "./recipients";
+import { renderTemplate } from "./templates";
 
-export const DEFAULT_LAUNCH_CHUNK_SIZE = 100;
+export const DEFAULT_LAUNCH_CHUNK_SIZE = 5;
 export const LAUNCH_LEASE_SECONDS = 60;
-const SEQUENTIAL_FALLBACK_MAX_CHUNK = 20;
 const PROVIDER_OP_MIN_BUDGET_MS = 2_000;
 
 export type LaunchJobRow = {
@@ -56,14 +44,6 @@ export type LaunchJobRow = {
   submit_attempted_at?: string | null;
 };
 
-/** Statuses from which a generic retry may return the job to pending. */
-const PRE_SUBMIT_STATUSES = ["pending", "running", "ready_to_submit"] as const;
-
-function isPostSubmit(job: Pick<LaunchJobRow, "status" | "submit_attempted_at">): boolean {
-  if (job.submit_attempted_at) return true;
-  return ![...PRE_SUBMIT_STATUSES].includes(job.status as (typeof PRE_SUBMIT_STATUSES)[number]);
-}
-
 /**
  * The worker sends the frozen snapshot bytes. It does not reload company identity
  * or reapply the compliance footer. Empty text is still a frozen snapshot.
@@ -75,16 +55,16 @@ function frozenLaunchContent(
   if (snapshot && typeof snapshot.html_body === "string" && typeof snapshot.text_body === "string") {
     return { html: snapshot.html_body, text: snapshot.text_body };
   }
-  return applyComplianceFooter(campaign.html_body, campaign.text_body, loadSendingIdentity(), {
-    broadcast: true,
-  });
+  return applyComplianceFooter(campaign.html_body, campaign.text_body, loadSendingIdentity());
 }
 
-type ResendProvider = typeof import("./providers/resend");
+export type SmtpSendFn = (input: SmtpEmailInput) => Promise<{ id: string; accepted: boolean }>;
+
 type ProcessOptions = {
-  provider?: Partial<ResendProvider>;
+  /** Test seam: inject a fake SMTP sender (never opens a socket). */
+  sendEmail?: SmtpSendFn;
   live?: boolean;
-  /** Test seam: runs after the provider accepts a broadcast, before local finalization. */
+  /** Test seam: runs after SMTP accepts a message, before local finalization of that row. */
   afterProviderAccepted?: () => Promise<void>;
   /** Test seam: runs before the submit barrier, so a concurrent suppression can commit. */
   beforeSubmitBarrier?: () => Promise<void>;
@@ -157,7 +137,7 @@ async function loadJobById(jobId: string): Promise<LaunchJobRow | null> {
 
 /**
  * Atomic create of a durable launch job. Idempotent when an active job already exists.
- * Does not call Resend — HTTP launch must return promptly.
+ * Does not open SMTP — HTTP launch must return promptly.
  */
 export async function createLaunchJob(input: {
   campaignId: string;
@@ -252,7 +232,7 @@ export async function createLaunchJob(input: {
 
 /**
  * Atomic CAS launch: freeze snapshot, create one job, set-based recipient/message inserts,
- * and set-based volume reservations. Never calls Resend.
+ * and set-based volume reservations. Never opens SMTP.
  */
 export async function claimAndPrepareCampaignLaunch(input: {
   campaignId: string;
@@ -291,7 +271,6 @@ export async function claimAndPrepareCampaignLaunch(input: {
     input.htmlBody ?? campaign.html_body,
     input.textBody ?? campaign.text_body,
     identity,
-    { broadcast: true },
   );
   const snapshot: LaunchSnapshot = {
     subject: campaign.subject,
@@ -812,31 +791,39 @@ async function enforcePreparedAudience(
   };
 }
 
-async function loadFreshProviderBroadcastId(
-  jobId: string | null | undefined,
-  campaignId: string,
-): Promise<string | null> {
-  if (jobId) {
-    const jobRow = await query<{ provider_broadcast_id: string | null }>(
-      `SELECT provider_broadcast_id FROM launch_jobs WHERE id = $1`,
-      [jobId],
-    );
-    if (jobRow.rows[0]?.provider_broadcast_id) return jobRow.rows[0].provider_broadcast_id;
-  }
-  const campaignRow = await query<{ provider_broadcast_id: string | null }>(
-    `SELECT provider_broadcast_id FROM campaigns WHERE id = $1`,
+async function withinSmtpHourlyLimit(): Promise<boolean> {
+  const limit = smtpHourlyLimit();
+  const used = await query<{ count: string }>(
+    `SELECT COUNT(*)::int AS count FROM messages
+      WHERE status IN ('submitted', 'submission_unknown', 'delivered', 'delayed', 'bounced', 'complained')
+        AND created_at >= NOW() - INTERVAL '1 hour'`,
+  );
+  return Number(used.rows[0]?.count ?? 0) < limit;
+}
+
+async function loadCampaignAttachments(campaignId: string): Promise<
+  Array<{ filename: string; contentBase64: string; contentType: string }>
+> {
+  const result = await query<{ filename: string; content_type: string; content: Buffer }>(
+    `SELECT filename, content_type, content
+       FROM campaign_attachments
+      WHERE campaign_id = $1
+        AND COALESCE(blocked, FALSE) = FALSE
+        AND lower(filename) NOT LIKE '%.zip'
+      ORDER BY created_at ASC`,
     [campaignId],
   );
-  return campaignRow.rows[0]?.provider_broadcast_id ?? null;
+  return result.rows.map((row) => ({
+    filename: row.filename,
+    contentType: row.content_type,
+    contentBase64: Buffer.from(row.content).toString("base64"),
+  }));
 }
 
 async function preflightIrreversibleOp(
   job: LaunchJobRow,
 ): Promise<{ ok: true } | { ok: false; result: { done: boolean; advanced: number; status: string } }> {
   if (emergencyStopEnabled()) {
-    // A kill switch must be reversible: park the job instead of terminalizing it, so
-    // clearing the stop resumes the launch rather than requiring manual DB repair.
-    // Volume stays reserved because the send may still happen after the incident.
     await fenceUpdate(
       job,
       `status = CASE WHEN status IN ('pending', 'running') THEN 'pending' ELSE status END,
@@ -862,11 +849,7 @@ async function preflightIrreversibleOp(
     campaignStatus === "cancelled" ||
     campaignStatus === "paused";
   if (cancelIntent) {
-    // A submit may already have reached the provider. Recording `cancelled` here
-    // would claim a stop that was not confirmed. Reconcile instead.
-    if (isPostSubmit(job)) {
-      return { ok: false, result: { done: false, advanced: 0, status: job.status } };
-    }
+    // SMTP cancel can only stop unsent recipients. Accepted messages stay submitted.
     await fenceUpdate(
       job,
       `status = 'cancelled',
@@ -876,6 +859,22 @@ async function preflightIrreversibleOp(
        lease_owner = NULL`,
       [],
     );
+    await query(
+      `UPDATE campaign_recipients
+          SET status = 'cancelled'
+        WHERE campaign_id = $1
+          AND status IN ('queued', 'processing', 'cancel_requested', 'outcome_pending')`,
+      [job.campaign_id],
+    );
+    await query(
+      `UPDATE messages
+          SET status = 'failed', error = COALESCE(error, 'Cancelled before SMTP submit')
+        WHERE campaign_id = $1
+          AND status = 'captured'
+          AND COALESCE(is_test, FALSE) = FALSE`,
+      [job.campaign_id],
+    );
+    await reconcileCampaignAfterCancel(job.campaign_id);
     return { ok: false, result: { done: true, advanced: 0, status: "cancelled" } };
   }
   if (job.live_mode && !liveSendAllowed()) {
@@ -911,83 +910,68 @@ async function preflightIrreversibleOp(
   return { ok: true };
 }
 
-async function pollContactImportOnce(
+async function completeSandboxLaunch(
   job: LaunchJobRow,
-  importId: string,
-  importRowId: string,
+  campaign: CampaignLaunchRow,
   options?: ProcessOptions,
-): Promise<
-  | { ok: true; counts: { failed?: number } }
-  | { ok: false; error: string }
-  | { pending: true }
-> {
-  const getter = options?.provider?.getResendContactImport ?? getResendContactImport;
-  await renewLaunchLease(job);
-  const remote = await getter(importId);
-  if (remote.status === "completed") {
-    if ((remote.counts?.failed ?? 0) > 0) {
-      return { ok: false, error: `Contact import completed with ${remote.counts.failed} failed rows.` };
-    }
-    return { ok: true, counts: remote.counts ?? {} };
-  }
-  if (remote.status === "failed") {
-    return { ok: false, error: "Provider contact import failed." };
-  }
+): Promise<{ done: boolean; advanced: number; status: string }> {
+  await fenceUpdate(job, `status = 'completed', terminal_reason = 'sandbox_completed', lease_expires_at = NOW()`, []);
   await query(
-    `UPDATE launch_job_imports
-        SET status = 'in_progress', updated_at = NOW()
+    `UPDATE campaigns
+        SET status = 'completed',
+            completed_at = COALESCE(completed_at, NOW()),
+            provider_status = 'sandbox_completed',
+            updated_at = NOW()
       WHERE id = $1`,
-    [importRowId],
+    [campaign.id],
   );
-  await renewLaunchLease(job);
-  return { pending: true };
+  await query(
+    `UPDATE campaign_recipients
+        SET status = 'sent', sent_at = COALESCE(sent_at, NOW())
+      WHERE campaign_id = $1 AND status IN ('queued', 'processing')`,
+    [campaign.id],
+  );
+  await query(
+    `UPDATE messages
+        SET status = 'submitted'
+      WHERE campaign_id = $1
+        AND status = 'captured'
+        AND COALESCE(is_test, FALSE) = FALSE`,
+    [campaign.id],
+  );
+  await consumeDailyReservationsForCampaign(campaign.id);
+  if (options?.afterCompleted) await options.afterCompleted();
+  return { done: true, advanced: 0, status: "completed" };
 }
 
-async function allImportsReady(
-  jobId: string,
-): Promise<{ ok: true } | { ok: false; error: string }> {
-  const imports = await query<{ status: string; counts_json: { failed?: number } | null; last_error: string | null }>(
-    `SELECT status, counts_json, last_error FROM launch_job_imports WHERE launch_job_id = $1`,
-    [jobId],
-  );
-  if (!imports.rows.length) return { ok: true };
-  for (const row of imports.rows) {
-    if (row.status !== "completed") {
-      return { ok: false, error: `Import chunk not completed (status=${row.status}).` };
-    }
-    if ((row.counts_json?.failed ?? 0) > 0) {
-      return { ok: false, error: `Import chunk has ${row.counts_json?.failed} failed contacts.` };
-    }
-  }
-  return { ok: true };
-}
-
-async function syncChunkViaSequentialFallback(
+async function completeSmtpLaunch(
   job: LaunchJobRow,
-  segmentId: string,
-  recipients: Array<{ email: string; contact_id: string | null; first_name: string; last_name: string }>,
+  campaign: CampaignLaunchRow,
   options?: ProcessOptions,
-): Promise<void> {
-  for (const row of recipients) {
-    const contact = await (options?.provider?.upsertResendContact ?? upsertResendContact)({
-      email: row.email,
-      firstName: row.first_name,
-      lastName: row.last_name,
-    });
-    await (options?.provider?.addContactToSegment ?? addContactToSegment)(contact.id, segmentId);
-    if (row.contact_id) {
-      await query(`UPDATE contacts SET provider_contact_id = $1, updated_at = NOW() WHERE id = $2`, [
-        contact.id,
-        row.contact_id,
-      ]);
-    }
+): Promise<{ done: boolean; advanced: number; status: string }> {
+  await fenceUpdate(job, `status = 'completed', terminal_reason = 'smtp_sent', lease_expires_at = NOW()`, []);
+  await query(
+    `UPDATE campaigns
+        SET status = 'completed',
+            completed_at = COALESCE(completed_at, NOW()),
+            provider_status = 'smtp_completed',
+            submission_state = 'accepted',
+            cancellable = FALSE,
+            updated_at = NOW()
+      WHERE id = $1
+        AND status NOT IN ('cancel_requested', 'cancelled', 'paused', 'partially_sent')`,
+    [campaign.id],
+  );
+  if (job.reservation_batch_id) {
+    await consumeDailyReservationsForCampaign(campaign.id);
   }
+  if (options?.afterCompleted) await options.afterCompleted();
+  return { done: true, advanced: 0, status: "completed" };
 }
 
 /**
- * Process one bounded chunk for a launch job.
- * Uses Resend CSV import per chunk (tracked in launch_job_imports); fails closed on import errors
- * except a tiny sequential fallback when chunk_size <= 20.
+ * Process one bounded chunk: send up to chunk_size unsent messages via SMTP.
+ * Sandbox jobs complete without opening a socket.
  */
 export async function processLaunchJobChunk(
   job: LaunchJobRow,
@@ -998,13 +982,7 @@ export async function processLaunchJobChunk(
     return failJob(job, "Campaign missing", { releaseVolume: true });
   }
 
-  // Cancel intent is honoured before any chunk work. Jobs carrying cancel intent are
-  // claimable (they must be, or a cancel issued while `submitting` would leave the job
-  // unclaimable and therefore permanently non-terminal, blocking every future launch).
-  // Pre-submit cancel can be definite: the provider was never called. Post-submit
-  // cancel stays on the reconcile path so an unknown provider result is not stored
-  // as a confirmed stop.
-  if (job.cancel_requested_at && !isPostSubmit(job)) {
+  if (job.cancel_requested_at) {
     const cancelGuard = await preflightIrreversibleOp(job);
     if (!cancelGuard.ok) return cancelGuard.result;
   }
@@ -1013,617 +991,251 @@ export async function processLaunchJobChunk(
   const snapshot = (job.snapshot_json ?? null) as LaunchSnapshot | null;
   const footered = frozenLaunchContent(snapshot, campaign);
 
-  if (
-    job.status === "submission_unknown" ||
-    job.status === "reconciling" ||
-    job.status === "submitting" ||
-    job.status === "ready_to_submit"
-  ) {
-    return finalizeBroadcastSubmission(job, campaign, footered, live, options);
+  if (!job.live_mode) {
+    return completeSandboxLaunch(job, campaign, options);
   }
 
-  const recipients = await query<{
-    id: string;
-    email: string;
-    contact_id: string | null;
-    first_name: string;
-    last_name: string;
-  }>(
-    `SELECT cr.id, cr.email, cr.contact_id,
-            COALESCE(cr.first_name, '') AS first_name,
-            COALESCE(cr.last_name, '') AS last_name
-       FROM campaign_recipients cr
-      WHERE cr.campaign_id = $1
-      ORDER BY cr.id
-      OFFSET $2 LIMIT $3`,
-    [job.campaign_id, job.cursor_offset, job.chunk_size],
-  );
-
-  if (!recipients.rows.length || job.cursor_offset >= job.total_recipients) {
-    const imports = await allImportsReady(job.id);
-    if (!imports.ok) {
-      return failJob(job, imports.error, { manualReview: true });
-    }
-    return finalizeBroadcastSubmission(job, campaign, footered, live, options);
+  if (!live || !liveSendAllowed()) {
+    return failJob(job, "Live mode job cannot continue: live sending is disabled.", { manualReview: true });
   }
 
   const guard = await preflightIrreversibleOp(job);
   if (!guard.ok) return guard.result;
 
-  let segmentId = job.provider_segment_id || campaign.provider_segment_id;
-  if (!segmentId && live && job.live_mode) {
-    const createGuard = await preflightIrreversibleOp(job);
-    if (!createGuard.ok) return createGuard.result;
-    const segment = await (options?.provider?.createResendSegment ?? createResendSegment)(
-      `SendStack ${campaign.id}`,
+  if (!(await withinSmtpHourlyLimit())) {
+    await fenceUpdate(
+      job,
+      `status = 'pending',
+       last_error = $1,
+       next_retry_at = NOW() + INTERVAL '60 seconds',
+       lease_expires_at = NOW(),
+       lease_owner = NULL`,
+      ["Hourly SMTP delivery limit reached."],
     );
-    segmentId = segment.id;
-    const updated = await fenceUpdate(job, `provider_segment_id = $1`, [segmentId]);
-    if (!updated) return { done: false, advanced: 0, status: job.status };
-    await query(`UPDATE campaigns SET provider_segment_id = $1, updated_at = NOW() WHERE id = $2`, [
-      segmentId,
-      campaign.id,
-    ]);
+    return { done: false, advanced: 0, status: "pending" };
   }
 
-  const chunkIndex = Math.floor(job.cursor_offset / Math.max(1, job.chunk_size));
-  if (live && job.live_mode && segmentId) {
-    const existingImport = await query<{
-      id: string;
-      provider_import_id: string | null;
-      status: string;
-    }>(
-      `SELECT id, provider_import_id, status
-         FROM launch_job_imports
-        WHERE launch_job_id = $1 AND chunk_index = $2`,
-      [job.id, chunkIndex],
-    );
+  const pending = await query<{
+    id: string;
+    to_email: string;
+    subject: string;
+    from_email: string;
+    reply_to_email: string | null;
+    html_body: string;
+    text_body: string;
+    unsubscribe_token: string;
+    recipient_id: string | null;
+    first_name: string;
+    last_name: string;
+  }>(
+    `SELECT m.id, m.to_email, m.subject, m.from_email, m.reply_to_email,
+            m.html_body, m.text_body, m.unsubscribe_token, m.recipient_id,
+            COALESCE(cr.first_name, '') AS first_name,
+            COALESCE(cr.last_name, '') AS last_name
+       FROM messages m
+       LEFT JOIN campaign_recipients cr ON cr.id = m.recipient_id
+      WHERE m.campaign_id = $1
+        AND COALESCE(m.is_test, FALSE) = FALSE
+        AND m.status IN ('captured', 'failed')
+        AND (m.status = 'captured' OR (m.status = 'failed' AND m.provider_id IS NULL))
+      ORDER BY m.created_at ASC
+      LIMIT $2`,
+    [job.campaign_id, job.chunk_size],
+  );
 
-    let importRow = existingImport.rows[0];
-    if (!importRow) {
-      const importRecordId = makeId("lji");
-      await query(
-        `INSERT INTO launch_job_imports
-           (id, launch_job_id, chunk_index, status, created_at, updated_at)
-         VALUES ($1, $2, $3, 'pending', NOW(), NOW())
-         ON CONFLICT (launch_job_id, chunk_index) DO NOTHING`,
-        [importRecordId, job.id, chunkIndex],
+  if (!pending.rows.length) {
+    const remaining = await query<{ count: string }>(
+      `SELECT COUNT(*)::int AS count FROM messages
+        WHERE campaign_id = $1
+          AND COALESCE(is_test, FALSE) = FALSE
+          AND status IN ('captured', 'failed')
+          AND (status = 'captured' OR (status = 'failed' AND provider_id IS NULL))`,
+      [job.campaign_id],
+    );
+    if (Number(remaining.rows[0]?.count ?? 0) > 0) {
+      return { done: false, advanced: 0, status: "running" };
+    }
+    return completeSmtpLaunch(job, campaign, options);
+  }
+
+  const attachments = await loadCampaignAttachments(campaign.id);
+  const sendFn = options?.sendEmail ?? sendSmtpEmail;
+  const fromName = snapshot?.from_name ?? campaign.from_name;
+  const replyTo = snapshot?.reply_to_email || campaign.reply_to_email || undefined;
+  let advanced = 0;
+
+  for (const row of pending.rows) {
+    const opGuard = await preflightIrreversibleOp(job);
+    if (!opGuard.ok) return { ...opGuard.result, advanced };
+
+    if (!(await withinSmtpHourlyLimit())) {
+      await fenceUpdate(
+        job,
+        `status = 'pending',
+         last_error = $1,
+         next_retry_at = NOW() + INTERVAL '60 seconds',
+         lease_expires_at = NOW(),
+         lease_owner = NULL`,
+        ["Hourly SMTP delivery limit reached."],
       );
-      const reloaded = await query<{ id: string; provider_import_id: string | null; status: string }>(
-        `SELECT id, provider_import_id, status FROM launch_job_imports
-          WHERE launch_job_id = $1 AND chunk_index = $2`,
-        [job.id, chunkIndex],
-      );
-      importRow = reloaded.rows[0];
+      return { done: false, advanced, status: "pending" };
     }
 
-    if (importRow && importRow.status !== "completed") {
-      let providerImportId = importRow.provider_import_id;
-      if (!providerImportId) {
-        const csv = [
-          "email,first_name,last_name",
-          ...recipients.rows.map((row) =>
-            [row.email, JSON.stringify(row.first_name), JSON.stringify(row.last_name)].join(","),
-          ),
-        ].join("\n");
-        try {
-          const importGuard = await preflightIrreversibleOp(job);
-          if (!importGuard.ok) return importGuard.result;
-          const audienceGuard = await enforcePreparedAudience(job);
-          if (!audienceGuard.ok) return audienceGuard.result;
-          const imported = await (options?.provider?.importResendContactsCsv ?? importResendContactsCsv)({
-            csv,
-            segmentId,
-          });
-          providerImportId = imported.id;
-          await query(
-            `UPDATE launch_job_imports
-                SET provider_import_id = $1, status = 'queued', updated_at = NOW()
-              WHERE id = $2`,
-            [providerImportId, importRow.id],
-          );
-          // Observability only: never overwrite a prior provider_import_id with a later chunk.
-          await fenceUpdate(
-            job,
-            `provider_import_id = COALESCE(provider_import_id, $1)`,
-            [providerImportId],
-          );
-        } catch (error) {
-          const message = error instanceof Error ? error.message : "Contact import failed";
-          const allowFallback =
-            job.chunk_size <= SEQUENTIAL_FALLBACK_MAX_CHUNK && live && job.live_mode;
-          if (!allowFallback) {
-            await query(
-              `UPDATE launch_job_imports
-                  SET status = 'failed', last_error = $1, updated_at = NOW()
-                WHERE id = $2`,
-              [message.slice(0, 500), importRow.id],
-            );
-            return failJob(
-              job,
-              `Contact import API failed for chunk ${chunkIndex}: ${message}`,
-              { manualReview: true },
-            );
-          }
-          await syncChunkViaSequentialFallback(job, segmentId, recipients.rows, options);
-          await query(
-            `UPDATE launch_job_imports
-                SET status = 'completed',
-                    counts_json = $1::jsonb,
-                    last_error = $2,
-                    updated_at = NOW()
-              WHERE id = $3`,
-            [
-              JSON.stringify({ total: recipients.rows.length, failed: 0, fallback: "sequential" }),
-              `Import API failed; used sequential fallback: ${message}`.slice(0, 500),
-              importRow.id,
-            ],
-          );
-          providerImportId = null;
-        }
-      }
+    const unsubscribeUrl = `${config.publicUrl}/u/${row.unsubscribe_token}`;
+    const mergeValues = {
+      first_name: row.first_name,
+      last_name: row.last_name,
+      email: row.to_email,
+      unsubscribe_url: unsubscribeUrl,
+    };
+    const htmlBody = renderTemplate(footered.html || row.html_body, mergeValues);
+    const textBody = renderTemplate(footered.text || row.text_body, mergeValues);
+    const subject = renderTemplate(snapshot?.subject ?? row.subject, mergeValues);
 
-      if (providerImportId) {
-        const polled = await pollContactImportOnce(job, providerImportId, importRow.id, options);
-        if ("pending" in polled && polled.pending) {
-          return { done: false, advanced: 0, status: "running" };
+    await query(
+      `UPDATE messages
+          SET html_body = $1, text_body = $2, subject = $3, diagnostic_json = $4
+        WHERE id = $5 AND status IN ('captured', 'failed')`,
+      [
+        htmlBody,
+        textBody,
+        subject,
+        JSON.stringify({ intent: "smtp", list_unsubscribe: unsubscribeUrl }),
+        row.id,
+      ],
+    );
+
+    let providerAttempted = false;
+    try {
+      await withSubmitBarrier(async () => {
+        if (options?.beforeSubmitBarrier) await options.beforeSubmitBarrier();
+        if (emergencyStopEnabled()) {
+          throw new Error("SENDSTACK_EMERGENCY_STOP is enabled.");
         }
-        if ("ok" in polled && !polled.ok) {
+        if (!liveSendAllowed()) {
+          throw new Error("Live sending is disabled.");
+        }
+        const suppressed = await query<{ email: string }>(
+          `SELECT email FROM suppressions WHERE email = $1 LIMIT 1`,
+          [row.to_email.toLowerCase()],
+        );
+        if (suppressed.rows[0]) {
           await query(
-            `UPDATE launch_job_imports
-                SET status = 'failed', last_error = $1, updated_at = NOW()
-              WHERE id = $2`,
-            [polled.error.slice(0, 500), importRow.id],
+            `UPDATE messages SET status = 'suppressed', error = $1 WHERE id = $2`,
+            ["Late suppression before SMTP submit", row.id],
           );
-          return failJob(job, polled.error, { manualReview: true });
+          if (row.recipient_id) {
+            await query(`UPDATE campaign_recipients SET status = 'suppressed' WHERE id = $1`, [
+              row.recipient_id,
+            ]);
+          }
+          return;
         }
-        if (!("ok" in polled) || !polled.ok) {
-          return { done: false, advanced: 0, status: "running" };
-        }
+        providerAttempted = true;
+        await fenceUpdate(job, `status = 'running'`, []);
+        const accepted = await sendFn({
+          to: row.to_email,
+          subject,
+          html: htmlBody,
+          text: textBody,
+          fromName,
+          fromEmail: snapshot?.from_email || row.from_email,
+          replyTo,
+          unsubscribeUrl,
+          attachments,
+          messageId: row.id,
+        });
+        if (options?.afterProviderAccepted) await options.afterProviderAccepted();
         await query(
-          `UPDATE launch_job_imports
-              SET status = 'completed', counts_json = $1::jsonb, updated_at = NOW()
+          `UPDATE messages
+              SET status = 'submitted',
+                  provider_id = $1,
+                  error = NULL,
+                  diagnostic_json = $2
+            WHERE id = $3`,
+          [
+            accepted.id,
+            JSON.stringify({ provider_id: accepted.id, list_unsubscribe: unsubscribeUrl }),
+            row.id,
+          ],
+        );
+        if (row.recipient_id) {
+          await query(
+            `UPDATE campaign_recipients
+                SET status = 'sent', sent_at = COALESCE(sent_at, NOW()), error = NULL
+              WHERE id = $1`,
+            [row.recipient_id],
+          );
+        }
+      });
+      advanced += 1;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "SMTP delivery failed";
+      if (!providerAttempted) {
+        // Leave captured so a later tick retries (gates, suppressions, transient setup errors).
+        await query(
+          `UPDATE messages SET error = $1 WHERE id = $2 AND status IN ('captured', 'failed')`,
+          [message.slice(0, 500), row.id],
+        );
+        break;
+      }
+      if (smtpAcceptanceAmbiguous(error)) {
+        await query(
+          `UPDATE messages
+              SET status = 'submission_unknown', error = $1
             WHERE id = $2`,
-          [JSON.stringify(polled.counts), importRow.id],
+          [message.slice(0, 500), row.id],
+        );
+        if (row.recipient_id) {
+          await query(
+            `UPDATE campaign_recipients SET status = 'submission_unknown', error = $1 WHERE id = $2`,
+            [message.slice(0, 500), row.recipient_id],
+          );
+        }
+        advanced += 1;
+        continue;
+      }
+      // Definite rejection before acceptance: failed and retryable on a later tick.
+      await query(
+        `UPDATE messages SET status = 'failed', error = $1 WHERE id = $2`,
+        [message.slice(0, 500), row.id],
+      );
+      if (row.recipient_id) {
+        await query(
+          `UPDATE campaign_recipients SET status = 'failed', error = $1 WHERE id = $2`,
+          [message.slice(0, 500), row.recipient_id],
         );
       }
+      advanced += 1;
     }
   }
 
-  const advanced = recipients.rows.length;
   const nextOffset = job.cursor_offset + advanced;
-  // attempt_count is incremented on every lease claim, and a healthy multi-chunk
-  // launch needs many claims (each import poll costs one). Resetting it whenever the
-  // cursor genuinely advances keeps max_attempts a failure budget rather than a cap
-  // on how long a progressing campaign may take.
-  const advancedOk = await fenceUpdate(
+  await fenceUpdate(
     job,
     `cursor_offset = $1,
      attempt_count = 0,
+     status = 'running',
      lease_expires_at = NOW() + ($2 || ' seconds')::interval`,
     [nextOffset, String(LAUNCH_LEASE_SECONDS)],
   );
-  if (!advancedOk) return { done: false, advanced: 0, status: job.status };
 
-  if (nextOffset >= job.total_recipients) {
-    const imports = await allImportsReady(job.id);
-    if (!imports.ok) {
-      return failJob(job, imports.error, { manualReview: true });
-    }
-    return finalizeBroadcastSubmission(
-      { ...job, cursor_offset: nextOffset, provider_segment_id: segmentId ?? job.provider_segment_id },
+  const remaining = await query<{ count: string }>(
+    `SELECT COUNT(*)::int AS count FROM messages
+      WHERE campaign_id = $1
+        AND COALESCE(is_test, FALSE) = FALSE
+        AND status IN ('captured', 'failed')
+        AND (status = 'captured' OR (status = 'failed' AND provider_id IS NULL))`,
+    [job.campaign_id],
+  );
+  if (Number(remaining.rows[0]?.count ?? 0) === 0) {
+    return completeSmtpLaunch(
+      { ...job, cursor_offset: nextOffset },
       campaign,
-      footered,
-      live,
       options,
     );
   }
   return { done: false, advanced, status: "running" };
-}
-
-async function cancellationInProgress(jobId: string, campaignId: string): Promise<boolean> {
-  const row = await query<{ cancel_requested_at: string | null; campaign_status: string }>(
-    `SELECT j.cancel_requested_at, c.status AS campaign_status
-       FROM launch_jobs j
-       JOIN campaigns c ON c.id = j.campaign_id
-      WHERE j.id = $1 AND c.id = $2`,
-    [jobId, campaignId],
-  );
-  const status = row.rows[0]?.campaign_status;
-  return (
-    Boolean(row.rows[0]?.cancel_requested_at) ||
-    status === "cancel_requested" ||
-    status === "cancelled" ||
-    status === "paused"
-  );
-}
-
-async function finalizeBroadcastSubmission(
-  job: LaunchJobRow,
-  campaign: CampaignLaunchRow,
-  footered: { html: string; text: string },
-  live: boolean,
-  options?: ProcessOptions,
-): Promise<{ done: boolean; advanced: number; status: string }> {
-  // Sandbox completion only when the job was never live.
-  if (!job.live_mode) {
-    if (live && liveSendAllowed()) {
-      // Defensive: non-live job should not flip to live mid-flight.
-    }
-    await fenceUpdate(job, `status = 'completed', terminal_reason = 'sandbox_completed', lease_expires_at = NOW()`, []);
-    await query(
-      `UPDATE campaigns
-          SET status = 'completed',
-              completed_at = COALESCE(completed_at, NOW()),
-              provider_status = 'sandbox_completed',
-              updated_at = NOW()
-        WHERE id = $1`,
-      [campaign.id],
-    );
-    await query(
-      `UPDATE campaign_recipients
-          SET status = 'sent', sent_at = COALESCE(sent_at, NOW())
-        WHERE campaign_id = $1 AND status IN ('queued', 'processing')`,
-      [campaign.id],
-    );
-    await consumeDailyReservationsForCampaign(campaign.id);
-    return { done: true, advanced: 0, status: "completed" };
-  }
-
-  if (!live || !liveSendAllowed()) {
-    return failJob(
-      job,
-      "Live mode job cannot finalize: live sending is disabled.",
-      { manualReview: true },
-    );
-  }
-
-  const identity = loadSendingIdentity();
-  const snapshot = (job.snapshot_json ?? null) as LaunchSnapshot | null;
-  // Pinned at entry: reloads below refresh provider ids and status but must never
-  // refresh the lease identity, or the fence stops excluding a stale worker.
-  const fence = leaseFenceOf(job);
-  // Prefer fresh DB values after long import/chunk work — avoid stale in-memory ids.
-  const reloaded = await loadJobById(job.id);
-  let workingJob = reloaded ? withFence(reloaded, fence) : job;
-  let broadcastId =
-    (await loadFreshProviderBroadcastId(workingJob.id, campaign.id)) ||
-    workingJob.provider_broadcast_id ||
-    campaign.provider_broadcast_id;
-  const segmentId = workingJob.provider_segment_id || campaign.provider_segment_id;
-  if (!segmentId) {
-    return failJob(workingJob, "Missing segment id", { releaseVolume: !broadcastId });
-  }
-
-  const getBroadcast = options?.provider?.getResendBroadcast ?? getResendBroadcast;
-  const createDraft = options?.provider?.createResendBroadcastDraft ?? createResendBroadcastDraft;
-  const sendBroadcast = options?.provider?.sendResendBroadcast ?? sendResendBroadcast;
-
-  if (!broadcastId) {
-    const createGuard = await preflightIrreversibleOp(workingJob);
-    if (!createGuard.ok) return createGuard.result;
-    const draft = await createDraft({
-      segmentId,
-      fromName: snapshot?.from_name ?? campaign.from_name,
-      fromEmail: snapshot?.from_email || identity.fromEmail || campaign.from_email,
-      replyTo: snapshot?.reply_to_email || identity.replyToEmail || undefined,
-      subject: snapshot?.subject ?? campaign.subject,
-      html: toResendBroadcastHtml(footered.html),
-      text: toResendBroadcastText(footered.text),
-      name: `campaign:${campaign.id}`,
-    });
-    broadcastId = draft.id;
-    // Persist BEFORE send — critical for ambiguous submission recovery.
-    const persisted = await fenceUpdate(workingJob, `provider_broadcast_id = $1`, [broadcastId]);
-    if (!persisted) return { done: false, advanced: 0, status: workingJob.status };
-    await query(
-      `UPDATE campaigns
-          SET provider_broadcast_id = $1, provider_status = 'draft', cancellable = TRUE, updated_at = NOW()
-        WHERE id = $2`,
-      [broadcastId, campaign.id],
-    );
-  }
-
-  if (
-    workingJob.status === "submission_unknown" ||
-    workingJob.status === "reconciling" ||
-    workingJob.status === "submitting"
-  ) {
-    try {
-      const remote = await getBroadcast(broadcastId);
-      if (
-        remote.status === "queued" ||
-        remote.status === "sending" ||
-        remote.status === "sent" ||
-        remote.status === "scheduled"
-      ) {
-        const accepted = await fenceUpdate(
-          workingJob,
-          `status = 'completed', terminal_reason = 'provider_accepted', lease_expires_at = NOW()`,
-          [],
-        );
-        if (!accepted) {
-          // Stale lease. Do not touch the campaign, recipients, or volume.
-          return { done: false, advanced: 0, status: workingJob.status };
-        }
-        if (await cancellationInProgress(workingJob.id, campaign.id)) {
-          // Provider accepted, but cancellation is already recorded. Leave the
-          // campaign status untouched so reconciliation cannot revive a send.
-          return { done: true, advanced: 0, status: "completed" };
-        }
-        await query(
-          `UPDATE campaigns
-              SET status = CASE
-                    WHEN status IN ('cancel_requested', 'cancelled', 'paused') THEN status
-                    ELSE 'sending'
-                  END,
-                  provider_status = $1,
-                  cancellable = TRUE,
-                  submission_state = 'accepted',
-                  updated_at = NOW()
-            WHERE id = $2`,
-          [remote.status, campaign.id],
-        );
-        await query(
-          `UPDATE campaign_recipients SET status = 'processing' WHERE campaign_id = $1 AND status = 'queued'`,
-          [campaign.id],
-        );
-        if (workingJob.reservation_batch_id) {
-          await consumeDailyReservationsForCampaign(campaign.id);
-        }
-        return { done: true, advanced: 0, status: "completed" };
-      }
-      if (remote.status === "draft") {
-        // Reaching here means `submitting` was committed before a provider send, so a
-        // send may have been accepted and simply not reflected yet (processing lag or a
-        // stale read). Resend honours Idempotency-Key only on POST /emails and
-        // /emails/batch — never on POST /broadcasts/{id}/send — so re-sending could
-        // deliver the campaign to the entire audience twice. Escalate instead of guessing.
-        await fenceUpdate(
-          workingJob,
-          `status = 'manual_review',
-           terminal_reason = 'submit_attempted_provider_reports_draft',
-           last_error = $1,
-           lease_expires_at = NOW(),
-           lease_owner = NULL`,
-          [
-            "A broadcast send was already attempted but the provider still reports draft. " +
-              "Confirm in the Resend dashboard whether the broadcast was sent before resuming.",
-          ],
-        );
-        await ensureDeliveryHealthBlock({
-          kind: "manual_review",
-          detail:
-            "Broadcast send was attempted but the provider still reports draft; manual confirmation required before any resend.",
-          relatedEntityType: "launch_job",
-          relatedEntityId: workingJob.id,
-        }).catch(() => undefined);
-        return { done: true, advanced: 0, status: "manual_review" };
-      } else if (remote.status === "canceled" || remote.status === "cancelled") {
-        const confirmed = await fenceUpdate(
-          workingJob,
-          `status = 'cancelled',
-           terminal_reason = 'provider_confirmed_cancel',
-           lease_expires_at = NOW(),
-           lease_owner = NULL`,
-          [],
-        );
-        if (confirmed) {
-          await query(
-            `UPDATE campaigns
-                SET provider_status = 'cancelled',
-                    updated_at = NOW()
-              WHERE id = $1
-                AND status IN ('sending', 'cancel_requested', 'submission_unknown', 'reconciling')`,
-            [campaign.id],
-          );
-        }
-        return { done: true, advanced: 0, status: "cancelled" };
-      } else if (remote.status === "failed") {
-        return failJob(workingJob, `Provider broadcast status: ${remote.status}`);
-      } else {
-        await fenceUpdate(
-          workingJob,
-          `status = 'reconciling',
-           last_error = $1,
-           lease_expires_at = NOW()`,
-          [`Unknown provider broadcast status: ${remote.status}`],
-        );
-        return { done: false, advanced: 0, status: "reconciling" };
-      }
-    } catch (error) {
-      // Do not overwrite submission_unknown to failed on timeout / transient errors.
-      await fenceUpdate(
-        workingJob,
-        `status = 'submission_unknown',
-         last_error = $1,
-         lease_expires_at = NOW()`,
-        [error instanceof Error ? error.message : "Broadcast reconcile failed"],
-      );
-      await ensureDeliveryHealthBlock({
-        kind: "submission_unknown",
-        detail: error instanceof Error ? error.message : "Broadcast reconcile failed",
-        relatedEntityType: "launch_job",
-        relatedEntityId: workingJob.id,
-      }).catch(() => undefined);
-      return { done: false, advanced: 0, status: "submission_unknown" };
-    }
-  }
-
-  const sendGuard = await preflightIrreversibleOp(workingJob);
-  if (!sendGuard.ok) return sendGuard.result;
-  const audienceGuard = await enforcePreparedAudience(workingJob);
-  if (!audienceGuard.ok) return audienceGuard.result;
-
-  // Reload again immediately before send CAS — broadcast id / cancel may have changed.
-  const preSend = await loadJobById(workingJob.id);
-  workingJob = preSend ? withFence(preSend, fence) : workingJob;
-  broadcastId =
-    (await loadFreshProviderBroadcastId(workingJob.id, campaign.id)) || broadcastId;
-  if (!broadcastId) {
-    return failJob(workingJob, "Missing broadcast id before send", { releaseVolume: true });
-  }
-  if (workingJob.cancel_requested_at) {
-    return { done: true, advanced: 0, status: "cancelled" };
-  }
-
-  // A submit attempt is recorded by committing `submitting` before the provider call,
-  // so any of these statuses means a send may already have reached Resend. Resend does
-  // not honour Idempotency-Key on POST /broadcasts/{id}/send, so re-entering the submit
-  // path here would risk a second delivery to the whole audience. Recovery from these
-  // states goes only through the reconcile branch above.
-  if (
-    workingJob.status === "submitting" ||
-    workingJob.status === "submission_unknown" ||
-    workingJob.status === "reconciling"
-  ) {
-    return { done: false, advanced: 0, status: workingJob.status };
-  }
-
-  if (workingJob.status === "pending" || workingJob.status === "running") {
-    const ready = await fenceUpdate(workingJob, `status = 'ready_to_submit'`, []);
-    if (!ready) return { done: false, advanced: 0, status: workingJob.status };
-    workingJob = { ...workingJob, status: "ready_to_submit" };
-  }
-
-  if (!workingJob.lease_owner) {
-    return { done: false, advanced: 0, status: workingJob.status };
-  }
-
-  if (options?.beforeSubmitBarrier) await options.beforeSubmitBarrier();
-
-  try {
-    const guardedSend = await withSubmitBarrier(async () => {
-      const inside = await preflightIrreversibleOp(workingJob);
-      if (!inside.ok) return { sent: false as const, result: inside.result };
-      try {
-        await assertDeliveryHealthAllowsSubmit({
-          requireThresholds: true,
-          jobId: workingJob.id,
-          campaignId: campaign.id,
-        });
-      } catch (error) {
-        await fenceUpdate(
-          workingJob,
-          `status = 'pending',
-           last_error = $1,
-           next_retry_at = NOW() + INTERVAL '60 seconds',
-           lease_expires_at = NOW(),
-           lease_owner = NULL`,
-          [error instanceof Error ? error.message : "Delivery health gate blocked submission."],
-        );
-        return {
-          sent: false as const,
-          result: { done: true, advanced: 0, status: "paused_health_block" },
-        };
-      }
-      const late = await enforcePreparedAudience(workingJob);
-      if (!late.ok) return { sent: false as const, result: late.result };
-
-      const cas = await query<LaunchJobRow>(
-        `UPDATE launch_jobs
-            SET status = 'submitting',
-                submit_attempted_at = COALESCE(submit_attempted_at, NOW()),
-                updated_at = NOW()
-          WHERE id = $1
-            AND lease_owner = $2
-            AND lease_generation = $3
-            AND status IN ('ready_to_submit', 'running')
-            AND submit_attempted_at IS NULL
-            AND cancel_requested_at IS NULL
-          RETURNING *`,
-        [workingJob.id, workingJob.lease_owner, workingJob.lease_generation],
-      );
-      if (!cas.rows[0]) {
-        return {
-          sent: false as const,
-          result: { done: true, advanced: 0, status: "cancelled" },
-        };
-      }
-      workingJob = cas.rows[0];
-      const sendKey = buildIdempotencyKey(["broadcast-send", campaign.id, broadcastId]);
-      await sendBroadcast(broadcastId, sendKey);
-      return { sent: true as const };
-    });
-    if (!guardedSend.sent) return guardedSend.result;
-    if (options?.afterProviderAccepted) await options.afterProviderAccepted();
-  } catch (error) {
-    // Ambiguous: do not release volume; keep reserved until reconcile confirms.
-    await fenceUpdate(
-      workingJob,
-      `status = 'submission_unknown',
-       last_error = $1`,
-      [error instanceof Error ? error.message : "Ambiguous broadcast submission"],
-    );
-    await query(
-      `UPDATE campaigns
-          SET status = 'submission_unknown',
-              provider_status = 'submission_unknown',
-              submission_state = 'unknown',
-              cancellable = TRUE,
-              updated_at = NOW()
-        WHERE id = $1`,
-      [campaign.id],
-    );
-    await query(
-      `UPDATE campaign_recipients
-          SET status = 'submission_unknown'
-        WHERE campaign_id = $1 AND status IN ('queued', 'processing')`,
-      [campaign.id],
-    );
-    await ensureDeliveryHealthBlock({
-      kind: "submission_unknown",
-      detail: error instanceof Error ? error.message : "Ambiguous broadcast submission",
-      relatedEntityType: "launch_job",
-      relatedEntityId: workingJob.id,
-    }).catch(() => undefined);
-    return { done: false, advanced: 0, status: "submission_unknown" };
-  }
-
-  if (await cancellationInProgress(workingJob.id, campaign.id)) {
-    // The provider accepted, then a cancel landed. Do not rewrite the campaign
-    // back to sending, and do not claim the send was stopped.
-    await fenceUpdate(
-      workingJob,
-      `status = 'submission_unknown', last_error = $1`,
-      ["Cancellation was recorded after provider acceptance."],
-    );
-    return { done: false, advanced: 0, status: "submission_unknown" };
-  }
-
-  const completed = await fenceUpdate(
-    workingJob,
-    `status = 'completed', terminal_reason = 'broadcast_sent', lease_expires_at = NOW()`,
-    [],
-  );
-  if (!completed) {
-    // Lease lost after provider acceptance — do not overwrite a newer cancellation.
-    // Leave honest uncertain state; another tick/reconcile can confirm.
-    return { done: false, advanced: 0, status: "submission_unknown" };
-  }
-  if (options?.afterCompleted) await options.afterCompleted();
-  await query(
-    `UPDATE campaigns
-        SET status = CASE
-              WHEN status IN ('cancel_requested', 'cancelled', 'paused') THEN status
-              ELSE 'sending'
-            END,
-            provider_status = 'queued',
-            submission_state = 'accepted',
-            cancellable = TRUE,
-            launch_lock_token = NULL,
-            updated_at = NOW()
-      WHERE id = $1`,
-    [campaign.id],
-  );
-  await query(
-    `UPDATE campaign_recipients SET status = 'processing' WHERE campaign_id = $1 AND status = 'queued'`,
-    [campaign.id],
-  );
-  if (workingJob.reservation_batch_id) {
-    await consumeDailyReservationsForCampaign(campaign.id);
-  }
-  return { done: true, advanced: 0, status: "completed" };
 }
 
 export async function requestLaunchCancel(campaignId: string): Promise<{
@@ -1634,27 +1246,25 @@ export async function requestLaunchCancel(campaignId: string): Promise<{
   const campaign = await query<{
     id: string;
     status: string;
-    provider_broadcast_id: string | null;
     cancellable: boolean;
-  }>(`SELECT id, status, provider_broadcast_id, cancellable FROM campaigns WHERE id = $1`, [campaignId]);
+  }>(`SELECT id, status, cancellable FROM campaigns WHERE id = $1`, [campaignId]);
   const row = campaign.rows[0];
   if (!row) throw new Error("Campaign not found.");
 
-  const activeJobs = await query<{ id: string; status: string; provider_broadcast_id: string | null }>(
-    `SELECT id, status, provider_broadcast_id FROM launch_jobs
+  const activeJobs = await query<{ id: string; status: string }>(
+    `SELECT id, status FROM launch_jobs
       WHERE campaign_id = $1
         AND status IN ('pending', 'running', 'ready_to_submit', 'submitting', 'reconciling', 'submission_unknown')`,
     [campaignId],
   );
-  const submittingBegun = activeJobs.rows.some(
-    (job) => job.status === "submitting" || job.status === "submission_unknown",
+  const acceptedCount = await query<{ count: string }>(
+    `SELECT COUNT(*)::int AS count FROM messages
+      WHERE campaign_id = $1
+        AND status IN ('submitted', 'submission_unknown', 'delivered')
+        AND COALESCE(is_test, FALSE) = FALSE`,
+    [campaignId],
   );
-  const freshBroadcastId =
-    activeJobs.rows.find((job) => job.provider_broadcast_id)?.provider_broadcast_id ||
-    row.provider_broadcast_id;
-  // Draft broadcast ids alone are not "accepted"; only submitting / ambiguous submit is uncertain.
-  const broadcastAcceptedOrSubmitting =
-    submittingBegun || row.status === "submission_unknown";
+  const submittingBegun = Number(acceptedCount.rows[0]?.count ?? 0) > 0;
 
   const pool = getPool();
   const client = await pool.connect();
@@ -1668,7 +1278,6 @@ export async function requestLaunchCancel(campaignId: string): Promise<{
         WHERE id = $1`,
       [campaignId],
     );
-    // Pre-submit active jobs can be cancelled outright.
     await client.query(
       `UPDATE launch_jobs
           SET status = 'cancelled',
@@ -1682,30 +1291,31 @@ export async function requestLaunchCancel(campaignId: string): Promise<{
           AND status IN ('pending', 'running', 'ready_to_submit')`,
       [campaignId],
     );
-    // Already submitting: record cancel intent without claiming the send was stopped.
     await client.query(
       `UPDATE launch_jobs
           SET cancel_requested_at = COALESCE(cancel_requested_at, NOW()),
               updated_at = NOW()
         WHERE campaign_id = $1
-          AND status IN ('submitting', 'submission_unknown', 'reconciling')`,
+          AND status IN ('submitting', 'submission_unknown', 'reconciling', 'running')`,
       [campaignId],
     );
-    if (broadcastAcceptedOrSubmitting) {
-      await client.query(
-        `UPDATE campaign_recipients
-            SET status = 'outcome_pending'
-          WHERE campaign_id = $1 AND status IN ('queued', 'processing', 'submission_unknown', 'cancel_requested')`,
-        [campaignId],
-      );
-    } else {
-      await client.query(
-        `UPDATE campaign_recipients
-            SET status = 'cancel_requested'
-          WHERE campaign_id = $1 AND status IN ('queued', 'processing', 'submission_unknown')`,
-        [campaignId],
-      );
-    }
+    // Stop unsent recipients. Messages already submitted via SMTP cannot be recalled.
+    await client.query(
+      `UPDATE campaign_recipients
+          SET status = 'cancelled'
+        WHERE campaign_id = $1
+          AND status IN ('queued', 'processing', 'cancel_requested', 'outcome_pending', 'failed')`,
+      [campaignId],
+    );
+    await client.query(
+      `UPDATE messages
+          SET status = 'failed', error = COALESCE(error, 'Cancelled before SMTP submit')
+        WHERE campaign_id = $1
+          AND status IN ('captured', 'failed')
+          AND provider_id IS NULL
+          AND COALESCE(is_test, FALSE) = FALSE`,
+      [campaignId],
+    );
     await client.query("COMMIT");
   } catch (error) {
     await client.query("ROLLBACK").catch(() => undefined);
@@ -1714,58 +1324,28 @@ export async function requestLaunchCancel(campaignId: string): Promise<{
     client.release();
   }
 
-  // Prefer fresh broadcast id from launch_jobs after the cancel transaction.
-  const broadcastId =
-    (await loadFreshProviderBroadcastId(activeJobs.rows[0]?.id, campaignId)) || freshBroadcastId;
+  await reconcileCampaignAfterCancel(campaignId);
 
-  if (broadcastId && liveSendAllowed()) {
-    try {
-      await cancelResendBroadcast(broadcastId);
-      const remote = await getResendBroadcast(broadcastId);
-      if (remote.status !== "canceled" && remote.status !== "cancelled") {
-        return {
-          campaignStatus: "cancel_requested",
-          providerCancelled: null,
-          error: "Provider cancel was not confirmed. Recipient outcomes stay pending.",
-        };
-      }
-      // Confirmed provider cancel path: terminalize unsent outcome_pending / cancel_requested.
-      await query(
-        `UPDATE campaign_recipients
-            SET status = 'cancelled'
-          WHERE campaign_id = $1
-            AND status IN ('cancel_requested', 'outcome_pending')`,
-        [campaignId],
-      );
-      await reconcileCampaignAfterCancel(campaignId);
-      return { campaignStatus: "cancel_requested", providerCancelled: true };
-    } catch (error) {
-      await query(
-        `UPDATE campaigns
-            SET provider_status = 'cancel_failed', cancellable = FALSE, updated_at = NOW()
-          WHERE id = $1`,
-        [campaignId],
-      );
+  if (submittingBegun) {
+    const sent = await query<{ count: string }>(
+      `SELECT COUNT(*)::int AS count FROM messages
+        WHERE campaign_id = $1
+          AND status IN ('submitted', 'submission_unknown', 'delivered')
+          AND COALESCE(is_test, FALSE) = FALSE`,
+      [campaignId],
+    );
+    if (Number(sent.rows[0]?.count ?? 0) > 0) {
       return {
         campaignStatus: "cancel_requested",
-        providerCancelled: false,
-        error: error instanceof Error ? error.message : "Provider cancel failed",
+        providerCancelled: null,
+        error: "Cancel stops unsent recipients only. Messages Spacemail already accepted cannot be recalled.",
       };
     }
   }
 
-  if (broadcastAcceptedOrSubmitting) {
-    // Honest uncertain/pending: do not claim the send was stopped.
-    return {
-      campaignStatus: "cancel_requested",
-      providerCancelled: null,
-      error: broadcastId
-        ? "Cancel requested after submit began; provider cancel skipped (live send disabled)."
-        : "Cancel requested after submit began; provider outcome still pending.",
-    };
-  }
-
-  await query(`UPDATE campaigns SET status = 'paused', updated_at = NOW() WHERE id = $1`, [campaignId]);
+  await query(`UPDATE campaigns SET status = 'paused', updated_at = NOW() WHERE id = $1 AND status = 'cancel_requested'`, [
+    campaignId,
+  ]);
   return { campaignStatus: "paused", providerCancelled: null };
 }
 
@@ -1831,7 +1411,7 @@ export async function runLaunchWorkerTick(input: {
   workerId: string;
   timeBudgetMs?: number;
   maxChunks?: number;
-  provider?: Partial<ResendProvider>;
+  sendEmail?: SmtpSendFn;
   live?: boolean;
   afterProviderAccepted?: () => Promise<void>;
   afterCompleted?: () => Promise<void>;
@@ -1888,7 +1468,7 @@ export async function runLaunchWorkerTick(input: {
     await renewLaunchLease(current);
     try {
       const result = await processLaunchJobChunk(current, {
-        provider: input.provider,
+        sendEmail: input.sendEmail,
         live: input.live,
         afterProviderAccepted: input.afterProviderAccepted,
         afterCompleted: input.afterCompleted,
@@ -1919,26 +1499,13 @@ export async function runLaunchWorkerTick(input: {
       const message = error instanceof Error ? error.message : "Launch worker chunk failed";
       const fresh = await loadJobById(current.id);
       const row = fresh ? withFence(fresh, claimFence) : current;
-      if (isPostSubmit(row)) {
-        // A provider call may already have been accepted. Never return to pending.
-        if (!["completed", "manual_review", "cancelled"].includes(row.status)) {
-          await query(
-            `UPDATE launch_jobs
-                SET status = 'submission_unknown',
-                    last_error = $1,
-                    lease_expires_at = NOW(),
-                    updated_at = NOW()
-              WHERE id = $2
-                AND lease_owner = $3
-                AND lease_generation = $4
-                AND status IN ('submitting', 'submission_unknown', 'reconciling', 'running', 'ready_to_submit')`,
-            [message.slice(0, 500), row.id, row.lease_owner, row.lease_generation],
-          );
-        }
-        lastStatus = row.status === "completed" ? "completed" : "submission_unknown";
-      } else {
+      // Per-recipient SMTP: a chunk failure parks the job for retry. Individual
+      // messages already accepted stay submitted; unsent rows remain captured/failed.
+      if (!["completed", "manual_review", "cancelled"].includes(row.status)) {
         await scheduleRetry(row, message);
         lastStatus = "pending";
+      } else {
+        lastStatus = row.status;
       }
       done = false;
       break;
@@ -1963,7 +1530,7 @@ export async function runLaunchWorkerTick(input: {
 /** In-process helper for tests: run a job to completion with an optional fake provider. */
 export async function runLaunchJobToCompletion(
   jobId: string,
-  options?: { provider?: Partial<ResendProvider>; live?: boolean; maxChunks?: number },
+  options?: { sendEmail?: SmtpSendFn; live?: boolean; maxChunks?: number },
 ): Promise<string> {
   let status = "pending";
   const workerId = `test_${makeId("w")}`;

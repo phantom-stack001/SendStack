@@ -26,8 +26,6 @@ afterEach(() => {
 function setIdentityEnv() {
   process.env.SENDSTACK_FROM_EMAIL = "news@contoso.com";
   process.env.SENDSTACK_REPLY_TO_EMAIL = "hello@contoso.com";
-  process.env.SENDSTACK_COMPANY_NAME = "Contoso Ltd";
-  process.env.SENDSTACK_POSTAL_ADDRESS = "1 Contoso Way, Contoso City, CT1 1AA";
   process.env.SENDSTACK_ALLOWED_LINK_DOMAINS = "contoso.com,www.contoso.com";
   process.env.SENDSTACK_PUBLIC_URL = "https://app.contoso.com";
 }
@@ -66,7 +64,6 @@ describe("fail-closed link validation", () => {
     const allowed = ["contoso.com"];
     expect(validateCampaignLink("{{first_name}}", allowed).ok).toBe(false);
     expect(validateCampaignLink("{{unsubscribe_url}}", allowed).ok).toBe(true);
-    expect(validateCampaignLink("{{{RESEND_UNSUBSCRIBE_URL}}}", allowed).ok).toBe(true);
   });
 
   it("rejects unquoted and comment-only unsubscribe as not visible", () => {
@@ -80,110 +77,58 @@ describe("fail-closed link validation", () => {
   });
 });
 
-describe("compliance footer injection", () => {
-  it("injects company, postal, contact, and unsubscribe into html and text", () => {
+describe("compliance footer pass-through", () => {
+  it("returns authored html and text unchanged", () => {
     setIdentityEnv();
     const identity = loadSendingIdentity();
-    const result = applyComplianceFooter(
-      "<p>Hello {{first_name}}</p>",
-      "Hello {{first_name}}",
-      identity,
-    );
-    expect(result.html).toContain("Contoso Ltd");
-    expect(result.html).toContain("1 Contoso Way");
-    expect(result.html).toContain("hello@contoso.com");
-    expect(result.html).toContain('href="{{unsubscribe_url}}"');
-    expect(result.text).toContain("Contoso Ltd");
-    expect(result.text).toContain("Unsubscribe: {{unsubscribe_url}}");
-    expect(result.html).not.toMatch(/&lt;script/);
+    const html = '<p>Hello {{first_name}}</p><p><a href="{{unsubscribe_url}}">Unsubscribe</a></p>';
+    const text = "Hello {{first_name}}\nUnsubscribe: {{unsubscribe_url}}";
+    const result = applyComplianceFooter(html, text, identity);
+    expect(result.html).toBe(html);
+    expect(result.text).toBe(text);
+    expect(result.html).not.toContain("Contoso Ltd");
+    expect(result.html).not.toContain("1 Contoso Way");
   });
 
-  it("keeps Resend broadcast unsubscribe placeholder", () => {
+  it("does not inject unsubscribe tokens when the author omitted them", () => {
     setIdentityEnv();
     const result = applyComplianceFooter("<p>Hi</p>", "Hi", loadSendingIdentity(), { broadcast: true });
-    expect(result.html).toContain("{{{RESEND_UNSUBSCRIBE_URL}}}");
-    expect(result.text).toContain("{{{RESEND_UNSUBSCRIBE_URL}}}");
+    expect(result.html).toBe("<p>Hi</p>");
+    expect(result.text).toBe("Hi");
+    expect(result.html).not.toContain("{{unsubscribe_url}}");
   });
 
-  it("preserves author content that contains dashes and Unsubscribe lines", () => {
+  it("preserves author content including dashes and Unsubscribe lines", () => {
     setIdentityEnv();
-    const result = applyComplianceFooter(
-      "<p>Hi</p><p>Section --- still here</p>",
-      "Hi\n---\nOld Co\nUnsubscribe: read this line",
-      loadSendingIdentity(),
-    );
-    expect(result.html).toContain("Section --- still here");
-    expect(result.text).toContain("Unsubscribe: read this line");
-    expect(result.text).toContain("Contoso Ltd");
+    const html = "<p>Hi</p><p>Section --- still here</p>";
+    const text = "Hi\n---\nOld Co\nUnsubscribe: read this line";
+    const result = applyComplianceFooter(html, text, loadSendingIdentity());
+    expect(result.html).toBe(html);
+    expect(result.text).toBe(text);
     const again = applyComplianceFooter(result.html, result.text, loadSendingIdentity());
     expect(again.html).toBe(result.html);
     expect(again.text).toBe(result.text);
   });
 
-  it("sanitizes CSS that can conceal the compliance footer", () => {
+  it("does not strip author CSS", () => {
     setIdentityEnv();
     const identity = loadSendingIdentity();
     const hidden = applyComplianceFooter('<p style="display:none;color:#333">Hi</p>', "Hi", identity);
-    expect(hidden.html).not.toMatch(/display\s*:\s*none/i);
-    expect(hidden.html).toContain('style="color:#333"');
-    expect(hidden.html).toContain("Contoso Ltd");
-    expect(hidden.html).toContain(">Hi</p>");
-    for (const css of [
-      "visibility:hidden",
-      "opacity:0",
-      "font-size:0",
-      "color:transparent",
-    ]) {
-      const result = applyComplianceFooter(
-        `<style>.sendstack-compliance-footer{${css}}</style><p style="color:#333">Hi</p>`,
-        "Hi",
-        identity,
-      );
-      expect(result.html).not.toContain("<style");
-      expect(result.html).not.toMatch(new RegExp(css.replace(":", "\\s*:\\s*"), "i"));
-      expect(result.html).toContain('style="color:#333"');
-      expect(result.html).toContain("Contoso Ltd");
-    }
-    const stripped = applyComplianceFooter("<style>p{color:#333}</style><p>Hi</p>", "Hi", identity);
-    expect(stripped.html).not.toContain("<style");
-    expect(stripped.html).toContain("Contoso Ltd");
-    expect(stripped.html).toContain("<p>Hi</p>");
+    expect(hidden.html).toBe('<p style="display:none;color:#333">Hi</p>');
+    const styled = applyComplianceFooter("<style>p{color:#333}</style><p>Hi</p>", "Hi", identity);
+    expect(styled.html).toContain("<style");
+    expect(styled.html).toBe("<style>p{color:#333}</style><p>Hi</p>");
   });
 
-  it("strips concealment added after the footer was already applied", () => {
-    setIdentityEnv();
-    const identity = loadSendingIdentity();
-    const first = applyComplianceFooter(
-      "<p>Hi</p><p>Section --- still here</p>",
-      "Hi\n---\nKeep this author line",
-      identity,
-    );
-    expect(first.html).toContain("Section --- still here");
-    expect(first.text).toContain("Keep this author line");
-    const hidden = first.html.replace(
-      "<p>Hi</p>",
-      '<style>.sendstack-compliance-footer{display:none}</style><p>Hi</p>',
-    );
-    const cleaned = applyComplianceFooter(hidden, first.text, identity);
-    expect(cleaned.html).not.toContain("<style");
-    expect(cleaned.html).not.toMatch(/display\s*:\s*none/i);
-    expect(cleaned.html).toContain("Contoso Ltd");
-    expect(cleaned.html).toContain("SENDSTACK_COMPLIANCE_FOOTER_START");
-    expect(cleaned.text).toBe(first.text);
-  });
-
-  it("preserves visual layout styles when applying the compliance footer", () => {
+  it("preserves visual layout styles", () => {
     setIdentityEnv();
     const html =
       '<div style="max-height:0;line-height:1px;font-size:1px;color:#ffffff">Preview</div>' +
       '<table style="max-width:600px;background:#ffffff;border-radius:14px"><tr><td style="padding:34px 30px;color:#14213d">Hello</td></tr></table>';
     const result = applyComplianceFooter(html, "Hello", loadSendingIdentity());
+    expect(result.html).toBe(html);
     expect(result.html).toContain("border-radius:14px");
-    expect(result.html).toContain("padding:34px 30px");
     expect(result.html).toContain("max-height:0");
-    expect(result.html).not.toMatch(/overflow\s*:\s*hidden/i);
-    expect(result.html).not.toMatch(/display\s*:\s*none/i);
-    expect(result.html).toContain("Contoso Ltd");
   });
 
   it("refuses a production session cookie unless it is Secure", () => {
@@ -218,13 +163,12 @@ describe("universal preflight including live tests", () => {
     expect(result.ok).toBe(false);
   });
 
-  it("blocks broadcast launches when attachments exist", () => {
+  it("allows SMTP campaign launches with non-archive attachments", () => {
     setIdentityEnv();
     const footered = applyComplianceFooter(
-      '<p>Update <a href="https://www.contoso.com">site</a></p>',
-      "Update https://www.contoso.com",
+      '<p>Update <a href="https://www.contoso.com">site</a></p><p><a href="{{unsubscribe_url}}">Unsubscribe</a></p>',
+      "Update https://www.contoso.com\nUnsubscribe: {{unsubscribe_url}}",
       loadSendingIdentity(),
-      { broadcast: true },
     );
     const result = runCampaignPreflight({
       subject: "March update",
@@ -233,11 +177,10 @@ describe("universal preflight including live tests", () => {
       htmlBody: footered.html,
       textBody: footered.text,
       attachmentCount: 1,
-      forBroadcast: true,
+      attachmentExtensions: ["pdf"],
       identity: loadSendingIdentity(),
     });
-    expect(result.ok).toBe(false);
-    if (!result.ok) expect(result.errors.join(" ")).toMatch(/Broadcasts do not support/i);
+    expect(result.ok).toBe(true);
   });
 });
 
@@ -279,10 +222,10 @@ describe("delivery health thresholds", () => {
 
 describe("launch chunking contract", () => {
   it("uses bounded chunks so a 10k audience is not one sequential request", () => {
-    expect(DEFAULT_LAUNCH_CHUNK_SIZE).toBeLessThanOrEqual(100);
+    expect(DEFAULT_LAUNCH_CHUNK_SIZE).toBeLessThanOrEqual(5);
     const recipients = 10_000;
     const chunks = Math.ceil(recipients / DEFAULT_LAUNCH_CHUNK_SIZE);
-    expect(chunks).toBe(100);
+    expect(chunks).toBe(2_000);
     // One HTTP launch creates a job; worker ticks process chunks.
     expect(chunks * DEFAULT_LAUNCH_CHUNK_SIZE).toBeGreaterThanOrEqual(recipients);
   });

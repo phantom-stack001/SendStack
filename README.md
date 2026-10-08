@@ -2,7 +2,7 @@
 
 This repository contains a runnable, dependency-free test build of the SendStack email marketing platform, plus a production-oriented Next.js app under `web/`. It is intentionally safe by default: messages are captured inside the application and no external email is sent.
 
-The selected production target is **Vercel + managed PostgreSQL + Resend Broadcasts**. That target is visible under **Sending setup** in the application. It is a migration target—not an active transport in the Python test build.
+The selected production target is **Vercel + managed PostgreSQL + Spacemail SMTP**. That target is visible under **Sending setup** in the application. It is a migration target—not an active transport in the Python test build.
 
 ## Documentation
 
@@ -41,7 +41,7 @@ pnpm db:seed
 pnpm dev
 ```
 
-Open <http://localhost:3000>. See [`web/README.md`](web/README.md) for the Vercel Root Directory (`web`), production checklist, Resend env vars, and the live-send kill switch (`SENDSTACK_LIVE_SEND_ENABLED`, default `false`).
+Open <http://localhost:3000>. See [`web/README.md`](web/README.md) for the Vercel Root Directory (`web`), production checklist, Spacemail SMTP env vars, and the live-send kill switch (`SENDSTACK_LIVE_SEND_ENABLED`, default `false`).
 
 The Python server above remains the dependency-free local reference build; it is not the Vercel deployment.
 
@@ -92,32 +92,30 @@ The live delivery path is:
 
 1. Vercel hosts the web application and request-scoped API.
 2. Managed PostgreSQL stores users, consent, lists, immutable recipient snapshots, provider IDs, delivery events, and global suppressions.
-3. SendStack syncs eligible contacts to Resend Contacts and campaign-specific Segments.
-4. SendStack creates and submits a Resend Broadcast; Resend owns production queueing and throttling.
-5. Signed Resend webhooks reconcile sent, delivered, delayed, bounced, complained, suppressed, and unsubscribe events back into PostgreSQL.
+3. A durable launch job submits one ordinary MIME message per recipient through Spacemail SMTP (`mail.spacemail.com:465`).
+4. SMTP acceptance is recorded as submitted; Spacemail has no delivery webhook for inbox outcomes.
+5. An external scheduler ticks `GET /api/cron/launch-jobs` so campaigns progress without a long-lived Vercel worker.
 
-Cloudflare may continue to host DNS and the authentication records for the sending domain. It does not replace the Vercel runtime or the Resend delivery provider.
-
-The intended operating range is **3,000–10,000 messages per day after a staged ramp**, not a guaranteed day-one send rate. Initial volume must use a small consented canary and increase only while bounce, complaint, and unsubscribe signals remain healthy.
+DNS may host Spacemail SPF/DKIM/DMARC records. Steady-state volume is bounded by the Spacemail mailbox plan (500 messages/hour on paid plans) and `SENDSTACK_DAILY_LIMIT`.
 
 See [`docs/architecture.md`](docs/architecture.md) and [`docs/deployment.md`](docs/deployment.md) for the full contract, implementation sequence, and handover checklist.
 
-## Optional controlled SMTP test
+## Optional Spacemail SMTP
 
-SMTP mode is deliberately fail-closed. It requires authenticated STARTTLS, a verified From address, and an exact recipient allowlist. Copy `.env.example` into your own secret-management workflow and set the variables before starting the server.
+SMTP mode is deliberately fail-closed. It uses implicit TLS on port 465 (the same path as a Spacemail mail client), a verified From address, and the existing live-send kill switch. Administrator test sends still require `SENDSTACK_TEST_RECIPIENT_ALLOWLIST`. Copy `.env.example` into your own secret-management workflow and set the variables before starting the server.
 
 ```bash
 SENDSTACK_DELIVERY_MODE=smtp \
-SENDSTACK_SMTP_HOST=smtp.example.com \
-SENDSTACK_SMTP_PORT=587 \
-SENDSTACK_SMTP_USERNAME=your-user \
+SENDSTACK_SMTP_HOST=mail.spacemail.com \
+SENDSTACK_SMTP_PORT=465 \
+SENDSTACK_SMTP_USERNAME=you@example.com \
 SENDSTACK_SMTP_PASSWORD=your-secret \
-SENDSTACK_SMTP_FROM_EMAIL=verified-sender@example.com \
+SENDSTACK_SMTP_FROM_EMAIL=you@example.com \
 SENDSTACK_TEST_RECIPIENT_ALLOWLIST=owner@example.com \
 ./scripts/start.sh
 ```
 
-Safety defaults for external tests are 1 message/second, 50 messages/day, and 10 recipients per campaign. Every SMTP recipient must be listed explicitly. SMTP failures are not automatically retried because a connection can fail after the relay accepted a message, making its outcome ambiguous.
+Safety defaults include 1 message/second, 50 messages/day, and a 500 messages/hour SMTP cap. Ambiguous SMTP failures after DATA are not automatically retried.
 
 ## Docker
 
@@ -131,4 +129,4 @@ Data is stored under `./data` and survives restarts.
 
 This is the immediate functional-test build, not the final production release. The Python path uses SQLite, a persistent HTTP process, and one in-process worker. Those choices make local testing simple, but they are not compatible with a dependable Vercel production deployment.
 
-This repository does **not** currently send through Resend by default and should not be presented as production-ready until live delivery is unlocked. Live send remains locked until the Resend adapter path, verified domain, signed webhooks, suppression sync, backup/restore, and administrator security controls are complete. The optional SMTP mode remains only for tightly controlled allowlisted tests and is not the planned mass-delivery architecture.
+This repository does **not** send through Spacemail by default and should not be presented as production-ready until live delivery is unlocked. Live send remains locked until SMTP credentials, verified domain DNS, launch-job cron, suppression handling, backup/restore, and administrator security controls are complete.

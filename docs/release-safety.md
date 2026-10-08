@@ -90,7 +90,7 @@ restart so the runtime picks it up. Enforced in four independent places:
 
 | Location | Effect |
 | --- | --- |
-| `lib/providers/resend.ts` (`liveSendAllowed`) | Every provider HTTP call fails closed |
+| `lib/live-send.ts` (`liveSendAllowed`) | Every SMTP send fails closed |
 | `lib/api-router.ts` (test send, launch) | Returns `403 SENDSTACK_EMERGENCY_STOP is enabled.` |
 | `lib/launch-jobs.ts` (`runLaunchWorkerTick`) | Returns without claiming any job |
 | `lib/launch-jobs.ts` (`preflightIrreversibleOp`) | Parks the job (`pending` + `next_retry_at`), releasing the lease |
@@ -111,30 +111,21 @@ To test without sending: set the variable in a preview or local environment, the
 
 ## 3a. Duplicate-send invariants in the launch worker
 
-Resend honours `Idempotency-Key` only on `POST /emails` and `POST /emails/batch` — **not**
-on `POST /broadcasts/{id}/send`. The provider therefore offers no protection against a
-second broadcast submission, and these invariants in `lib/launch-jobs.ts` are the only
-thing preventing a duplicate delivery to an entire audience. Do not relax them.
+Spacemail SMTP has no idempotency key. These invariants in `lib/launch-jobs.ts` prevent
+duplicate delivery to the same recipient. Do not relax them.
 
 1. **The lease fence is pinned at claim time.** `leaseFenceOf` captures
    `(lease_owner, lease_generation)` when the job is claimed, and every reload re-applies
-   it with `withFence`. Refreshing the fence from the database would make each
-   compare-and-swap compare the database against itself, letting a worker that lost its
-   lease keep writing.
-2. **The submit path is a one-way door.** Only `pending` and `running` may advance to
-   `ready_to_submit`. `submitting`, `submission_unknown`, and `reconciling` all mean a
-   send may already have reached Resend, so they return immediately and recover only
-   through the reconcile branch.
-3. **A provider `draft` after a submit attempt is ambiguous, not safe.** It escalates to
-   `manual_review` with terminal reason `submit_attempted_provider_reports_draft` and a
-   durable health block. An operator must confirm in the Resend dashboard before any
-   resend.
-4. **Every provider call is time-bounded** (`SENDSTACK_PROVIDER_TIMEOUT_MS`, default
-   8000 ms). An unbounded call holds the lease past expiry, which is precisely the window
-   in which a second worker can claim the same job.
+   it with `withFence`.
+2. **Per-message status is the send ledger.** Only `captured` or retryable `failed`
+   (null `provider_id`) messages are submitted. `submitted` and `submission_unknown`
+   are never resent.
+3. **Ambiguous SMTP acceptance is fail-closed.** Connection drops after DATA mark the
+   message `submission_unknown` and skip it forever.
+4. **Every SMTP call is time-bounded** (`SENDSTACK_PROVIDER_TIMEOUT_MS`, default
+   8000 ms). An unbounded call holds the lease past expiry.
 
-Regression coverage lives in `tests/pg-launch-safety.test.ts`. Each test was verified to
-fail against the previous implementation with a real duplicate send recorded.
+Regression coverage lives in `tests/pg-launch-safety.test.ts`.
 
 ---
 

@@ -4,7 +4,7 @@
 A dependency-free, single-process implementation of the core MVP workflow. It is
 designed for immediate functional testing. SQLite and the in-process worker are
 deliberate test-environment choices. The selected production target is a Vercel
-application backed by managed PostgreSQL and Resend Broadcasts; the readiness API
+application backed by managed PostgreSQL and Spacemail SMTP; the readiness API
 keeps that target distinct from the currently active local transport.
 """
 
@@ -47,8 +47,8 @@ TOKEN_RE = re.compile(r"^[A-Za-z0-9_-]{20,200}$")
 PRODUCTION_TARGET = {
     "platform": "Vercel",
     "database": "Managed PostgreSQL",
-    "provider": "Resend Broadcasts",
-    "audience_model": "Resend Contacts + Segments",
+    "provider": "Spacemail SMTP",
+    "audience_model": "Local contacts, lists, and campaign snapshots",
 }
 
 PERMISSION_DEFINITIONS = {
@@ -172,8 +172,8 @@ def production_readiness(config: "Config") -> dict[str, Any]:
 
     These checks intentionally reflect implementation state rather than the mere
     presence of credentials. The local build must not appear production-ready
-    until the serverless runtime, durable database, provider adapter, and signed
-    webhook flow have actually been implemented and verified.
+    until the serverless runtime, durable database, and Spacemail SMTP path have
+    been configured and verified in the Next.js app.
     """
 
     checks = [
@@ -196,22 +196,16 @@ def production_readiness(config: "Config") -> dict[str, Any]:
             "detail": "Migrate SQLite data and queue state to a durable database that supports concurrent Vercel functions.",
         },
         {
-            "id": "resend_broadcasts",
-            "label": "Resend Broadcasts",
-            "status": "not_connected",
-            "detail": "Map lists to Segments, sync consented Contacts, and submit each campaign as a duplicate-safe broadcast.",
+            "id": "spacemail_smtp",
+            "label": "Spacemail SMTP",
+            "status": "not_connected" if config.delivery_mode != "smtp" else "ready",
+            "detail": "Submit one ordinary MIME message per recipient through mail.spacemail.com:465.",
         },
         {
             "id": "domain_authentication",
             "label": "Sending-domain authentication",
             "status": "not_verified",
-            "detail": "Verify the sending domain and From address with SPF and DKIM before any live campaign is unlocked.",
-        },
-        {
-            "id": "signed_webhooks",
-            "label": "Signed delivery webhooks",
-            "status": "not_connected",
-            "detail": "Verify Resend webhook signatures and reconcile delivery, bounce, complaint, suppression, and unsubscribe events.",
+            "detail": "Verify the Spacemail mailbox and SPF/DKIM/DMARC before any live campaign is unlocked.",
         },
     ]
     return {
@@ -221,7 +215,7 @@ def production_readiness(config: "Config") -> dict[str, Any]:
         "current": {
             "runtime": "Local persistent Python server",
             "database": "SQLite",
-            "transport": "SMTP test mode" if config.delivery_mode == "smtp" else "Local sandbox",
+            "transport": "Spacemail SMTP" if config.delivery_mode == "smtp" else "Local sandbox",
             "daily_safety_cap": config.daily_limit,
         },
         "target": dict(PRODUCTION_TARGET),
@@ -229,16 +223,16 @@ def production_readiness(config: "Config") -> dict[str, Any]:
         "delivery_path": [
             "Create and review a campaign in SendStack",
             "Snapshot eligible, consented, unsuppressed recipients",
-            "Sync the snapshot to a Resend Segment",
-            "Create and submit a Resend Broadcast",
-            "Reconcile signed webhook events in PostgreSQL",
+            "Render personalization per recipient",
+            "Submit each message through Spacemail SMTP",
+            "Record SMTP acceptance in PostgreSQL",
         ],
         "volume_plan": {
-            "goal": "3,000–10,000 emails per day",
+            "goal": "Up to 500 emails/hour per Spacemail mailbox",
             "launch_policy": "Begin with a small consented canary and increase only while bounce and complaint rates remain healthy.",
-            "provider_owns_queue": True,
+            "provider_owns_queue": False,
         },
-        "live_send_lock": "Live delivery remains locked until the runtime, database, domain, provider, webhook, and suppression flows are verified.",
+        "live_send_lock": "Live delivery remains locked until the runtime, database, domain, and SMTP credentials are verified.",
     }
 
 
@@ -297,15 +291,14 @@ class Config:
     admin_password: str = os.getenv("SENDSTACK_ADMIN_PASSWORD", "ChangeMe123!")
     cookie_secure: bool = parse_bool(os.getenv("SENDSTACK_COOKIE_SECURE"), False)
     smtp_host: str = os.getenv("SENDSTACK_SMTP_HOST", "")
-    smtp_port: int = int(os.getenv("SENDSTACK_SMTP_PORT", "587"))
+    smtp_port: int = int(os.getenv("SENDSTACK_SMTP_PORT", "465"))
     smtp_username: str = os.getenv("SENDSTACK_SMTP_USERNAME", "")
     smtp_password: str = os.getenv("SENDSTACK_SMTP_PASSWORD", "")
     smtp_from_email: str = os.getenv("SENDSTACK_SMTP_FROM_EMAIL", "")
-    smtp_starttls: bool = parse_bool(os.getenv("SENDSTACK_SMTP_STARTTLS"), True)
     recipient_allowlist: str = os.getenv("SENDSTACK_TEST_RECIPIENT_ALLOWLIST", "")
     per_second_limit: float = float(os.getenv("SENDSTACK_RATE_PER_SECOND", "1"))
     daily_limit: int = int(os.getenv("SENDSTACK_DAILY_LIMIT", "50"))
-    external_campaign_cap: int = int(os.getenv("SENDSTACK_EXTERNAL_CAMPAIGN_CAP", "10"))
+    smtp_hourly_limit: int = int(os.getenv("SENDSTACK_SMTP_HOURLY_LIMIT", "500"))
     session_hours: int = int(os.getenv("SENDSTACK_SESSION_HOURS", "12"))
 
     def validate(self) -> None:
@@ -319,17 +312,16 @@ class Config:
                     ("SENDSTACK_SMTP_USERNAME", self.smtp_username),
                     ("SENDSTACK_SMTP_PASSWORD", self.smtp_password),
                     ("SENDSTACK_SMTP_FROM_EMAIL", self.smtp_from_email),
-                    ("SENDSTACK_TEST_RECIPIENT_ALLOWLIST", self.recipient_allowlist),
                 )
                 if not value
             ]
             if missing:
-                raise ValueError(f"SMTP test mode requires: {', '.join(missing)}")
-            if not self.smtp_starttls:
-                raise ValueError("SMTP test mode requires SENDSTACK_SMTP_STARTTLS=true")
+                raise ValueError(f"SMTP mode requires: {', '.join(missing)}")
             if not valid_email(self.smtp_from_email):
                 raise ValueError("SENDSTACK_SMTP_FROM_EMAIL must be a valid address")
-        if self.per_second_limit <= 0 or self.daily_limit <= 0 or self.external_campaign_cap <= 0:
+            if self.smtp_port != 465:
+                raise ValueError("SMTP mode uses implicit TLS on port 465 (SENDSTACK_SMTP_PORT=465)")
+        if self.per_second_limit <= 0 or self.daily_limit <= 0 or self.smtp_hourly_limit <= 0:
             raise ValueError("Delivery limits must be greater than zero")
 
 
@@ -585,13 +577,14 @@ class DeliveryAdapter:
             for item in config.recipient_allowlist.split(",")
             if item.strip()
         }
-        if config.delivery_mode == "smtp" and any(not valid_email(item) for item in self.allowlist):
+        if any(not valid_email(item) for item in self.allowlist):
             raise ValueError("SMTP test allowlist entries must be exact email addresses")
 
-    def recipient_is_allowed(self, recipient: str) -> bool:
+    def test_recipient_is_allowed(self, recipient: str) -> bool:
+        """Allowlist applies to administrator test sends only."""
         recipient = normalize_email(recipient)
-        if self.config.delivery_mode == "sandbox":
-            return True
+        if not self.allowlist:
+            return False
         return recipient in self.allowlist
 
     def send(
@@ -605,15 +598,16 @@ class DeliveryAdapter:
         text_body: str,
         message_id: str,
         unsubscribe_url: str,
+        enforce_test_allowlist: bool = False,
     ) -> str:
         if not valid_email(to_email) or not valid_email(from_email):
             raise RuntimeError("Sender and recipient must be valid email addresses")
         if any("\r" in value or "\n" in value for value in (to_email, from_email, from_name, subject)):
             raise RuntimeError("Email headers cannot contain line breaks")
-        if not self.recipient_is_allowed(to_email):
+        if enforce_test_allowlist and not self.test_recipient_is_allowed(to_email):
             raise RuntimeError(
                 "Recipient is blocked by the test allowlist. Add it to "
-                "SENDSTACK_TEST_RECIPIENT_ALLOWLIST before using SMTP mode."
+                "SENDSTACK_TEST_RECIPIENT_ALLOWLIST before using SMTP test send."
             )
         if self.config.delivery_mode == "sandbox":
             return f"sandbox:{message_id}"
@@ -621,7 +615,7 @@ class DeliveryAdapter:
         message = EmailMessage()
         message["To"] = to_email
         if normalize_email(from_email) != normalize_email(self.config.smtp_from_email):
-            raise RuntimeError("Campaign sender must match SENDSTACK_SMTP_FROM_EMAIL in SMTP test mode")
+            raise RuntimeError("Campaign sender must match SENDSTACK_SMTP_FROM_EMAIL in SMTP mode")
         message["From"] = f"{from_name} <{from_email}>"
         message["Subject"] = subject
         message["Message-ID"] = f"<{message_id}@sendstack.local>"
@@ -631,13 +625,10 @@ class DeliveryAdapter:
         message.add_alternative(html_body, subtype="html")
 
         context = ssl.create_default_context()
-        with smtplib.SMTP(
-            self.config.smtp_host, self.config.smtp_port, timeout=20
+        with smtplib.SMTP_SSL(
+            self.config.smtp_host, self.config.smtp_port, timeout=20, context=context
         ) as smtp:
             smtp.ehlo()
-            if self.config.smtp_starttls:
-                smtp.starttls(context=context)
-                smtp.ehlo()
             if self.config.smtp_username:
                 smtp.login(self.config.smtp_username, self.config.smtp_password)
             smtp.send_message(message)
@@ -722,6 +713,15 @@ class QueueWorker:
             with db._write_lock, db.connect() as connection:
                 connection.execute(
                     "UPDATE campaign_recipients SET status = 'queued', error = 'Daily delivery limit reached' WHERE id = ?",
+                    (row["id"],),
+                )
+            return False
+
+        if self.app.config.delivery_mode == "smtp" and not self._within_hourly_limit():
+            time.sleep(1.0)
+            with db._write_lock, db.connect() as connection:
+                connection.execute(
+                    "UPDATE campaign_recipients SET status = 'queued', error = 'Hourly SMTP delivery limit reached' WHERE id = ?",
                     (row["id"],),
                 )
             return False
@@ -834,6 +834,15 @@ class QueueWorker:
                 (start,),
             ).fetchone()[0]
         return count < self.app.config.daily_limit
+
+    def _within_hourly_limit(self) -> bool:
+        start = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+        with self.app.db.connect() as connection:
+            count = connection.execute(
+                "SELECT COUNT(*) FROM messages WHERE delivered_at IS NOT NULL AND delivered_at >= ?",
+                (start,),
+            ).fetchone()[0]
+        return count < self.app.config.smtp_hourly_limit
 
     def _complete_finished_campaigns(self, connection: sqlite3.Connection) -> None:
         now = utc_now()
@@ -1703,20 +1712,6 @@ class RequestHandler(BaseHTTPRequestHandler):
                 """,
                 (campaign["list_id"],),
             ).fetchall()
-            if self.application.config.delivery_mode == "smtp":
-                if len(candidates) > self.application.config.external_campaign_cap:
-                    connection.execute("ROLLBACK")
-                    return self._json(
-                        HTTPStatus.CONFLICT,
-                        {"error": f"SMTP test campaigns are capped at {self.application.config.external_campaign_cap} recipients"},
-                    )
-                blocked = [contact["email"] for contact in candidates if not self.application.delivery.recipient_is_allowed(contact["email"])]
-                if blocked:
-                    connection.execute("ROLLBACK")
-                    return self._json(
-                        HTTPStatus.CONFLICT,
-                        {"error": f"{len(blocked)} recipient(s) are outside the exact SMTP test allowlist"},
-                    )
             inserted = 0
             for contact in candidates:
                 inserted += connection.execute(
@@ -1784,6 +1779,7 @@ class RequestHandler(BaseHTTPRequestHandler):
                 text_body=render_template(campaign["text_body"], values),
                 message_id=message_key,
                 unsubscribe_url=unsubscribe_url,
+                enforce_test_allowlist=self.application.config.delivery_mode == "smtp",
             )
             message_id = make_id("msg")
             now = utc_now()

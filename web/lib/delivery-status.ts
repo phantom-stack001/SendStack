@@ -61,31 +61,6 @@ export type WebhookDerivedStatus =
   | "failed"
   | null;
 
-export function statusFromResendEvent(eventType: string | undefined): WebhookDerivedStatus {
-  switch (eventType) {
-    case "email.sent":
-      return "submitted";
-    case "email.delivered":
-      return "delivered";
-    case "email.delivery_delayed":
-      return "delayed";
-    case "email.bounced":
-      return "bounced";
-    case "email.complained":
-      return "complained";
-    case "email.suppressed":
-      return "suppressed";
-    case "email.failed":
-      return "failed";
-    case "email.unsubscribed":
-      return "unsubscribed";
-    case "contact.updated":
-      return null;
-    default:
-      return null;
-  }
-}
-
 export function recipientStatusFromMessageStatus(status: WebhookDerivedStatus): string | null {
   switch (status) {
     case "submitted":

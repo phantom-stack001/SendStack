@@ -53,20 +53,6 @@ export function identityComplianceGaps(identity = loadSendingIdentity()): Identi
       detail: "Set SENDSTACK_REPLY_TO_EMAIL to a monitored inbox that can receive replies.",
     });
   }
-  if (!identity.companyName) {
-    gaps.push({
-      id: "company_name",
-      label: "Company name",
-      detail: "Set SENDSTACK_COMPANY_NAME to the legal or trading name that appears in messages.",
-    });
-  }
-  if (!identity.postalAddress) {
-    gaps.push({
-      id: "postal_address",
-      label: "Postal address",
-      detail: "Set SENDSTACK_POSTAL_ADDRESS to a real registered postal address for compliance footers.",
-    });
-  }
   if (!identity.allowedLinkDomains.length) {
     gaps.push({
       id: "allowed_link_domains",
@@ -105,10 +91,11 @@ export function isTestRecipientAllowed(email: string, identity = loadSendingIden
 }
 
 export function publicSiteIdentity(identity = loadSendingIdentity()) {
+  const contactEmail = identity.replyToEmail || identity.fromEmail || null;
   return {
     companyName: identity.companyName || null,
     postalAddress: identity.postalAddress || null,
-    contactEmail: identity.replyToEmail || identity.fromEmail || null,
-    configured: Boolean(identity.companyName && identity.postalAddress && (identity.replyToEmail || identity.fromEmail)),
+    contactEmail,
+    configured: Boolean(contactEmail),
   };
 }

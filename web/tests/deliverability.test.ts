@@ -7,7 +7,6 @@ import {
 import {
   canTransitionMessageStatus,
   canTransitionRecipientStatus,
-  statusFromResendEvent,
 } from "../lib/delivery-status";
 import { identityComplianceGaps, isTestRecipientAllowed, loadSendingIdentity } from "../lib/sending-identity";
 import { applyComplianceFooter } from "../lib/compliance-footer";
@@ -15,7 +14,8 @@ import { runCampaignPreflight } from "../lib/preflight";
 import { isSpecialUseRecipientDomain, validateLiveRecipient } from "../lib/recipients";
 import { requiredPermission } from "../lib/rbac";
 import { liveSendBootIssues, validateProductionEnv } from "../lib/env";
-import { buildIdempotencyKey } from "../lib/providers/resend";
+import { buildIdempotencyKey } from "../lib/live-send";
+import { smtpAcceptanceAmbiguous } from "../lib/providers/smtp";
 
 const originalEnv = { ...process.env };
 
@@ -27,8 +27,6 @@ afterEach(() => {
 function setIdentityEnv(overrides: Record<string, string> = {}) {
   process.env.SENDSTACK_FROM_EMAIL = "news@example.com";
   process.env.SENDSTACK_REPLY_TO_EMAIL = "hello@example.com";
-  process.env.SENDSTACK_COMPANY_NAME = "Example Operator Ltd";
-  process.env.SENDSTACK_POSTAL_ADDRESS = "1 Example Street, Example City, EX1 1AA";
   process.env.SENDSTACK_ALLOWED_LINK_DOMAINS = "example.com,www.example.com";
   process.env.SENDSTACK_TEST_RECIPIENT_ALLOWLIST = "ops@example.com,qa@example.com";
   process.env.SENDSTACK_PUBLIC_URL = "https://app.example.com";
@@ -72,13 +70,12 @@ describe("fixed from and reply-to identity", () => {
   it("reports gaps when identity settings are absent", () => {
     delete process.env.SENDSTACK_FROM_EMAIL;
     delete process.env.SENDSTACK_REPLY_TO_EMAIL;
-    delete process.env.SENDSTACK_COMPANY_NAME;
-    delete process.env.SENDSTACK_POSTAL_ADDRESS;
     delete process.env.SENDSTACK_ALLOWED_LINK_DOMAINS;
     const gaps = identityComplianceGaps();
-    expect(gaps.map((gap) => gap.id)).toEqual(
-      expect.arrayContaining(["from_email", "reply_to", "company_name", "postal_address", "allowed_link_domains"]),
-    );
+    const gapIds = gaps.map((gap) => gap.id);
+    expect(gapIds).toEqual(expect.arrayContaining(["from_email", "reply_to", "allowed_link_domains"]));
+    expect(gapIds).not.toContain("company_name");
+    expect(gapIds).not.toContain("postal_address");
   });
 
   it("loads configured identity values", () => {
@@ -86,7 +83,6 @@ describe("fixed from and reply-to identity", () => {
     const identity = loadSendingIdentity();
     expect(identity.fromEmail).toBe("news@example.com");
     expect(identity.replyToEmail).toBe("hello@example.com");
-    expect(identity.companyName).toBe("Example Operator Ltd");
     expect(identity.allowedLinkDomains).toContain("example.com");
   });
 });
@@ -169,29 +165,15 @@ describe("attachments without archives", () => {
   });
 });
 
-describe("provider unsubscribe preservation payload", () => {
-  it("does not force a subscribed flag in the contact upsert JSON body", async () => {
-    const source = await import("node:fs").then((fs) =>
-      fs.readFileSync(new URL("../lib/providers/resend.ts", import.meta.url), "utf8"),
-    );
-    const start = source.indexOf("export async function upsertResendContact");
-    const end = source.indexOf("export async function addContactToSegment");
-    const upsertBody = source.slice(start, end);
-    expect(upsertBody).toContain("first_name");
-    expect(upsertBody).not.toMatch(/unsubscribed\s*:/);
+describe("SMTP acceptance ambiguity", () => {
+  it("treats connection drops as ambiguous and ordinary errors as definite", () => {
+    expect(smtpAcceptanceAmbiguous(Object.assign(new Error("reset"), { code: "ECONNRESET" }))).toBe(true);
+    expect(smtpAcceptanceAmbiguous(new Error("SMTP 550 rejected"))).toBe(false);
   });
 });
 
-describe("webhook status transitions", () => {
-  it("maps resend events and protects terminal states", () => {
-    expect(statusFromResendEvent("email.delivery_delayed")).toBe("delayed");
-    expect(statusFromResendEvent("email.suppressed")).toBe("suppressed");
-    expect(statusFromResendEvent("email.failed")).toBe("failed");
-    expect(statusFromResendEvent("email.bounced")).toBe("bounced");
-    expect(statusFromResendEvent("email.complained")).toBe("complained");
-    expect(statusFromResendEvent("email.sent")).toBe("submitted");
-    expect(statusFromResendEvent("email.delivered")).toBe("delivered");
-
+describe("status transitions", () => {
+  it("protects terminal states", () => {
     expect(canTransitionMessageStatus("bounced", "delivered")).toBe(false);
     expect(canTransitionMessageStatus("complained", "submitted")).toBe(false);
     expect(canTransitionMessageStatus("suppressed", "delivered")).toBe(false);
@@ -214,13 +196,12 @@ describe("production readiness identity gate", () => {
     process.env.DATABASE_URL = "postgres://example";
     process.env.SENDSTACK_SESSION_SECRET = "x".repeat(40);
     process.env.SENDSTACK_LIVE_SEND_ENABLED = "true";
-    process.env.RESEND_API_KEY = "re_test";
-    process.env.RESEND_WEBHOOK_SECRET = "whsec_test";
+    process.env.SENDSTACK_SMTP_HOST = "mail.spacemail.com";
+    process.env.SENDSTACK_SMTP_USERNAME = "news@example.com";
+    process.env.SENDSTACK_SMTP_PASSWORD = "secret";
     process.env.CRON_SECRET = "cron_test_secret";
     delete process.env.SENDSTACK_FROM_EMAIL;
     delete process.env.SENDSTACK_REPLY_TO_EMAIL;
-    delete process.env.SENDSTACK_COMPANY_NAME;
-    delete process.env.SENDSTACK_POSTAL_ADDRESS;
     delete process.env.SENDSTACK_ALLOWED_LINK_DOMAINS;
     const issues = liveSendBootIssues();
     expect(issues.some((issue) => /identity\/compliance/i.test(issue))).toBe(true);
@@ -237,8 +218,9 @@ describe("production readiness identity gate", () => {
     process.env.DATABASE_URL = "postgres://example";
     process.env.SENDSTACK_SESSION_SECRET = "x".repeat(40);
     process.env.SENDSTACK_LIVE_SEND_ENABLED = "true";
-    process.env.RESEND_API_KEY = "re_test";
-    process.env.RESEND_WEBHOOK_SECRET = "whsec_test";
+    process.env.SENDSTACK_SMTP_HOST = "mail.spacemail.com";
+    process.env.SENDSTACK_SMTP_USERNAME = "news@example.com";
+    process.env.SENDSTACK_SMTP_PASSWORD = "secret";
     setIdentityEnv();
     process.env.CRON_SECRET = "cron_test_secret";
     expect(liveSendBootIssues()).toEqual([]);
@@ -247,21 +229,20 @@ describe("production readiness identity gate", () => {
 });
 
 describe("list-unsubscribe headers", () => {
-  it("documents one-click header pair in send payload builder", async () => {
+  it("documents one-click header pair in SMTP send payload builder", async () => {
     const source = await import("node:fs").then((fs) =>
-      fs.readFileSync(new URL("../lib/providers/resend.ts", import.meta.url), "utf8"),
+      fs.readFileSync(new URL("../lib/providers/smtp.ts", import.meta.url), "utf8"),
     );
     expect(source).toContain("List-Unsubscribe");
     expect(source).toContain("List-Unsubscribe-Post");
     expect(source).toContain("List-Unsubscribe=One-Click");
-    expect(source).toContain("Idempotency-Key");
-    expect(source).toContain("/cancel");
+    expect(source).toContain("secure: true");
   });
 });
 
 describe("idempotency keys", () => {
   it("builds deterministic keys", () => {
-    expect(buildIdempotencyKey(["broadcast-send", "cam_1", "bcast_1"])).toBe("broadcast-send:cam_1:bcast_1");
+    expect(buildIdempotencyKey(["smtp-send", "cam_1", "msg_1"])).toBe("smtp-send:cam_1:msg_1");
   });
 });
 

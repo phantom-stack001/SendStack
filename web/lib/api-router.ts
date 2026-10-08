@@ -37,11 +37,8 @@ import { DATABASE_MIGRATION_REQUIRED, DATABASE_UNAVAILABLE, redactForLog, safeCl
 import { runCampaignPreflight } from "./preflight";
 import { assertProductionSessionCookie, sessionCookieIsSecure } from "./env";
 import { inspectSchema, summarizeSchemaReport } from "./schema-guard";
-import {
-  buildIdempotencyKey,
-  liveSendAllowed,
-  sendResendEmail,
-} from "./providers/resend";
+import { buildIdempotencyKey, liveSendAllowed, smtpConfigured } from "./live-send";
+import { sendSmtpEmail } from "./providers/smtp";
 import { isSpecialUseRecipientDomain, validateLiveRecipient } from "./recipients";
 import {
   enforcedFromEmail,
@@ -538,8 +535,7 @@ async function readinessResponse() {
   const identity = loadSendingIdentity();
   const gaps = identityComplianceGaps(identity);
   const identityReady = gaps.length === 0;
-  const resendKeys = Boolean(process.env.RESEND_API_KEY && process.env.RESEND_WEBHOOK_SECRET);
-  const resendConfigured = resendKeys && identityReady;
+  const smtpReady = smtpConfigured() && identityReady;
   const production = config.isVercelProduction || config.nodeEnv === "production";
   const health =
     schema.reachable && schema.ok
@@ -550,16 +546,16 @@ async function readinessResponse() {
   const cronConfigured = Boolean((process.env.CRON_SECRET ?? "").trim());
   const readyForLive =
     production &&
-    config.deliveryMode === "resend" &&
+    config.deliveryMode === "smtp" &&
     config.liveSendEnabled &&
-    resendConfigured &&
+    smtpReady &&
     schema.ok &&
     cronConfigured &&
     health.thresholds_configured &&
     !health.launch_blocked;
 
   return json(200, {
-    target: { platform: "Vercel", database: "Managed PostgreSQL", provider: "Resend Broadcasts" },
+    target: { platform: "Vercel", database: "Managed PostgreSQL", provider: "Spacemail SMTP" },
     current: {
       runtime: "Vercel",
       database: config.databaseUrl ? "PostgreSQL" : "Not configured",
@@ -622,25 +618,25 @@ async function readinessResponse() {
         label: "Sender identity & compliance",
         status: identityReady ? "ready" : "pending",
         detail: identityReady
-          ? `From ${identity.fromEmail}, Reply-To ${identity.replyToEmail}, company and postal address configured.`
+          ? `From ${identity.fromEmail}, Reply-To ${identity.replyToEmail}.`
           : `Missing: ${gaps.map((gap) => gap.label).join(", ")}.`,
       },
       {
-        id: "resend_broadcasts",
-        label: "Resend delivery",
-        status: resendConfigured && config.liveSendEnabled ? "ready" : resendConfigured ? "configured_locked" : "not_connected",
-        detail: resendConfigured && config.liveSendEnabled
-          ? "Live email through Resend is enabled."
-          : resendConfigured
-            ? "Resend is configured. Live email is turned off until an administrator enables it."
-            : "Connect Resend and complete identity settings before live email can be enabled.",
+        id: "spacemail_smtp",
+        label: "Spacemail SMTP",
+        status: smtpReady && config.liveSendEnabled ? "ready" : smtpReady ? "configured_locked" : "not_connected",
+        detail: smtpReady && config.liveSendEnabled
+          ? "Live email through Spacemail SMTP is enabled."
+          : smtpReady
+            ? "SMTP is configured. Live email is turned off until an administrator enables it."
+            : "Set SENDSTACK_SMTP_HOST, SENDSTACK_SMTP_USERNAME, SENDSTACK_SMTP_PASSWORD, and identity settings before live email can be enabled.",
       },
       {
         id: "delivery_health",
-        label: "Webhook & suppression health",
+        label: "Delivery health",
         status: !health.launch_blocked && health.thresholds_configured ? "ready" : "pending",
         detail: !health.launch_blocked && health.thresholds_configured
-          ? "Webhook correlation and suppression synchronization look complete."
+          ? "Delivery health thresholds are configured and launch is not blocked."
           : health.blocking_reasons.join(" ") || health.issues.join(" ") || "Delivery health checks are incomplete.",
       },
     ],
@@ -648,8 +644,8 @@ async function readinessResponse() {
     delivery_path: [
       "Create a campaign draft with monitored From/Reply-To identity",
       "Pass launch preflight (no placeholders, allowed links, no archives)",
-      "Verify audience suppressions and daily volume headroom",
-      "Submit through Resend with persisted recipient intent and idempotency keys",
+      "Verify audience suppressions and daily/hourly volume headroom",
+      "Submit one recipient at a time through Spacemail SMTP (mail.spacemail.com:465)",
     ],
     volume_plan: {
       goal: `${config.dailyLimit.toLocaleString()} emails/day`,
@@ -1652,8 +1648,8 @@ export async function handleApi(request: Request, path: string[]) {
     const targetEmail = normalizeEmail(body.email ?? "");
     const identity = loadSendingIdentity();
     const isTestSend = campaignAction[2] === "test-send";
-    const isLive = config.deliveryMode === "resend" && liveSendAllowed();
-    const isBroadcastLaunch = campaignAction[2] === "launch" && config.deliveryMode === "resend";
+    const isLive = config.deliveryMode === "smtp" && liveSendAllowed();
+    const isSmtpLaunch = campaignAction[2] === "launch" && config.deliveryMode === "smtp";
 
     if (campaignAction[2] === "pause") {
       if (!["sending", "submission_unknown", "cancel_requested"].includes(campaign.status)) {
@@ -1888,7 +1884,7 @@ export async function handleApi(request: Request, path: string[]) {
               return;
             }
             providerAttempted = true;
-            accepted.current = await sendResendEmail({
+            accepted.current = await sendSmtpEmail({
               to: targetEmail,
               subject,
               html: htmlBody,
@@ -1898,11 +1894,7 @@ export async function handleApi(request: Request, path: string[]) {
               replyTo,
               unsubscribeUrl,
               attachments: sendAttachments,
-              idempotencyKey,
-              tags: [
-                { name: "campaign_id", value: campaign.id.slice(0, 256) },
-                { name: "send_type", value: "test" },
-              ],
+              messageId: messageId,
             });
           });
           if (gate) return gate;
@@ -1993,16 +1985,9 @@ export async function handleApi(request: Request, path: string[]) {
         error: "This campaign has archive attachments that cannot be sent. Remove or leave them blocked before launch.",
       });
     }
-    if (isBroadcastLaunch && attachmentRows.rows.length > 0) {
-      return json(400, {
-        error:
-          "Resend Broadcasts do not support campaign attachments. Remove all attachments before live broadcast launch, or use a direct/test send for PDF/image attachments.",
-      });
-    }
-
     let fromEmail = campaign.from_email;
     let replyTo: string | null = identity.replyToEmail || null;
-    if (isLive || isBroadcastLaunch) {
+    if (isLive || isSmtpLaunch) {
       try {
         fromEmail = enforcedFromEmail(campaign.from_email, identity);
         replyTo = enforcedReplyTo(identity);
@@ -2013,9 +1998,7 @@ export async function handleApi(request: Request, path: string[]) {
 
     let footered: { html: string; text: string };
     try {
-      footered = applyComplianceFooter(campaign.html_body, campaign.text_body, identity, {
-        broadcast: isBroadcastLaunch,
-      });
+      footered = applyComplianceFooter(campaign.html_body, campaign.text_body, identity);
     } catch (error) {
       return json(400, { error: error instanceof Error ? error.message : "Compliance footer could not be applied." });
     }
@@ -2028,9 +2011,8 @@ export async function handleApi(request: Request, path: string[]) {
       fromName: campaign.from_name,
       attachmentExtensions: attachmentRows.rows.map((row) => row.filename.split(".").pop()?.toLowerCase() || ""),
       attachmentCount: attachmentRows.rows.length,
-      forBroadcast: isBroadcastLaunch,
       identity,
-      requirePublicHttps: isLive && !isBroadcastLaunch,
+      requirePublicHttps: isLive,
     });
     if (!preflight.ok) {
       return json(400, { error: preflight.errors[0], errors: preflight.errors });
@@ -2047,23 +2029,23 @@ export async function handleApi(request: Request, path: string[]) {
       });
     }
 
-    if (isBroadcastLaunch && isLive) {
+    if (isSmtpLaunch && isLive) {
       if (!identityConfigured(identity)) {
         return json(403, { error: "Identity and compliance settings are incomplete. Live launch is blocked." });
       }
     }
 
     // Atomic CAS prepare: freeze snapshot, one active job, set-based recipients/messages/volume.
-    // HTTP path never calls Resend and never loops per recipient.
+    // HTTP path never opens SMTP and never loops per recipient.
     try {
       const prepared = await claimAndPrepareCampaignLaunch({
         campaignId: campaign.id,
-        liveMode: Boolean(isBroadcastLaunch && isLive),
+        liveMode: Boolean(isSmtpLaunch && isLive),
         fromEmail,
         replyToEmail: replyTo,
         htmlBody: footered.html,
         textBody: footered.text,
-        validateLiveRecipients: Boolean(isBroadcastLaunch && isLive),
+        validateLiveRecipients: Boolean(isSmtpLaunch && isLive),
       });
       if (prepared.totalRecipients === 0) {
         return json(400, { error: "No active, non-suppressed contacts are available to launch." });

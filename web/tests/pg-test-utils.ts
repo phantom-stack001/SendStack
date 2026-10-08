@@ -115,8 +115,6 @@ export function applyTestEnv(url: string): void {
   process.env.SENDSTACK_DELIVERY_MODE = "sandbox";
   process.env.SENDSTACK_FROM_EMAIL = "news@example.com";
   process.env.SENDSTACK_REPLY_TO_EMAIL = "hello@example.com";
-  process.env.SENDSTACK_COMPANY_NAME = "Example Co";
-  process.env.SENDSTACK_POSTAL_ADDRESS = "1 Example Street, London, EC1A 1BB";
   process.env.SENDSTACK_ALLOWED_LINK_DOMAINS = "example.com,www.example.com";
   process.env.SENDSTACK_PUBLIC_URL = "https://app.example.com";
   process.env.SENDSTACK_LIVE_SEND_ENABLED = "1";
@@ -126,7 +124,9 @@ export function applyTestEnv(url: string): void {
   process.env.SENDSTACK_HEALTH_MAX_UNSUBSCRIBE_RATE = "0.5";
   process.env.SENDSTACK_HEALTH_MAX_DELAY_RATE = "0.5";
   process.env.SENDSTACK_HEALTH_MAX_FAILURE_RATE = "0.5";
-  process.env.RESEND_API_KEY = process.env.RESEND_API_KEY || "re_test_key_for_pg_tests";
+  process.env.SENDSTACK_SMTP_HOST = process.env.SENDSTACK_SMTP_HOST || "mail.spacemail.com";
+  process.env.SENDSTACK_SMTP_USERNAME = process.env.SENDSTACK_SMTP_USERNAME || "news@example.com";
+  process.env.SENDSTACK_SMTP_PASSWORD = process.env.SENDSTACK_SMTP_PASSWORD || "test-smtp-password";
   delete process.env.SENDSTACK_EMERGENCY_STOP;
 }
 

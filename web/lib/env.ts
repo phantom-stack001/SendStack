@@ -32,8 +32,15 @@ export function liveSendBootIssues(): string[] {
       `Live sending requires identity/compliance settings: ${gaps.map((gap) => gap.id).join(", ")}`,
     );
   }
-  if (!process.env.RESEND_API_KEY || !process.env.RESEND_WEBHOOK_SECRET) {
-    issues.push("Live sending requires RESEND_API_KEY and RESEND_WEBHOOK_SECRET.");
+  const smtpReady = Boolean(
+    (process.env.SENDSTACK_SMTP_HOST ?? "").trim() &&
+      (process.env.SENDSTACK_SMTP_USERNAME ?? "").trim() &&
+      (process.env.SENDSTACK_SMTP_PASSWORD ?? "").trim(),
+  );
+  if (!smtpReady) {
+    issues.push(
+      "Live sending requires SENDSTACK_SMTP_HOST, SENDSTACK_SMTP_USERNAME, and SENDSTACK_SMTP_PASSWORD.",
+    );
   }
   if (!(process.env.CRON_SECRET ?? "").trim()) {
     issues.push("Live sending requires CRON_SECRET for authenticated launch-job cron ticks.");
