@@ -1,4 +1,12 @@
-import { boolean, index, jsonb, pgTable, text, timestamp } from "drizzle-orm/pg-core";
+import {
+  boolean,
+  index,
+  jsonb,
+  pgTable,
+  text,
+  timestamp,
+  uniqueIndex,
+} from "drizzle-orm/pg-core";
 
 export const user = pgTable("user", {
   id: text("id").primaryKey(),
@@ -84,5 +92,111 @@ export const emailDrafts = pgTable(
   },
   (table) => [
     index("email_drafts_user_id_updated_at_idx").on(table.userId, table.updatedAt),
+  ],
+);
+
+export const contacts = pgTable(
+  "contacts",
+  {
+    id: text("id").primaryKey(),
+    userId: text("user_id")
+      .notNull()
+      .references(() => user.id, { onDelete: "cascade" }),
+    email: text("email").notNull(),
+    firstName: text("first_name").notNull().default(""),
+    lastName: text("last_name").notNull().default(""),
+    company: text("company").notNull().default(""),
+    phone: text("phone").notNull().default(""),
+    subscriptionStatus: text("subscription_status").notNull().default("unknown"),
+    createdAt: timestamp("created_at").defaultNow().notNull(),
+    updatedAt: timestamp("updated_at")
+      .defaultNow()
+      .$onUpdate(() => new Date())
+      .notNull(),
+  },
+  (table) => [
+    uniqueIndex("contacts_user_id_email_unique").on(table.userId, table.email),
+    index("contacts_user_id_created_at_idx").on(table.userId, table.createdAt),
+    index("contacts_user_id_status_idx").on(table.userId, table.subscriptionStatus),
+  ],
+);
+
+export const contactLists = pgTable(
+  "contact_lists",
+  {
+    id: text("id").primaryKey(),
+    userId: text("user_id")
+      .notNull()
+      .references(() => user.id, { onDelete: "cascade" }),
+    name: text("name").notNull(),
+    description: text("description").notNull().default(""),
+    createdAt: timestamp("created_at").defaultNow().notNull(),
+    updatedAt: timestamp("updated_at")
+      .defaultNow()
+      .$onUpdate(() => new Date())
+      .notNull(),
+  },
+  (table) => [
+    uniqueIndex("contact_lists_user_id_name_unique").on(table.userId, table.name),
+    index("contact_lists_user_id_updated_at_idx").on(table.userId, table.updatedAt),
+  ],
+);
+
+export const contactListMembers = pgTable(
+  "contact_list_members",
+  {
+    id: text("id").primaryKey(),
+    listId: text("list_id")
+      .notNull()
+      .references(() => contactLists.id, { onDelete: "cascade" }),
+    contactId: text("contact_id")
+      .notNull()
+      .references(() => contacts.id, { onDelete: "cascade" }),
+    createdAt: timestamp("created_at").defaultNow().notNull(),
+  },
+  (table) => [
+    uniqueIndex("contact_list_members_list_contact_unique").on(table.listId, table.contactId),
+    index("contact_list_members_contact_id_idx").on(table.contactId),
+  ],
+);
+
+export const contactConsentEvents = pgTable(
+  "contact_consent_events",
+  {
+    id: text("id").primaryKey(),
+    userId: text("user_id")
+      .notNull()
+      .references(() => user.id, { onDelete: "cascade" }),
+    contactId: text("contact_id").references(() => contacts.id, { onDelete: "set null" }),
+    eventType: text("event_type").notNull(),
+    source: text("source").notNull().default(""),
+    occurredAt: timestamp("occurred_at").notNull(),
+    recordedAt: timestamp("recorded_at").defaultNow().notNull(),
+    metadata: jsonb("metadata").$type<Record<string, unknown>>(),
+  },
+  (table) => [
+    index("contact_consent_events_contact_id_idx").on(table.contactId),
+    index("contact_consent_events_user_id_idx").on(table.userId),
+  ],
+);
+
+export const emailSuppressions = pgTable(
+  "email_suppressions",
+  {
+    id: text("id").primaryKey(),
+    userId: text("user_id")
+      .notNull()
+      .references(() => user.id, { onDelete: "cascade" }),
+    email: text("email").notNull(),
+    reason: text("reason").notNull(),
+    createdAt: timestamp("created_at").defaultNow().notNull(),
+    updatedAt: timestamp("updated_at")
+      .defaultNow()
+      .$onUpdate(() => new Date())
+      .notNull(),
+  },
+  (table) => [
+    uniqueIndex("email_suppressions_user_id_email_unique").on(table.userId, table.email),
+    index("email_suppressions_user_id_reason_idx").on(table.userId, table.reason),
   ],
 );

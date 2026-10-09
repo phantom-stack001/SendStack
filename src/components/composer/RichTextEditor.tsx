@@ -33,7 +33,7 @@ export function RichTextEditor({ content, onChange, className }: RichTextEditorP
     editorProps: {
       attributes: {
         class:
-          "tiptap-editor prose prose-sm sm:prose-base max-w-none min-h-[280px] px-4 py-3 focus:outline-none [&_a]:text-primary [&_a]:underline",
+          "tiptap-editor min-h-[280px] px-4 py-3 focus:outline-none [&_a]:text-primary [&_a]:underline",
         "aria-label": "Email body",
       },
     },
@@ -84,7 +84,7 @@ export function RichTextEditor({ content, onChange, className }: RichTextEditorP
   return (
     <div className={cn("rounded-lg border border-border bg-background shadow-xs", className)}>
       <EditorToolbar editor={editor} onLinkClick={openLinkDialog} />
-      <div className="rounded-b-lg border-t border-border">
+      <div className="sendstack-composer-editor rounded-b-lg border-t border-border">
         <EditorContent editor={editor} />
       </div>
 

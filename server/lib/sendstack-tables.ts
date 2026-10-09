@@ -24,7 +24,14 @@ export const LEGACY_SENDSTACK_TABLES = [
 
 export const BETTER_AUTH_TABLES = ["verification", "account", "session", "user"] as const;
 
-export const SENDSTACK_APP_TABLES = ["email_drafts"] as const;
+export const SENDSTACK_APP_TABLES = [
+  "email_drafts",
+  "contacts",
+  "contact_lists",
+  "contact_list_members",
+  "contact_consent_events",
+  "email_suppressions",
+] as const;
 
 export const DRIZZLE_META_TABLES = ["__drizzle_migrations"] as const;
 

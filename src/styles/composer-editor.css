@@ -1,0 +1,59 @@
+/* Scoped to the email composer Tiptap surface only (not sidebar, landing, or legal). */
+.sendstack-composer-editor .ProseMirror {
+  outline: none;
+}
+
+.sendstack-composer-editor .ProseMirror ul {
+  list-style-type: disc;
+  margin: 0.75rem 0;
+  padding-left: 1.5rem;
+}
+
+.sendstack-composer-editor .ProseMirror ol {
+  list-style-type: decimal;
+  margin: 0.75rem 0;
+  padding-left: 1.5rem;
+}
+
+.sendstack-composer-editor .ProseMirror li {
+  margin: 0.25rem 0;
+}
+
+.sendstack-composer-editor .ProseMirror li > p {
+  margin: 0;
+}
+
+.sendstack-composer-editor .ProseMirror ul ul {
+  list-style-type: circle;
+}
+
+.sendstack-composer-editor .ProseMirror ul ul ul {
+  list-style-type: square;
+}
+
+.sendstack-composer-editor .ProseMirror ol ol {
+  list-style-type: lower-alpha;
+}
+
+.sendstack-composer-editor .ProseMirror blockquote {
+  margin: 0.75rem 0;
+  padding-left: 0.75rem;
+  border-left: 3px solid var(--accent);
+  color: var(--muted-foreground);
+}
+
+.sendstack-composer-editor .ProseMirror h1,
+.sendstack-composer-editor .ProseMirror h2,
+.sendstack-composer-editor .ProseMirror h3 {
+  line-height: 1.25;
+  margin: 1rem 0 0.5rem;
+  font-weight: 600;
+}
+
+.sendstack-composer-editor .ProseMirror p {
+  margin: 0 0 0.75rem;
+}
+
+.sendstack-composer-editor .ProseMirror p:last-child {
+  margin-bottom: 0;
+}

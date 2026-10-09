@@ -11,7 +11,11 @@ import { DraftsPage } from "@/pages/app/DraftsPage";
 import { DashboardPage } from "@/pages/app/DashboardPage";
 import { HistoryPage } from "@/pages/app/HistoryPage";
 import { QueuePage } from "@/pages/app/QueuePage";
+import { ContactListDetailsPage } from "@/pages/app/ContactListDetailsPage";
+import { ContactListsPage } from "@/pages/app/ContactListsPage";
+import { ImportContactsPage } from "@/pages/app/ImportContactsPage";
 import { RecipientsPage } from "@/pages/app/RecipientsPage";
+import { SuppressionsPage } from "@/pages/app/SuppressionsPage";
 import { SettingsPage } from "@/pages/app/SettingsPage";
 import { TemplatesPage } from "@/pages/app/TemplatesPage";
 import { ForgotPasswordPage } from "@/pages/ForgotPasswordPage";
@@ -106,6 +110,10 @@ export const appRoutes = [
       { path: "drafts/", element: <DraftsPage /> },
       { path: "campaigns/", element: <CampaignsPage /> },
       { path: "recipients/", element: <RecipientsPage /> },
+      { path: "recipients/lists/", element: <ContactListsPage /> },
+      { path: "recipients/lists/:listId/", element: <ContactListDetailsPage /> },
+      { path: "recipients/import/", element: <ImportContactsPage /> },
+      { path: "recipients/suppressions/", element: <SuppressionsPage /> },
       { path: "templates/", element: <TemplatesPage /> },
       { path: "queue/", element: <QueuePage /> },
       { path: "history/", element: <HistoryPage /> },

@@ -13,6 +13,7 @@ import {
 const NAV_PREFIX_MATCHES: Record<string, string> = {
   "/app/compose/": "/app/compose/",
   "/app/drafts/": "/app/drafts/",
+  "/app/recipients/": "/app/recipients/",
 };
 
 export type DashboardNavItem = {

@@ -9,6 +9,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import { EMAIL_BODY_PREVIEW_CSS } from "@/lib/email-body-styles";
 import { cn } from "@/lib/utils";
 
 type EmailPreviewProps = {
@@ -19,28 +20,6 @@ type EmailPreviewProps = {
   subject: string;
   bodyHtml: string;
 };
-
-const PREVIEW_STYLES = `
-  body {
-    margin: 0;
-    padding: 16px;
-    font-family: "Segoe UI", "Helvetica Neue", Arial, sans-serif;
-    font-size: 15px;
-    line-height: 1.6;
-    color: #141821;
-    background: #ffffff;
-  }
-  a { color: #0f7a72; text-decoration: underline; }
-  h1, h2, h3 { line-height: 1.25; margin: 1rem 0 0.5rem; }
-  p { margin: 0 0 0.75rem; }
-  ul, ol { margin: 0 0 0.75rem 1.25rem; padding: 0; }
-  blockquote {
-    margin: 0 0 0.75rem;
-    padding-left: 0.75rem;
-    border-left: 3px solid #dcecea;
-    color: #5b6578;
-  }
-`;
 
 export function EmailPreview({
   open,
@@ -54,7 +33,7 @@ export function EmailPreview({
 
   const srcDoc = useMemo(() => {
     const safeBody = bodyHtml || "<p></p>";
-    return `<!DOCTYPE html><html><head><meta charset="utf-8"><style>${PREVIEW_STYLES}</style></head><body>${safeBody}</body></html>`;
+    return `<!DOCTYPE html><html><head><meta charset="utf-8"><style>${EMAIL_BODY_PREVIEW_CSS}</style></head><body>${safeBody}</body></html>`;
   }, [bodyHtml]);
 
   const fromLine =

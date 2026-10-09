@@ -68,6 +68,7 @@
 
 @import "./landing.css";
 @import "./legal.css";
+@import "./composer-editor.css";
 
 @layer base {
   * {
@@ -121,8 +122,8 @@
   --sidebar-ring: #14a399;
 }
 
-.tiptap-editor:empty::before,
-.ProseMirror p.is-editor-empty:first-child::before {
+.sendstack-composer-editor .tiptap-editor:empty::before,
+.sendstack-composer-editor .ProseMirror p.is-editor-empty:first-child::before {
   color: var(--muted-foreground);
   content: attr(data-placeholder);
   float: left;
@@ -130,6 +131,6 @@
   pointer-events: none;
 }
 
-.ProseMirror-focused {
+.sendstack-composer-editor .ProseMirror-focused {
   outline: none;
 }

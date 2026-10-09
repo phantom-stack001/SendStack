@@ -4,8 +4,12 @@ import { cors } from "hono/cors";
 
 import { auth } from "./auth/auth.js";
 import { loadEnv } from "./env.js";
+import { registerContactImportRoutes } from "./routes/contact-import.js";
+import { registerContactListRoutes } from "./routes/contact-lists.js";
+import { registerContactRoutes } from "./routes/contacts.js";
 import { registerDraftRoutes } from "./routes/drafts.js";
 import { registerHealthRoutes } from "./routes/health.js";
+import { registerSuppressionRoutes } from "./routes/suppressions.js";
 
 const env = loadEnv();
 const app = new Hono();
@@ -22,6 +26,10 @@ app.use(
 
 registerHealthRoutes(app);
 registerDraftRoutes(app);
+registerContactRoutes(app);
+registerContactListRoutes(app);
+registerContactImportRoutes(app);
+registerSuppressionRoutes(app);
 
 app.get("/api/me", async (c) => {
   const session = await auth.api.getSession({ headers: c.req.raw.headers });

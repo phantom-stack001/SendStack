@@ -2,9 +2,9 @@
 
 Public website and future operator UI for [ctn-sk.com](https://ctn-sk.com).
 
-**Phase 1B** delivered the React + Vite + Tailwind + shadcn/ui foundation. **Phase 2** adds the SendStack **login UI** (`login-04`) and **dashboard shell** (`sidebar-08`). **Phase 2.5** unifies the design system. **Phase 3** adds **Better Auth**, a Hono API, **Neon PostgreSQL**, and protected `/app/*` routes. **Phase 4** adds the **email composer** (Tiptap), **draft persistence**, and **preview**—still **no outbound sending**.
+**Phase 1B** delivered the React + Vite + Tailwind + shadcn/ui foundation. **Phase 2** adds the SendStack **login UI** (`login-04`) and **dashboard shell** (`sidebar-08`). **Phase 2.5** unifies the design system. **Phase 3** adds **Better Auth**, a Hono API, **Neon PostgreSQL**, and protected `/app/*` routes. **Phase 4** adds the **email composer** (Tiptap), **draft persistence**, and **preview**. **Phase 5** adds **recipient management** (contacts, lists, CSV import, consent events, suppressions)—still **no outbound sending**.
 
-Campaign execution, recipients, queue processing, and SMTP delivery are **not** implemented yet.
+Campaign execution, queue processing, and SMTP delivery are **not** implemented yet.
 
 ## Stack
 
@@ -307,15 +307,46 @@ npm run dev           # compose at /app/compose/, list at /app/drafts/
 
 ### Known limitations (Phase 4)
 
-- No email sending, SMTP, campaigns, or recipients.
+- No email sending, SMTP, or campaigns.
 - Sender name/email are draft metadata only (not verified sending identities).
 - Preview approximates common clients; it is not a guarantee for all inboxes.
 - Explicit **Save draft** only (no autosave).
 - Super-admin does **not** grant access to other users’ drafts.
 
-### Phase 5+ (planned)
+## Recipient management (Phase 5)
 
-Recipient lists, campaign workflows, queue workers, and server-side delivery infrastructure.
+### Routes
+
+| Path | Purpose |
+| --- | --- |
+| `/app/recipients/` | All contacts, search, filters, bulk actions |
+| `/app/recipients/lists/` | Contact lists |
+| `/app/recipients/lists/:listId/` | List members |
+| `/app/recipients/import/` | CSV import wizard |
+| `/app/recipients/suppressions/` | Suppression registry |
+
+### Database tables
+
+`contacts`, `contact_lists`, `contact_list_members`, `contact_consent_events`, `email_suppressions` (migration `drizzle/migrations/0002_recipient_management.sql`).
+
+- Unique contact email per user (`user_id` + normalized `email`).
+- CSV imports default to **`unknown`** consent; suppressions block re-subscription via import.
+- **Subscribed** status requires consent source + timestamp (append-only `contact_consent_events`).
+- Deleting a contact does not remove `email_suppressions` compliance records.
+
+### APIs (session required)
+
+Contacts: `GET/POST /api/contacts`, `GET/PATCH/DELETE /api/contacts/:id`, `GET /api/contacts/stats`, `POST /api/contacts/:id/unsubscribe`, bulk unsubscribe/delete.
+
+Lists: `GET/POST /api/contact-lists`, `GET/PATCH/DELETE /api/contact-lists/:id`, list membership endpoints under `/api/contact-lists/:id/contacts`.
+
+Import: `POST /api/contacts/import/preview`, `POST /api/contacts/import` (uses `csv-parse`, max 2MB / 10k rows).
+
+Suppressions: `GET/POST /api/suppressions`.
+
+### Phase 6+ (planned)
+
+Campaign workflows, queue workers, and server-side delivery infrastructure.
 
 ### Production deployment
 
