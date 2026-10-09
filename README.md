@@ -121,9 +121,23 @@ The build:
 1. Type-checks the project
 2. Bundles the client SPA
 3. Bundles `src/entry-server.tsx`
-4. Prerenders `/`, `/privacy/`, `/terms/`, and `/app/` into static `index.html` files (SEO-friendly HTML for crawlers)
+4. Prerenders `/`, `/privacy/`, `/terms/`, `/login/`, and `/app/` into static `index.html` files (SEO-friendly HTML for crawlers)
 
 Deploy **only** the contents of `dist/` (not `src/` or `node_modules`).
+
+### Vercel
+
+The app lives at the **repository root** (Vite), not in `web/`.
+
+In **Project Settings → General → Root Directory**, clear `web` and leave the root **empty** (or `.`), then redeploy.
+
+This repo includes `vercel.json` at the root:
+
+- **Build command:** `npm run build`
+- **Output directory:** `dist`
+- **SPA rewrites** for client routes (e.g. `/app/compose/`, `/login/`)
+
+If you see *“Root Directory web does not exist”*, the dashboard still points at the old Next.js layout—update Root Directory as above.
 
 ### Apache
 
