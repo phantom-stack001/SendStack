@@ -2,6 +2,7 @@ import { betterAuth } from "better-auth";
 import { drizzleAdapter } from "@better-auth/drizzle-adapter";
 import { admin } from "better-auth/plugins";
 
+import { sendstackAccessControl, sendstackAdminRoles } from "./access.js";
 import { createDb } from "../db/index.js";
 import * as schema from "../db/schema.js";
 import { loadEnv } from "../env.js";
@@ -24,6 +25,8 @@ export const auth = betterAuth({
   }),
   plugins: [
     admin({
+      ac: sendstackAccessControl,
+      roles: sendstackAdminRoles,
       defaultRole: "user",
       adminRoles: ["super-admin"],
     }),
