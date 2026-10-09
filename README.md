@@ -2,9 +2,9 @@
 
 Public website and future operator UI for [ctn-sk.com](https://ctn-sk.com).
 
-**Phase 1B** delivered the React + Vite + Tailwind + shadcn/ui foundation. **Phase 2** adds the SendStack **login UI** (`login-04`) and **dashboard shell** (`sidebar-08`). **Phase 2.5** unifies the design system. **Phase 3** adds **Better Auth**, a Hono API, **Neon PostgreSQL**, and protected `/app/*` routes.
+**Phase 1B** delivered the React + Vite + Tailwind + shadcn/ui foundation. **Phase 2** adds the SendStack **login UI** (`login-04`) and **dashboard shell** (`sidebar-08`). **Phase 2.5** unifies the design system. **Phase 3** adds **Better Auth**, a Hono API, **Neon PostgreSQL**, and protected `/app/*` routes. **Phase 4** adds the **email composer** (Tiptap), **draft persistence**, and **preview**—still **no outbound sending**.
 
-Campaign, queue, and SMTP delivery features are **not** implemented yet. The dashboard remains a UI shell with placeholder data.
+Campaign execution, recipients, queue processing, and SMTP delivery are **not** implemented yet.
 
 ## Stack
 
@@ -54,12 +54,14 @@ The legacy `web/` Next.js tree is **not** part of this frontend. Do not deploy o
 | `/terms/` | Terms of Service |
 | `/login/` | Sign in (login-04 UI, no backend auth yet) |
 
-### Application (UI prototype — not protected)
+### Application (protected — Better Auth session)
 
 | Path | Page |
 | --- | --- |
 | `/app/` | Dashboard overview |
-| `/app/compose/` | Compose placeholder |
+| `/app/compose/` | New email draft |
+| `/app/compose/:draftId/` | Edit saved draft |
+| `/app/drafts/` | Draft list |
 | `/app/campaigns/` | Campaigns placeholder |
 | `/app/recipients/` | Recipients placeholder |
 | `/app/templates/` | Templates placeholder |
@@ -86,6 +88,7 @@ Other commands:
 ```bash
 npm run typecheck   # TypeScript
 npm run lint        # ESLint
+npm run test        # Vitest (server content/safety tests)
 npm run build       # Client + SSR bundle + prerender
 npm run preview     # Serve dist/ locally
 ```
@@ -107,7 +110,7 @@ Official blocks installed via CLI:
 - `login-04` → `src/components/auth/LoginForm.tsx` + `LoginPage`
 - `sidebar-08` → `src/components/app-sidebar.tsx`, `nav-main.tsx`, `nav-user.tsx`, `ui/sidebar.tsx`, etc.
 
-Additional UI: **Button**, **Card**, **Sheet**, **Separator**, **Input**, **Field**, **Breadcrumb**, **Avatar**, **Dropdown Menu**, **Tooltip**, **Collapsible**, **Skeleton**.
+Additional UI: **Button**, **Card**, **Sheet**, **Separator**, **Input**, **Field**, **Breadcrumb**, **Avatar**, **Dropdown Menu**, **Tooltip**, **Collapsible**, **Skeleton**, **Dialog**, **Alert Dialog**, **Table**, **Textarea**, **Badge**.
 
 ## Design system (Phase 2.5)
 
@@ -257,18 +260,66 @@ The reset script refuses to run if unexpected `public` tables exist outside the 
 | `/app/*` | Requires verified session |
 | `/api/auth/*` | Better Auth handler |
 | `GET /api/health` | Public health check |
+| `GET /api/me` | Current session user |
+| `POST/GET/PATCH/DELETE /api/drafts` | Draft CRUD (session required) |
 
 Email verification and password reset **require outbound email**. With `AUTH_EMAIL_DELIVERY=console`, links are printed to the API server log (development only). Configure a transactional provider before production.
+
+## Email composer & drafts (Phase 4)
+
+### Architecture
+
+- **Editor:** [Tiptap](https://tiptap.dev/) (`@tiptap/react`, StarterKit, Underline, Link) with a shadcn/ui toolbar.
+- **Canonical content:** Tiptap JSON stored in `email_drafts.content_json` (JSONB).
+- **Derived fields:** `body_html` (sanitized) and `body_text` generated on the server when saving.
+- **Preview:** Client-side HTML from the current editor state, rendered in a **sandboxed** iframe (`sandbox=""`, no scripts).
+- **Persistence:** Drizzle ORM → Neon PostgreSQL table `email_drafts` (migration `drizzle/migrations/0001_adorable_power_pack.sql`).
+
+### Supported formatting
+
+Bold, italic, underline, strikethrough, paragraph, heading (H2), bullet/numbered lists, blockquote, hyperlinks (http/https/mailto), undo/redo, clear formatting.
+
+### Draft API
+
+All endpoints require a valid Better Auth session cookie. The API **never** accepts a client `user_id`; ownership is enforced with `WHERE user_id = session.user.id`. Inaccessible drafts return **404**.
+
+| Method | Path | Description |
+| --- | --- | --- |
+| `POST` | `/api/drafts` | Create draft (first explicit save on `/app/compose/`) |
+| `GET` | `/api/drafts` | List drafts (`page`, `limit`; default 25) |
+| `GET` | `/api/drafts/:id` | Fetch one draft |
+| `PATCH` | `/api/drafts/:id` | Update draft |
+| `DELETE` | `/api/drafts/:id` | Delete draft |
+
+Validation uses **Zod** (`server/validation/drafts.ts`). Incomplete drafts are allowed; size limits apply to subject, sender fields, and JSON/HTML payload.
+
+### HTML sanitization
+
+`server/lib/email-content.ts` validates Tiptap documents, renders HTML with `@tiptap/html`, then sanitizes with **sanitize-html** (allowlisted tags/attributes, safe link protocols, `rel="noopener noreferrer"` on links). Script tags, event handlers, and dangerous URL schemes are stripped.
+
+### Local testing
+
+```bash
+npm run test          # email content / sanitization unit tests
+npm run db:migrate    # ensure email_drafts exists
+npm run dev           # compose at /app/compose/, list at /app/drafts/
+```
+
+### Known limitations (Phase 4)
+
+- No email sending, SMTP, campaigns, or recipients.
+- Sender name/email are draft metadata only (not verified sending identities).
+- Preview approximates common clients; it is not a guarantee for all inboxes.
+- Explicit **Save draft** only (no autosave).
+- Super-admin does **not** grant access to other users’ drafts.
+
+### Phase 5+ (planned)
+
+Recipient lists, campaign workflows, queue workers, and server-side delivery infrastructure.
 
 ### Production deployment
 
 The static `dist/` SPA alone is **not** sufficient: you need a Node (or serverless) host for `server/` with `DATABASE_URL` and auth secrets, plus reverse-proxy `/api` to that service (or deploy frontend and API on one origin). Update `vercel.json` / hosting accordingly—do not expose Neon credentials to the browser.
-
-## Planned phases (not implemented)
-
-- **Phase 4+:** Bulk composer, recipients, campaigns, queue monitoring, server-side email delivery
-- **Backend:** Node.js API, PostgreSQL, Redis + BullMQ workers
-- **Email transport:** Server-side SMTP delivery (provider configured in infrastructure, not exposed in the UI)
 
 ## Verified public contact
 

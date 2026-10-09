@@ -6,7 +6,7 @@ import {
   CollapsibleContent,
   CollapsibleTrigger,
 } from "@/components/ui/collapsible";
-import { normalizeAppPath } from "@/lib/dashboard-nav";
+import { isDashboardNavItemActive } from "@/lib/dashboard-nav";
 import {
   SidebarGroup,
   SidebarGroupLabel,
@@ -35,14 +35,13 @@ export function NavMain({
   items: NavMainItem[];
 }) {
   const { pathname } = useLocation();
-  const currentPath = normalizeAppPath(pathname);
 
   return (
     <SidebarGroup>
       <SidebarGroupLabel>{label}</SidebarGroupLabel>
       <SidebarMenu>
         {items.map((item) => {
-          const isActive = currentPath === item.url;
+          const isActive = isDashboardNavItemActive(item.url, pathname);
           const hasChildren = Boolean(item.items?.length);
 
           if (!hasChildren) {

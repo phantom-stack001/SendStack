@@ -7,6 +7,7 @@ import { DashboardLayout } from "@/components/layout/DashboardLayout";
 import { PublicLayout } from "@/components/layout/PublicLayout";
 import { CampaignsPage } from "@/pages/app/CampaignsPage";
 import { ComposePage } from "@/pages/app/ComposePage";
+import { DraftsPage } from "@/pages/app/DraftsPage";
 import { DashboardPage } from "@/pages/app/DashboardPage";
 import { HistoryPage } from "@/pages/app/HistoryPage";
 import { QueuePage } from "@/pages/app/QueuePage";
@@ -101,6 +102,8 @@ export const appRoutes = [
     children: [
       { index: true, element: <DashboardPage /> },
       { path: "compose/", element: <ComposePage /> },
+      { path: "compose/:draftId/", element: <ComposePage /> },
+      { path: "drafts/", element: <DraftsPage /> },
       { path: "campaigns/", element: <CampaignsPage /> },
       { path: "recipients/", element: <RecipientsPage /> },
       { path: "templates/", element: <TemplatesPage /> },

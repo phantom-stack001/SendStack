@@ -4,6 +4,7 @@ import { cors } from "hono/cors";
 
 import { auth } from "./auth/auth.js";
 import { loadEnv } from "./env.js";
+import { registerDraftRoutes } from "./routes/drafts.js";
 import { registerHealthRoutes } from "./routes/health.js";
 
 const env = loadEnv();
@@ -20,6 +21,7 @@ app.use(
 );
 
 registerHealthRoutes(app);
+registerDraftRoutes(app);
 
 app.get("/api/me", async (c) => {
   const session = await auth.api.getSession({ headers: c.req.raw.headers });

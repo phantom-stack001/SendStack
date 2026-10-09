@@ -8,6 +8,13 @@
       "when": 1760010000000,
       "tag": "0000_better_auth",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1791558359661,
+      "tag": "0001_adorable_power_pack",
+      "breakpoints": true
     }
   ]
 }

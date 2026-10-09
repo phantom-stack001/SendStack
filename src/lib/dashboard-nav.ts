@@ -10,6 +10,11 @@ import {
   type LucideIcon,
 } from "lucide-react";
 
+const NAV_PREFIX_MATCHES: Record<string, string> = {
+  "/app/compose/": "/app/compose/",
+  "/app/drafts/": "/app/drafts/",
+};
+
 export type DashboardNavItem = {
   title: string;
   url: string;
@@ -30,6 +35,7 @@ export const dashboardNavGroups: DashboardNavGroup[] = [
     label: "Email management",
     items: [
       { title: "Compose", url: "/app/compose/", icon: SquarePen },
+      { title: "Drafts", url: "/app/drafts/", icon: FileText },
       { title: "Campaigns", url: "/app/campaigns/", icon: Mail },
       { title: "Recipients", url: "/app/recipients/", icon: Users },
       { title: "Templates", url: "/app/templates/", icon: FileText },
@@ -55,10 +61,19 @@ export function normalizeAppPath(pathname: string) {
   return pathname.endsWith("/") ? pathname : `${pathname}/`;
 }
 
+export function isDashboardNavItemActive(itemUrl: string, pathname: string) {
+  const currentPath = normalizeAppPath(pathname);
+  if (currentPath === itemUrl) {
+    return true;
+  }
+  const prefix = NAV_PREFIX_MATCHES[itemUrl];
+  return prefix ? currentPath.startsWith(prefix) : false;
+}
+
 export function findDashboardNavItem(pathname: string): DashboardNavItem | undefined {
   const currentPath = normalizeAppPath(pathname);
   for (const group of dashboardNavGroups) {
-    const match = group.items.find((item) => item.url === currentPath);
+    const match = group.items.find((item) => isDashboardNavItemActive(item.url, currentPath));
     if (match) {
       return match;
     }

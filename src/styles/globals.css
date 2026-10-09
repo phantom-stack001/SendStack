@@ -120,3 +120,16 @@
   --sidebar-border: rgba(244, 247, 248, 0.12);
   --sidebar-ring: #14a399;
 }
+
+.tiptap-editor:empty::before,
+.ProseMirror p.is-editor-empty:first-child::before {
+  color: var(--muted-foreground);
+  content: attr(data-placeholder);
+  float: left;
+  height: 0;
+  pointer-events: none;
+}
+
+.ProseMirror-focused {
+  outline: none;
+}

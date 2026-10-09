@@ -28,6 +28,9 @@ export default defineConfig({
           if (id.includes("node_modules/react-router") || id.includes("node_modules/react-router-dom")) {
             return "router";
           }
+          if (id.includes("node_modules/@tiptap") || id.includes("node_modules/prosemirror")) {
+            return "tiptap";
+          }
         },
       },
     },
