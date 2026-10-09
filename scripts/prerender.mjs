@@ -8,7 +8,7 @@ const templatePath = path.join(distDir, "index.html");
 
 const { render } = await import(path.join(distDir, "server/entry-server.js"));
 
-const routes = ["/", "/privacy/", "/terms/", "/app/"];
+const routes = ["/", "/privacy/", "/terms/", "/login/", "/app/"];
 const template = fs.readFileSync(templatePath, "utf8");
 
 const headByRoute = {
@@ -28,9 +28,14 @@ const headByRoute = {
     description: "Terms governing use of this website and related services.",
     canonicalPath: "/terms/",
   },
+  "/login/": {
+    title: "Sign in | SendStack",
+    description: "Sign in to the SendStack workspace for CTN Slovakia.",
+    canonicalPath: "/login/",
+  },
   "/app/": {
-    title: "Workspace | CTN",
-    description: "CTN workspace sign-in.",
+    title: "Dashboard | SendStack",
+    description: "SendStack dashboard overview for CTN Slovakia.",
     canonicalPath: "/app/",
   },
 };

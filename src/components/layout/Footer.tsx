@@ -11,7 +11,7 @@ export function Footer() {
           <div className="footer-links">
             <Link to="/privacy/">Privacy</Link>
             <Link to="/terms/">Terms</Link>
-            <Link to="/app/">Sign in</Link>
+            <Link to="/login/">Sign in</Link>
           </div>
         </div>
       </div>

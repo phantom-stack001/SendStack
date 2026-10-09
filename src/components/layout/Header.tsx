@@ -65,7 +65,7 @@ export function Header() {
                   </a>
                 ))}
                 <Button asChild variant="secondary" className="mt-2 w-full">
-                  <Link to="/app/">Sign in</Link>
+                  <Link to="/login/">Sign in</Link>
                 </Button>
               </nav>
             </SheetContent>
@@ -75,7 +75,7 @@ export function Header() {
             {navLinks.map((link) => (
               <a key={link.label} href={link.href}>{link.label}</a>
             ))}
-            <Link className="nav-cta" to="/app/">Sign in</Link>
+            <Link className="nav-cta" to="/login/">Sign in</Link>
           </nav>
         </div>
       </div>

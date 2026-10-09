@@ -2,7 +2,9 @@
 
 Public website and future operator UI for [ctn-sk.com](https://ctn-sk.com).
 
-**Phase 1B** delivers a modern frontend foundation (React + TypeScript + Vite + Tailwind CSS + shadcn/ui) while preserving the Phase 1 landing page design. Backend, authentication, SMTP, database, and queue workers are **not** implemented yet.
+**Phase 1B** delivered the React + Vite + Tailwind + shadcn/ui foundation. **Phase 2** adds the SendStack **login UI** (`login-04`) and **dashboard shell** (`sidebar-08`).
+
+Authentication, real sessions, SMTP, database, and queue workers are **not** implemented yet. The dashboard is an **unprotected UI prototype** until the backend is built.
 
 ## Stack
 
@@ -42,12 +44,28 @@ The legacy `web/` Next.js tree is **not** part of this frontend. Do not deploy o
 
 ## Routes
 
+### Public
+
 | Path | Page |
 | --- | --- |
 | `/` | Landing page |
 | `/privacy/` | Privacy Policy |
 | `/terms/` | Terms of Service |
-| `/app/` | Workspace placeholder (auth in a later phase) |
+| `/login/` | Sign in (login-04 UI, no backend auth yet) |
+
+### Application (UI prototype — not protected)
+
+| Path | Page |
+| --- | --- |
+| `/app/` | Dashboard overview |
+| `/app/compose/` | Compose placeholder |
+| `/app/campaigns/` | Campaigns placeholder |
+| `/app/recipients/` | Recipients placeholder |
+| `/app/templates/` | Templates placeholder |
+| `/app/queue/` | Queue placeholder |
+| `/app/history/` | Sending history placeholder |
+| `/app/settings/` | Settings placeholder |
+
 | `*` | Not found |
 
 Trailing slashes are canonical; bare paths (`/privacy`) redirect to `/privacy/`.
@@ -83,7 +101,12 @@ Add components with the official CLI (from project root):
 npx shadcn@latest add <component>
 ```
 
-Components in use today: **Button**, **Card**, **Sheet**, **Separator**.
+Official blocks installed via CLI:
+
+- `login-04` → `src/components/auth/LoginForm.tsx` + `LoginPage`
+- `sidebar-08` → `src/components/app-sidebar.tsx`, `nav-main.tsx`, `nav-user.tsx`, `ui/sidebar.tsx`, etc.
+
+Additional UI: **Button**, **Card**, **Sheet**, **Separator**, **Input**, **Field**, **Breadcrumb**, **Avatar**, **Dropdown Menu**, **Tooltip**, **Collapsible**, **Skeleton**.
 
 ## Production build
 
@@ -118,10 +141,17 @@ location / {
 
 No secrets or `.env` values are required for the public site. Future API and SMTP configuration will live on the server only—never in client bundles or `localStorage`.
 
+## Authentication limitations (Phase 2)
+
+- Sign in at `/login/` validates input client-side only.
+- Submitting the form shows an informational message; **no session is created**.
+- `/app/*` routes are reachable without login until server-side auth is added.
+- No passwords, tokens, or SMTP credentials are stored in the browser.
+
 ## Planned phases (not implemented)
 
-- **Phase 2:** Authentication and sessions under `/app/`
-- **Phase 3+:** Dashboard, bulk composer, recipients, campaigns, queue monitoring
+- **Phase 3:** Real authentication, sessions, and protected `/app/*` routes
+- **Phase 4+:** Bulk composer, recipients, campaigns, queue monitoring, SpaceMail SMTP (server-side only)
 - **Backend:** Node.js API, PostgreSQL, Redis + BullMQ workers
 - **Email transport:** SpaceMail SMTP (server-side only)
 

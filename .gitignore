@@ -17,6 +17,7 @@ yarn-error.log*
 
 # Editor & local tooling
 .cursor/
+@/
 .idea/
 .vscode/*
 !.vscode/extensions.json

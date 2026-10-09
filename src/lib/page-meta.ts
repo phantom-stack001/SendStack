@@ -21,9 +21,14 @@ export const publicPageMeta: Record<string, PublicPageMeta> = {
     description: "Terms governing use of this website and related services.",
     canonicalPath: "/terms/",
   },
+  "/login/": {
+    title: "Sign in | SendStack",
+    description: "Sign in to the SendStack workspace for CTN Slovakia.",
+    canonicalPath: "/login/",
+  },
   "/app/": {
-    title: "Workspace | CTN",
-    description: "CTN workspace sign-in.",
+    title: "Dashboard | SendStack",
+    description: "SendStack dashboard overview for CTN Slovakia.",
     canonicalPath: "/app/",
   },
 };

@@ -17,7 +17,7 @@ export function Contact() {
             </li>
             <li>
               <span>Workspace</span>
-              <Link to="/app/">Sign in</Link>
+              <Link to="/login/">Sign in</Link>
             </li>
           </ul>
         </div>
