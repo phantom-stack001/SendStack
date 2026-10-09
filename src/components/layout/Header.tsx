@@ -50,7 +50,7 @@ export function Header() {
                 <Menu className="size-4" aria-hidden="true" />
               </Button>
             </SheetTrigger>
-            <SheetContent side="right" className="bg-[rgba(232,236,239,0.98)]">
+            <SheetContent side="right" className="bg-background">
               <SheetHeader>
                 <SheetTitle>Navigation</SheetTitle>
               </SheetHeader>
@@ -58,7 +58,7 @@ export function Header() {
                 {navLinks.map((link) => (
                   <a
                     key={link.label}
-                    className="rounded-md px-3 py-2 text-[0.92rem] font-medium text-[var(--muted)] hover:bg-white/60 hover:text-[var(--ink)]"
+                    className="rounded-md px-3 py-2 text-[0.92rem] font-medium text-muted-foreground hover:bg-accent hover:text-foreground"
                     href={link.href}
                   >
                     {link.label}
