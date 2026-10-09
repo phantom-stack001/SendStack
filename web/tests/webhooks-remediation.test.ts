@@ -3,7 +3,7 @@ import { isPermanentBounce } from "../lib/providers/webhook-processor";
 
 /**
  * Spacemail SMTP has no delivery webhooks. These tests keep bounce-classification
- * semantics used by simulated administrator feedback.
+ * helpers for historical rows and any remaining API-side event handling.
  */
 describe("smtp-era bounce helpers", () => {
   it("keeps permanent-bounce fail-closed behavior", () => {

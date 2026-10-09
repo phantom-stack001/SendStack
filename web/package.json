@@ -17,6 +17,7 @@
   },
   "dependencies": {
     "@next/env": "15.5.24",
+    "imapflow": "^1.7.8",
     "next": "15.5.24",
     "nodemailer": "^10.0.16",
     "pg": "^8.13.1",

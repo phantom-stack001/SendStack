@@ -13,6 +13,7 @@ export const REQUIRED_MIGRATIONS = [
   "0005_deliverability_hardening.sql",
   "0006_consent_volume_launch_hardening.sql",
   "0007_submission_state_machine.sql",
+  "0008_drop_consent_gate.sql",
 ] as const;
 
 export const REQUIRED_TABLES = [
@@ -84,10 +85,9 @@ export const REQUIRED_INDEXES = [
 
 export const REQUIRED_TRIGGERS = ["launch_jobs_protect_submission"] as const;
 
-/** Constraints that enforce consent and delivery-state integrity. */
+/** Constraints that enforce contact and delivery-state integrity. */
 export const REQUIRED_CONSTRAINTS = [
   "contacts_status_check",
-  "contacts_active_requires_consent_check",
   "campaigns_status_check",
   "campaign_recipients_status_check",
   "suppressions_reason_check",

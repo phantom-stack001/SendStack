@@ -64,7 +64,7 @@ Never set application `DATABASE_URL` to the disposable test database.
 ## Delivery modes
 
 - **Sandbox (default):** campaign launch processes recipients inside the request and writes local `messages` rows. No external email is sent.
-- **Live Spacemail SMTP:** requires `SENDSTACK_SMTP_HOST`, `SENDSTACK_SMTP_USERNAME`, `SENDSTACK_SMTP_PASSWORD`, `SENDSTACK_DELIVERY_MODE=smtp`, enforced identity settings (`SENDSTACK_FROM_EMAIL`, `SENDSTACK_REPLY_TO_EMAIL`, `SENDSTACK_ALLOWED_LINK_DOMAINS`), `CRON_SECRET`, and `SENDSTACK_LIVE_SEND_ENABLED=true`. Campaign HTML and text must include a visible `{{unsubscribe_url}}`. Keep live send locked until launch gates pass. Incomplete live-send config is logged at boot and blocks send/readiness APIs; it does **not** crash login or other routes. Vercel **preview** deployments cannot live-send even if those vars are present. Apply migrations through `0007_submission_state_machine.sql` before live send.
+- **Live Spacemail SMTP:** each list address is submitted as its own ordinary SMTP message from the authenticated mailbox (From, To, Subject, body — same as Spacemail webmail). Requires `SENDSTACK_SMTP_HOST`, `SENDSTACK_SMTP_USERNAME`, `SENDSTACK_SMTP_PASSWORD`, `SENDSTACK_DELIVERY_MODE=smtp`, `SENDSTACK_FROM_EMAIL` matching the mailbox, `CRON_SECRET`, and `SENDSTACK_LIVE_SEND_ENABLED=true`. Reply-To and link-domain allowlists are optional. After accept, a copy is appended to Sent. **Mailbox** reads Inbox and Sent over IMAP (`SENDSTACK_IMAP_HOST`, default `mail.spacemail.com:993`) using the same credentials; reading does not require live send to be unlocked. Preview deployments cannot open SMTP or IMAP. Apply migrations through `0008_drop_consent_gate.sql` before live send.
 
 ## Vercel deploy checklist
 

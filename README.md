@@ -2,7 +2,7 @@
 
 This repository contains a runnable, dependency-free test build of the SendStack email marketing platform, plus a production-oriented Next.js app under `web/`. It is intentionally safe by default: messages are captured inside the application and no external email is sent.
 
-The selected production target is **Vercel + managed PostgreSQL + Spacemail SMTP**. That target is visible under **Sending setup** in the application. It is a migration target—not an active transport in the Python test build.
+Production delivery is **Vercel + managed PostgreSQL + Spacemail SMTP**. Each list address receives its own ordinary SMTP message from the Spacemail mailbox. Local and preview environments stay sandboxed by default until live send is unlocked.
 
 ## Documentation
 
@@ -86,23 +86,21 @@ Only use synthetic addresses or contacts with documented permission.
 ./scripts/test.sh
 ```
 
-## Selected production architecture
+## Production delivery (Spacemail SMTP)
 
-The live delivery path is:
+Live send works like a Spacemail mail client:
 
 1. Vercel hosts the web application and request-scoped API.
-2. Managed PostgreSQL stores users, consent, lists, immutable recipient snapshots, provider IDs, delivery events, and global suppressions.
-3. A durable launch job submits one ordinary MIME message per recipient through Spacemail SMTP (`mail.spacemail.com:465`).
-4. SMTP acceptance is recorded as submitted; Spacemail has no delivery webhook for inbox outcomes.
+2. Managed PostgreSQL stores users, lists, immutable recipient snapshots, delivery rows, and suppressions.
+3. A durable launch job submits **one ordinary MIME message per list address** through Spacemail SMTP (`mail.spacemail.com:465`), authenticated as the mailbox — From, To, Subject, and body (optional campaign Reply-To; Spacemail assigns Message-ID; no List-Unsubscribe headers).
+4. SMTP acceptance is recorded as submitted and a copy is filed in the mailbox Sent folder. Mailbox in the app reads Inbox and Sent over IMAP. Deliveries remains the local send log. An optional `{{unsubscribe_url}}` merge field still works when the author includes it; suppressions stay server-side.
 5. An external scheduler ticks `GET /api/cron/launch-jobs` so campaigns progress without a long-lived Vercel worker.
+
+Sandbox remains the default. Live send stays locked behind `SENDSTACK_LIVE_SEND_ENABLED` (default `false`), Spacemail credentials, identity settings, and the emergency stop. `SENDSTACK_FROM_EMAIL` must match `SENDSTACK_SMTP_USERNAME`. Administrator test sends still require `SENDSTACK_TEST_RECIPIENT_ALLOWLIST`.
 
 DNS may host Spacemail SPF/DKIM/DMARC records. Steady-state volume is bounded by the Spacemail mailbox plan (500 messages/hour on paid plans) and `SENDSTACK_DAILY_LIMIT`.
 
-See [`docs/architecture.md`](docs/architecture.md) and [`docs/deployment.md`](docs/deployment.md) for the full contract, implementation sequence, and handover checklist.
-
-## Optional Spacemail SMTP
-
-SMTP mode is deliberately fail-closed. It uses implicit TLS on port 465 (the same path as a Spacemail mail client), a verified From address, and the existing live-send kill switch. Administrator test sends still require `SENDSTACK_TEST_RECIPIENT_ALLOWLIST`. Copy `.env.example` into your own secret-management workflow and set the variables before starting the server.
+See [`docs/architecture.md`](docs/architecture.md) and [`docs/deployment.md`](docs/deployment.md) for the full contract and handover checklist.
 
 ```bash
 SENDSTACK_DELIVERY_MODE=smtp \
@@ -111,6 +109,8 @@ SENDSTACK_SMTP_PORT=465 \
 SENDSTACK_SMTP_USERNAME=you@example.com \
 SENDSTACK_SMTP_PASSWORD=your-secret \
 SENDSTACK_SMTP_FROM_EMAIL=you@example.com \
+SENDSTACK_FROM_EMAIL=you@example.com \
+SENDSTACK_LIVE_SEND_ENABLED=true \
 SENDSTACK_TEST_RECIPIENT_ALLOWLIST=owner@example.com \
 ./scripts/start.sh
 ```

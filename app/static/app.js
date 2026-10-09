@@ -65,7 +65,6 @@ const defaultTemplate = `<!doctype html>
             <p style="margin:0 0 22px;color:#53627a;line-height:1.65">Replace this text with the message you want your audience to receive. The test inbox will show the fully personalized result before external delivery is enabled.</p>
             <a href="#" style="display:inline-block;background:#5b7cff;color:white;text-decoration:none;padding:12px 18px;border-radius:8px;font-weight:bold">Primary action</a>
           </td></tr>
-          <tr><td style="padding:21px 30px;background:#f7f9fc;color:#718097;font-size:12px;line-height:1.6">You are receiving this because you opted in to updates.<br><a href="{{unsubscribe_url}}" style="color:#536fd9">Unsubscribe</a></td></tr>
         </table>
       </td></tr>
     </table>
@@ -161,25 +160,27 @@ function visualEmailContent(input) {
   const paragraphs = escapeHtml(data.body).split(/\n{2,}/).map((paragraph) => `<p style="margin:0 0 16px;color:#53627a;line-height:1.65">${paragraph.replaceAll("\n", "<br>")}</p>`).join("");
   const ctaUrl = safeComposerUrl(data.cta_url);
   const cta = data.cta_label && ctaUrl ? `<a href="${escapeHtml(ctaUrl)}" style="display:inline-block;background:${accent};color:#ffffff;text-decoration:none;padding:12px 18px;border-radius:8px;font-weight:bold">${escapeHtml(data.cta_label)}</a>` : "";
-  const htmlBody = `<!doctype html><html><body style="margin:0;background:${background};font-family:Arial,sans-serif;color:#14213d"><div style="display:none;max-height:0;overflow:hidden;color:transparent">${escapeHtml(data.preheader)}</div><table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="background:${background};padding:32px 16px"><tr><td align="center"><table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="max-width:600px;background:#ffffff;border:${cardBorder};border-radius:14px;overflow:hidden"><tr><td style="padding:26px 30px;background:${headerBackground};color:${headerColor};font-size:20px;font-weight:bold">${escapeHtml(data.brand_name)}</td></tr><tr><td style="padding:34px 30px"><p style="margin:0 0 14px;font-size:16px">Hello {{first_name}},</p><h1 style="margin:0 0 16px;font-size:28px;line-height:1.2">${escapeHtml(data.headline)}</h1>${paragraphs}${cta}</td></tr><tr><td style="padding:21px 30px;background:#f7f9fc;color:#718097;font-size:12px;line-height:1.6">${escapeHtml(data.footer)}<br><a href="{{unsubscribe_url}}" style="color:${accent}">Unsubscribe</a></td></tr></table></td></tr></table></body></html>`;
+  const footerCell = data.footer
+    ? `<tr><td style="padding:21px 30px;background:#f7f9fc;color:#718097;font-size:12px;line-height:1.6">${escapeHtml(data.footer)}</td></tr>`
+    : "";
+  const htmlBody = `<!doctype html><html><body style="margin:0;background:${background};font-family:Arial,sans-serif;color:#14213d"><div style="display:none;max-height:0;overflow:hidden;color:transparent">${escapeHtml(data.preheader)}</div><table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="background:${background};padding:32px 16px"><tr><td align="center"><table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="max-width:600px;background:#ffffff;border:${cardBorder};border-radius:14px;overflow:hidden"><tr><td style="padding:26px 30px;background:${headerBackground};color:${headerColor};font-size:20px;font-weight:bold">${escapeHtml(data.brand_name)}</td></tr><tr><td style="padding:34px 30px"><p style="margin:0 0 14px;font-size:16px">Hello {{first_name}},</p><h1 style="margin:0 0 16px;font-size:28px;line-height:1.2">${escapeHtml(data.headline)}</h1>${paragraphs}${cta}</td></tr>${footerCell}</table></td></tr></table></body></html>`;
   const textParts = [data.brand_name, `Hello {{first_name}},`, data.headline, data.body];
   if (data.cta_label && ctaUrl) textParts.push(`${data.cta_label}: ${ctaUrl}`);
-  textParts.push(data.footer, "Unsubscribe: {{unsubscribe_url}}");
+  if (data.footer) textParts.push(data.footer);
   return { html_body: htmlBody, text_body: textParts.filter(Boolean).join("\n\n"), content_json: data };
 }
 
 function richEmailContent(input) {
   const richHtml = sanitizeRichHtml(input?.rich_html || defaultRichContent);
-  const htmlBody = `<!doctype html><html><body style="margin:0;background:#f1f5fb;font-family:Arial,sans-serif;color:#14213d"><table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="padding:32px 16px"><tr><td align="center"><table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="max-width:600px;background:#ffffff;border-radius:14px"><tr><td style="padding:34px 30px;line-height:1.65">${richHtml}</td></tr><tr><td style="padding:20px 30px;background:#f7f9fc;color:#718097;font-size:12px">You are receiving this because you opted in.<br><a href="{{unsubscribe_url}}" style="color:#536fd9">Unsubscribe</a></td></tr></table></td></tr></table></body></html>`;
+  const htmlBody = `<!doctype html><html><body style="margin:0;background:#f1f5fb;font-family:Arial,sans-serif;color:#14213d"><table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="padding:32px 16px"><tr><td align="center"><table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="max-width:600px;background:#ffffff;border-radius:14px"><tr><td style="padding:34px 30px;line-height:1.65">${richHtml}</td></tr></table></td></tr></table></body></html>`;
   const text = richHtmlToText(richHtml);
-  return { html_body: htmlBody, text_body: `${text}\n\nUnsubscribe: {{unsubscribe_url}}`, content_json: { schema_version: 1, rich_html: richHtml } };
+  return { html_body: htmlBody, text_body: text, content_json: { schema_version: 1, rich_html: richHtml } };
 }
 
 function plainEmailContent(input) {
-  let text = String(input?.plain_text || "Hello {{first_name}},\n\nWrite your message here.").trim();
-  if (!text.includes("{{unsubscribe_url}}")) text += "\n\nUnsubscribe: {{unsubscribe_url}}";
-  const htmlBody = `<!doctype html><html><body style="margin:0;background:#f1f5fb;font-family:Arial,sans-serif;color:#14213d"><table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="padding:32px 16px"><tr><td align="center"><div style="max-width:600px;background:#ffffff;border-radius:12px;padding:30px;white-space:pre-wrap;line-height:1.65">${escapeHtml(text).replaceAll("\n", "<br>")}</div></td></tr></table></body></html>`;
-  return { html_body: htmlBody, text_body: text, content_json: { schema_version: 1, plain_text: text } };
+  const text = String(input?.plain_text || "Hello {{first_name}},\n\nWrite your message here.").trim();
+  // Plain-text mode sends text only — same as Spacemail webmail plain compose.
+  return { html_body: "", text_body: text, content_json: { schema_version: 1, plain_text: text } };
 }
 
 function buildCampaignContent(mode, draft) {
@@ -188,7 +189,7 @@ function buildCampaignContent(mode, draft) {
   if (mode === "plain_text") return plainEmailContent(draft);
   return {
     html_body: String(draft?.html_body || defaultTemplate),
-    text_body: String(draft?.text_body || "Hello {{first_name}},\n\nWrite your message here.\n\nUnsubscribe: {{unsubscribe_url}}"),
+    text_body: String(draft?.text_body || "Hello {{first_name}},\n\nWrite your message here."),
     content_json: { schema_version: 1 },
   };
 }
@@ -599,17 +600,17 @@ function modeEditorMarkup(mode, draft) {
       <label>Message<textarea data-visual-field="body" rows="7">${escapeHtml(data.body)}</textarea></label>
       <div class="form-grid"><label>Button label<input data-visual-field="cta_label" maxlength="80" value="${escapeHtml(data.cta_label)}" /></label><label>Button link<input data-visual-field="cta_url" type="url" value="${escapeHtml(data.cta_url)}" placeholder="https://" /></label></div>
       <label>Footer note<input data-visual-field="footer" maxlength="240" value="${escapeHtml(data.footer)}" /></label>
-      <p class="help">Personalized greeting and unsubscribe link are added automatically.</p>
+      <p class="help">Optional merge fields: {{first_name}}, {{last_name}}, {{email}}, {{unsubscribe_url}}.</p>
     </div>`;
   }
   if (mode === "rich_text") {
     const richHtml = sanitizeRichHtml(draft?.rich_html || defaultRichContent);
-    return `<div class="mode-editor" data-mode-editor="rich_text"><span class="field-label">Message</span><div class="rich-toolbar" role="toolbar" aria-label="Text formatting"><button type="button" data-rich-command="bold" aria-label="Bold"><strong>B</strong></button><button type="button" data-rich-command="italic" aria-label="Italic"><em>I</em></button><button type="button" data-rich-command="underline" aria-label="Underline"><u>U</u></button><button type="button" data-rich-command="insertUnorderedList" aria-label="Bulleted list">• List</button></div><div id="rich-editor" class="rich-editor" contenteditable="true" role="textbox" aria-multiline="true" aria-label="Rich text message">${richHtml}</div><p class="help">Formatting is limited to email-safe text, headings, links, and lists. Unsubscribe is added automatically.</p></div>`;
+    return `<div class="mode-editor" data-mode-editor="rich_text"><span class="field-label">Message</span><div class="rich-toolbar" role="toolbar" aria-label="Text formatting"><button type="button" data-rich-command="bold" aria-label="Bold"><strong>B</strong></button><button type="button" data-rich-command="italic" aria-label="Italic"><em>I</em></button><button type="button" data-rich-command="underline" aria-label="Underline"><u>U</u></button><button type="button" data-rich-command="insertUnorderedList" aria-label="Bulleted list">• List</button></div><div id="rich-editor" class="rich-editor" contenteditable="true" role="textbox" aria-multiline="true" aria-label="Rich text message">${richHtml}</div><p class="help">Formatting is limited to email-safe text, headings, links, and lists.</p></div>`;
   }
   if (mode === "plain_text") {
-    return `<div class="mode-editor" data-mode-editor="plain_text"><label>Plain-text message<textarea id="plain-editor" class="plain-editor" rows="15">${escapeHtml(draft?.plain_text || "Hello {{first_name}},\n\nWrite your message here.\n\nUnsubscribe: {{unsubscribe_url}}")}</textarea><span class="help">Line breaks are preserved. A safe HTML wrapper is generated for clients that require it.</span></label></div>`;
+    return `<div class="mode-editor" data-mode-editor="plain_text"><label>Plain-text message<textarea id="plain-editor" class="plain-editor" rows="15">${escapeHtml(draft?.plain_text || "Hello {{first_name}},\n\nWrite your message here.")}</textarea><span class="help">Line breaks are preserved. A safe HTML wrapper is generated for clients that require it.</span></label></div>`;
   }
-  return `<div class="mode-editor" data-mode-editor="custom_html"><label>HTML message<textarea id="html-editor" class="code-area" rows="16" required>${escapeHtml(draft?.html_body || defaultTemplate)}</textarea><span class="help">Scripts, forms, embedded objects, unsafe URLs, and event handlers are blocked.</span></label><label>Plain-text alternative<textarea id="html-text-fallback" rows="8">${escapeHtml(draft?.text_body || "Hello {{first_name}},\n\nWrite your message here.\n\nUnsubscribe: {{unsubscribe_url}}")}</textarea></label></div>`;
+  return `<div class="mode-editor" data-mode-editor="custom_html"><label>HTML message<textarea id="html-editor" class="code-area" rows="16" required>${escapeHtml(draft?.html_body || defaultTemplate)}</textarea><span class="help">Scripts, forms, embedded objects, unsafe URLs, and event handlers are blocked.</span></label><label>Plain-text alternative<textarea id="html-text-fallback" rows="8">${escapeHtml(draft?.text_body || "Hello {{first_name}},\n\nWrite your message here.")}</textarea></label></div>`;
 }
 
 async function openCampaignComposer(campaignId = null) {
@@ -623,8 +624,8 @@ async function openCampaignComposer(campaignId = null) {
   const modeDrafts = {
     visual: selectedMode === "visual" ? { ...defaultVisualContent, ...storedContent } : { ...defaultVisualContent },
     rich_text: selectedMode === "rich_text" ? { schema_version: 1, rich_html: storedContent.rich_html || defaultRichContent } : { schema_version: 1, rich_html: defaultRichContent },
-    custom_html: { schema_version: 1, html_body: campaign.html_body || defaultTemplate, text_body: campaign.text_body || "Hello {{first_name}},\n\nWrite your message here.\n\nUnsubscribe: {{unsubscribe_url}}" },
-    plain_text: selectedMode === "plain_text" ? { schema_version: 1, plain_text: storedContent.plain_text || campaign.text_body || "" } : { schema_version: 1, plain_text: "Hello {{first_name}},\n\nWrite your message here.\n\nUnsubscribe: {{unsubscribe_url}}" },
+    custom_html: { schema_version: 1, html_body: campaign.html_body || defaultTemplate, text_body: campaign.text_body || "Hello {{first_name}},\n\nWrite your message here." },
+    plain_text: selectedMode === "plain_text" ? { schema_version: 1, plain_text: storedContent.plain_text || campaign.text_body || "" } : { schema_version: 1, plain_text: "Hello {{first_name}},\n\nWrite your message here." },
   };
   openModal(campaignId ? "Edit campaign" : "New campaign", "Composer", `
     <form id="campaign-form" class="composer">
@@ -635,7 +636,7 @@ async function openCampaignComposer(campaignId = null) {
         <label>Subject<input name="subject" maxlength="250" value="${escapeHtml(campaign.subject || "A quick update for {{first_name}}")}" required /></label>
         ${contentModePicker(selectedMode)}
         <div id="mode-editor-host">${modeEditorMarkup(selectedMode, modeDrafts[selectedMode])}</div>
-        <p class="help variable-help">Personalization: {{first_name}}, {{last_name}}, {{email}}, {{unsubscribe_url}}</p>
+        <p class="help variable-help">Optional personalization: {{first_name}}, {{last_name}}, {{email}}, {{unsubscribe_url}}</p>
         <p class="form-error" role="alert"></p>
         <div class="form-actions"><button type="button" class="button" data-close-modal>Cancel</button><button class="button primary" type="submit">${campaignId ? "Save changes" : "Save draft"}</button></div>
       </div>

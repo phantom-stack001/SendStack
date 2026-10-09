@@ -12,7 +12,7 @@ See also: [Product](product.md) · [Deployment](deployment.md)
 | Audience model | Local contacts, lists, and campaign recipient snapshots in PostgreSQL |
 | DNS | Cloudflare or Spaceship may host DNS and SPF/DKIM/DMARC records for the Spacemail domain |
 
-SendStack submits ordinary MIME messages one recipient at a time. Spacemail owns outbound delivery after SMTP acceptance. There is no provider broadcast API and no delivery webhook.
+SendStack authenticates as the Spacemail mailbox and submits one ordinary MIME message per list address (single To, mailbox From and envelope, Spacemail-assigned Message-ID). After SMTP acceptance it appends a copy into the mailbox Sent folder. Inbox and Sent are readable over IMAP. There is no provider broadcast API and no delivery webhook.
 
 ## Local runtimes
 
@@ -25,10 +25,10 @@ Both default to sandbox delivery. External send paths are fail-closed until expl
 
 ## Production delivery contract
 
-1. SendStack builds an immutable recipient snapshot from active, consented, unsuppressed contacts.
+1. SendStack builds an immutable recipient snapshot from active, unsuppressed contacts.
 2. A durable launch job advances a cursor over that snapshot.
-3. Each tick renders merge fields for a small batch of recipients and submits one SMTP message per recipient to Spacemail.
-4. SMTP acceptance is recorded as **submitted**. Inbox delivery, bounces, and complaints are not reported back by Spacemail webhooks.
+3. Each tick renders merge fields for a small batch of recipients and submits one Spacemail SMTP message per address (mailbox From/envelope, single To).
+4. SMTP acceptance is recorded as **submitted**, and a copy is appended to the Spacemail Sent folder when IMAP is available.
 5. Cancel stops unsent recipients only. Messages Spacemail already accepted cannot be recalled.
 
 Paid Spacemail mailboxes are limited to **500 outgoing messages per hour**. SendStack enforces `SENDSTACK_SMTP_HOURLY_LIMIT` (default 500) alongside the daily volume limit.
@@ -42,9 +42,9 @@ These are intentionally out of scope for the selected architecture:
 - Direct-to-MX delivery from SendStack infrastructure
 - Long-lived background workers on Vercel for mass send (ticks are short-lived)
 - Multi-tenant SaaS in the MVP
-- General-purpose mailbox / inbound human email hosting
-- Automatic bounce ingestion over IMAP (future work)
+- Composing replies or managing folders inside SendStack (Inbox/Sent are read-only)
+- Automatic bounce classification from IMAP
 
 ## Operating range
 
-Steady-state volume is bounded by the Spacemail mailbox plan (500 messages/hour on paid plans) and `SENDSTACK_DAILY_LIMIT`. Initial volume must use a small consented canary and increase only while suppression and complaint signals remain healthy.
+Steady-state volume is bounded by the Spacemail mailbox plan (500 messages/hour on paid plans) and `SENDSTACK_DAILY_LIMIT`. Increase volume only while SMTP acceptance failures and manual suppressions remain healthy.

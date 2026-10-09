@@ -10,7 +10,7 @@ vi.mock("../lib/live-send", async (importOriginal) => {
 });
 
 import { GET as launchJobsCronGet } from "../app/api/cron/launch-jobs/route";
-import { activateContactWithConsent } from "../lib/consent";
+import { createContact, importContactStatus, updateContact } from "../lib/consent";
 import { applyComplianceFooter } from "../lib/compliance-footer";
 import { reserveDailyVolume, utcDayString } from "../lib/daily-volume";
 import { query, resetPool } from "../lib/db";
@@ -36,7 +36,6 @@ import { loadSendingIdentity } from "../lib/sending-identity";
 import { applySuppression } from "../lib/suppressions";
 import { makeId } from "../lib/ids";
 import {
-  CONSENT_EVIDENCE,
   applyTestEnv,
   canConnectToTestDatabase,
   ensurePgTestReady,
@@ -47,7 +46,6 @@ import {
   seedAdminUser,
   seedDraftCampaign,
   seedList,
-  seedPendingContact,
   truncateAppTables,
 } from "./pg-test-utils";
 
@@ -241,52 +239,49 @@ describe.skipIf(!dbAvailable)("PostgreSQL integration / concurrency", () => {
     );
   });
 
-  it("activateContactWithConsent works and DB rejects active without evidence", async () => {
-    const userId = await seedAdminUser();
+  it("createContact is active without consent evidence and import status matches", async () => {
     const listId = await seedList();
-    const contactId = await seedPendingContact({ listId, email: "consent@example.com" });
+    expect(importContactStatus(false)).toBe("active");
+    expect(importContactStatus(true)).toBe("suppressed");
 
-    const activated = await activateContactWithConsent({
-      contactId,
-      actorUserId: userId,
-      consentSource: "signed_form",
-      consentEvidence: CONSENT_EVIDENCE,
+    const created = await createContact({
+      email: "consent@example.com",
+      listId,
     });
-    expect(activated.activated).toBe(true);
-    expect(activated.status).toBe("active");
+    expect(created.status).toBe("active");
+    const named = await query<{ first_name: string; last_name: string }>(
+      `SELECT first_name, last_name FROM contacts WHERE id = $1`,
+      [created.id],
+    );
+    expect(named.rows[0]?.first_name).toBe("");
+    expect(named.rows[0]?.last_name).toBe("");
 
     const orphanId = makeId("con");
-    await expect(
-      query(
-        `INSERT INTO contacts
-           (id, email, first_name, last_name, status, consent_source, consent_at, created_at, updated_at)
-         VALUES ($1, $2, 'No', 'Evidence', 'active', 'manual', NOW(), NOW(), NOW())`,
-        [orphanId, `no_evidence_${orphanId}@example.com`],
-      ),
-    ).rejects.toThrow(/contacts_active_requires_consent_check|violates check constraint/i);
+    await query(
+      `INSERT INTO contacts
+         (id, email, first_name, last_name, status, consent_source, consent_at, created_at, updated_at)
+       VALUES ($1, $2, 'No', 'Evidence', 'active', 'manual', NOW(), NOW(), NOW())`,
+      [orphanId, `no_evidence_${orphanId}@example.com`],
+    );
+    const row = await query<{ status: string }>(`SELECT status FROM contacts WHERE id = $1`, [
+      orphanId,
+    ]);
+    expect(row.rows[0]?.status).toBe("active");
   });
 
-  it("activation racing suppression lets suppression win", async () => {
-    const userId = await seedAdminUser();
+  it("createContact against a suppressed address stays suppressed", async () => {
     const listId = await seedList();
     const email = `race_${makeId("e")}@example.com`;
-    const contactId = await seedPendingContact({ listId, email });
+    await applySuppression(email, "manual", "race_test");
 
-    await Promise.all([
-      activateContactWithConsent({
-        contactId,
-        actorUserId: userId,
-        consentSource: "signed_form",
-        consentEvidence: CONSENT_EVIDENCE,
-      }),
-      applySuppression(email, "manual", "race_test"),
-    ]);
-
+    const created = await createContact({
+      email,
+      listId,
+    });
+    expect(created.status).toBe("suppressed");
     const contact = await query<{ status: string }>(`SELECT status FROM contacts WHERE id = $1`, [
-      contactId,
+      created.id,
     ]);
-    const suppression = await query(`SELECT 1 FROM suppressions WHERE email = $1`, [email]);
-    expect(suppression.rows[0]).toBeTruthy();
     expect(contact.rows[0]?.status).toBe("suppressed");
   });
 
@@ -316,8 +311,8 @@ describe.skipIf(!dbAvailable)("PostgreSQL integration / concurrency", () => {
     ).toBe(false);
 
     const footered = applyComplianceFooter(
-      '<p>Update <a href="https://www.example.com">site</a></p><p><a href="{{unsubscribe_url}}">Unsubscribe</a></p>',
-      "Update https://www.example.com\nUnsubscribe: {{unsubscribe_url}}",
+      '<p>Update <a href="https://www.example.com">site</a></p>',
+      "Update https://www.example.com",
       identity,
     );
     const ok = runCampaignPreflight({
@@ -445,8 +440,7 @@ describe.skipIf(!dbAvailable)("PostgreSQL integration / concurrency", () => {
     60_000,
   );
 
-  it("email change demotes active contact and clears consent evidence atomically", async () => {
-    const { updateContactEmailWithConsentReset } = await import("../lib/consent");
+  it("email change keeps the contact active", async () => {
     const userId = await seedAdminUser();
     const listId = await seedList();
     const contactId = await seedActiveContact({
@@ -455,40 +449,29 @@ describe.skipIf(!dbAvailable)("PostgreSQL integration / concurrency", () => {
       actorUserId: userId,
     });
 
-    const updated = await updateContactEmailWithConsentReset({
+    const updated = await updateContact({
       contactId,
       actorUserId: userId,
       email: "after@example.com",
-      firstName: "Pat",
-      lastName: "Lee",
-      consentSource: "admin_email_change",
     });
-    expect(updated.status).toBe("pending_consent");
+    expect(updated.status).toBe("active");
     expect(updated.email).toBe("after@example.com");
+    expect(updated.first_name).toBe("Pat");
+    expect(updated.last_name).toBe("Lee");
 
-    const row = await query<{
-      status: string;
-      consent_evidence: string | null;
-      consent_attested_by: string | null;
-      consent_verified_at: string | null;
-    }>(
-      `SELECT status, consent_evidence, consent_attested_by, consent_verified_at FROM contacts WHERE id = $1`,
-      [contactId],
-    );
-    expect(row.rows[0].status).toBe("pending_consent");
-    expect(row.rows[0].consent_evidence).toBeNull();
-    expect(row.rows[0].consent_attested_by).toBeNull();
-    expect(row.rows[0].consent_verified_at).toBeNull();
+    const row = await query<{ status: string }>(`SELECT status FROM contacts WHERE id = $1`, [
+      contactId,
+    ]);
+    expect(row.rows[0].status).toBe("active");
 
     const audit = await query<{ action: string }>(
-      `SELECT action FROM audit_events WHERE entity_id = $1 AND action = 'contact_email_changed'`,
+      `SELECT action FROM audit_events WHERE entity_id = $1 AND action = 'contact_updated'`,
       [contactId],
     );
     expect(audit.rows).toHaveLength(1);
   });
 
   it("concurrent suppression during email change wins", async () => {
-    const { updateContactEmailWithConsentReset } = await import("../lib/consent");
     const userId = await seedAdminUser();
     const listId = await seedList();
     const contactId = await seedActiveContact({
@@ -498,13 +481,10 @@ describe.skipIf(!dbAvailable)("PostgreSQL integration / concurrency", () => {
     });
 
     await applySuppression("new-race@example.com", "complaint", "pg_test");
-    const updated = await updateContactEmailWithConsentReset({
+    const updated = await updateContact({
       contactId,
       actorUserId: userId,
       email: "new-race@example.com",
-      firstName: "Pat",
-      lastName: "Lee",
-      consentSource: "admin_email_change",
     });
     expect(updated.status).toBe("suppressed");
   });
@@ -582,11 +562,15 @@ describe.skipIf(!dbAvailable)("PostgreSQL integration / concurrency", () => {
     expect([400, 409, 415]).toContain(attach.status);
   });
 
-  it("protected suppressions cannot be cleared via re-consent or activation", async () => {
-    const { removeSuppressionWithReconsent } = await import("../lib/suppressions");
+  it("protected suppressions cannot be cleared and manual removal restores active", async () => {
+    const { removeSuppression } = await import("../lib/suppressions");
     const userId = await seedAdminUser();
     const listId = await seedList();
-    const contactId = await seedPendingContact({ listId, email: "protected@example.com" });
+    const contactId = await seedActiveContact({
+      listId,
+      email: "protected@example.com",
+      actorUserId: userId,
+    });
     await applySuppression("protected@example.com", "complaint", "pg_test");
     const flag = await query<{ protected: boolean }>(
       `SELECT protected FROM suppressions WHERE email = 'protected@example.com'`,
@@ -594,23 +578,32 @@ describe.skipIf(!dbAvailable)("PostgreSQL integration / concurrency", () => {
     expect(flag.rows[0]?.protected).toBe(true);
 
     await expect(
-      removeSuppressionWithReconsent({
+      removeSuppression({
         email: "protected@example.com",
         actorUserId: userId,
-        consentNote: "Trying to clear a protected complaint suppression illegally.",
       }),
     ).rejects.toThrow(/protected|complaint|cannot/i);
 
-    const activation = await activateContactWithConsent({
+    const contact = await query<{ status: string }>(`SELECT status FROM contacts WHERE id = $1`, [
       contactId,
-      actorUserId: userId,
-      consentEvidence: CONSENT_EVIDENCE,
-      consentSource: "admin_activation",
-    });
-    expect(activation.activated).toBe(false);
-    expect(activation.status).toBe("suppressed");
-    const contact = await query<{ status: string }>(`SELECT status FROM contacts WHERE id = $1`, [contactId]);
+    ]);
     expect(contact.rows[0].status).toBe("suppressed");
+
+    await applySuppression("manual-clear@example.com", "manual", "pg_test");
+    await seedActiveContact({
+      listId,
+      email: "manual-clear@example.com",
+      actorUserId: userId,
+    });
+    const cleared = await removeSuppression({
+      email: "manual-clear@example.com",
+      actorUserId: userId,
+    });
+    expect(cleared.removed).toBe(true);
+    const restored = await query<{ status: string }>(
+      `SELECT status FROM contacts WHERE email = 'manual-clear@example.com'`,
+    );
+    expect(restored.rows[0].status).toBe("active");
   });
 
   it("message feedback event applies suppression and monotonic status", async () => {

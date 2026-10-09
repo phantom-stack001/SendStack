@@ -1,5 +1,6 @@
 import nodemailer from "nodemailer";
 import type SMTPTransport from "nodemailer/lib/smtp-transport";
+import { normalizeEmail, validEmail } from "../ids";
 import { liveSendAllowed, providerTimeoutMs } from "../live-send";
 
 export type SmtpAttachment = {
@@ -11,20 +12,30 @@ export type SmtpAttachment = {
 export type SmtpEmailInput = {
   to: string;
   subject: string;
-  html: string;
-  text: string;
+  html?: string;
+  text?: string;
   fromName: string;
   fromEmail: string;
   replyTo?: string;
-  unsubscribeUrl?: string;
   attachments?: SmtpAttachment[];
-  /** Used as the RFC Message-ID local part when present. */
-  messageId?: string;
 };
 
 export type SmtpSendResult = {
   id: string;
   accepted: boolean;
+  /** Raw RFC822 used for IMAP Sent append when available. */
+  raw?: string;
+};
+
+/** Pure Spacemail-client message fields (no socket). */
+export type SmtpMailContract = {
+  mailbox: string;
+  fromHeader: string;
+  envelopeFrom: string;
+  to: string;
+  replyTo?: string;
+  html?: string;
+  text?: string;
 };
 
 function loadSmtpConfig(): {
@@ -44,8 +55,59 @@ function loadSmtpConfig(): {
 }
 
 /**
+ * Build the headers and envelope for one ordinary Spacemail SMTP message.
+ * From and envelope sender are always the authenticated mailbox. To is a single address.
+ * Message-ID is left for Spacemail to assign. Reply-To only when provided.
+ */
+export function buildSmtpMailContract(input: {
+  mailbox: string;
+  to: string;
+  fromName: string;
+  fromEmail: string;
+  replyTo?: string;
+  html?: string;
+  text?: string;
+}): SmtpMailContract {
+  const mailbox = normalizeEmail(input.mailbox);
+  if (!mailbox || !validEmail(mailbox)) {
+    throw new Error("SMTP mailbox username must be a valid email address.");
+  }
+  const requested = normalizeEmail(input.fromEmail);
+  if (requested && requested !== mailbox) {
+    throw new Error(`From address must be the Spacemail mailbox (${mailbox}).`);
+  }
+  const to = input.to.trim();
+  if (!to || !validEmail(to)) {
+    throw new Error("Recipient must be a valid email address.");
+  }
+  const fromName = input.fromName.trim() || mailbox;
+  if (/[\r\n]/.test(fromName) || /[\r\n]/.test(to)) {
+    throw new Error("Email headers cannot contain line breaks.");
+  }
+  const html = (input.html ?? "").trim() || undefined;
+  const text = (input.text ?? "").trim() || undefined;
+  if (!html && !text) {
+    throw new Error("Message body is required (HTML or plain text).");
+  }
+  const replyTo = (input.replyTo ?? "").trim() || undefined;
+  if (replyTo && (/[\r\n]/.test(replyTo) || !validEmail(replyTo))) {
+    throw new Error("Reply-To must be a valid email address.");
+  }
+
+  return {
+    mailbox,
+    fromHeader: `${fromName} <${mailbox}>`,
+    envelopeFrom: mailbox,
+    to,
+    replyTo,
+    html,
+    text,
+  };
+}
+
+/**
  * Send one ordinary MIME message through Spacemail (or any SMTP_SSL relay).
- * Port 465 uses implicit TLS. The message body is not encrypted beyond transit TLS.
+ * Port 465 uses implicit TLS. Spacemail assigns Message-ID.
  */
 export async function sendSmtpEmail(input: SmtpEmailInput): Promise<SmtpSendResult> {
   if (!liveSendAllowed()) {
@@ -53,11 +115,15 @@ export async function sendSmtpEmail(input: SmtpEmailInput): Promise<SmtpSendResu
   }
 
   const smtp = loadSmtpConfig();
-  const messageId = input.messageId
-    ? input.messageId.includes("@")
-      ? `<${input.messageId}>`
-      : `<${input.messageId}@sendstack.local>`
-    : undefined;
+  const contract = buildSmtpMailContract({
+    mailbox: smtp.user,
+    to: input.to,
+    fromName: input.fromName,
+    fromEmail: input.fromEmail,
+    replyTo: input.replyTo,
+    html: input.html,
+    text: input.text,
+  });
 
   const transport = nodemailer.createTransport({
     host: smtp.host,
@@ -71,19 +137,18 @@ export async function sendSmtpEmail(input: SmtpEmailInput): Promise<SmtpSendResu
 
   try {
     const info = await transport.sendMail({
-      from: `${input.fromName} <${input.fromEmail}>`,
-      to: input.to,
-      replyTo: input.replyTo || undefined,
+      from: contract.fromHeader,
+      to: contract.to,
+      envelope: {
+        from: contract.envelopeFrom,
+        to: contract.to,
+      },
+      replyTo: contract.replyTo,
       subject: input.subject,
-      text: input.text || "This message contains an HTML version.",
-      html: input.html,
-      messageId,
-      headers: input.unsubscribeUrl
-        ? {
-            "List-Unsubscribe": `<${input.unsubscribeUrl}>`,
-            "List-Unsubscribe-Post": "List-Unsubscribe=One-Click",
-          }
-        : undefined,
+      text: contract.text,
+      html: contract.html,
+      // Let Spacemail assign Message-ID (same as the webmail client).
+      messageId: false as unknown as string,
       attachments: input.attachments?.length
         ? input.attachments.map((file) => ({
             filename: file.filename,
@@ -93,8 +158,14 @@ export async function sendSmtpEmail(input: SmtpEmailInput): Promise<SmtpSendResu
         : undefined,
     });
 
-    const id = (info.messageId || messageId || `smtp:${input.to}`).replace(/^<|>$/g, "");
-    return { id, accepted: true };
+    const id = (info.messageId || `smtp:${contract.to}`).replace(/^<|>$/g, "");
+    const raw =
+      typeof (info as { message?: Buffer | string }).message === "string"
+        ? (info as { message: string }).message
+        : Buffer.isBuffer((info as { message?: Buffer }).message)
+          ? (info as { message: Buffer }).message.toString("utf8")
+          : undefined;
+    return { id, accepted: true, raw };
   } finally {
     transport.close();
   }
@@ -109,9 +180,7 @@ export function smtpAcceptanceAmbiguous(error: unknown): boolean {
   const code = "code" in error ? String((error as { code?: string }).code ?? "") : "";
   const responseCode =
     "responseCode" in error ? Number((error as { responseCode?: number }).responseCode) : 0;
-  // Connection dropped after the server may have accepted; ECONNECTION/ETIMEDOUT mid-send.
   if (["ECONNECTION", "ETIMEDOUT", "ESOCKET", "ECONNRESET"].includes(code)) return true;
-  // 250 already returned in some nodemailer paths then a later error — rare; treat 2xx as ambiguous on throw.
   if (responseCode >= 200 && responseCode < 300) return true;
   return false;
 }

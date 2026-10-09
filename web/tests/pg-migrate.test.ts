@@ -175,11 +175,15 @@ describe.skipIf(!dbAvailable)("PostgreSQL migrations (0001→0006)", () => {
     const messageCount = await query<{ count: string }>(`SELECT COUNT(*)::int AS count FROM messages`);
 
     const appliedCatchup = await applyMigrations();
-    expect(appliedCatchup).toEqual(["0007_submission_state_machine.sql"]);
+    expect(appliedCatchup).toEqual([
+      "0007_submission_state_machine.sql",
+      "0008_drop_consent_gate.sql",
+    ]);
     const caughtUp = await query<{ id: string }>(`SELECT id FROM schema_migrations ORDER BY id`);
     expect(caughtUp.rows.map((row) => row.id)).toEqual([
       ...before.rows.map((row) => row.id),
       "0007_submission_state_machine.sql",
+      "0008_drop_consent_gate.sql",
     ]);
     const appliedAgain = await applyMigrations();
     expect(appliedAgain).toEqual([]);
@@ -196,7 +200,18 @@ describe.skipIf(!dbAvailable)("PostgreSQL migrations (0001→0006)", () => {
     expect(Number(campaignCountAfter.rows[0].count)).toBe(Number(campaignCount.rows[0].count));
     expect(Number(messageCountAfter.rows[0].count)).toBe(Number(messageCount.rows[0].count));
 
-    // 0006 SQL itself remains idempotent when re-executed directly.
+    // After 0008, the consent gate is gone and previously pending contacts are active.
+    const consentCheckGone = await query<{ conname: string }>(
+      `SELECT conname FROM pg_constraint WHERE conname = 'contacts_active_requires_consent_check'`,
+    );
+    expect(consentCheckGone.rows[0]).toBeUndefined();
+
+    const promoted = await query<{ status: string }>(
+      `SELECT status FROM contacts WHERE status = 'pending_consent' LIMIT 1`,
+    );
+    expect(promoted.rows[0]).toBeUndefined();
+
+    // 0006 SQL itself remains idempotent when re-executed directly (re-adds the gate).
     const sql6 = readFileSync(
       join(__dirname, "../drizzle/0006_consent_volume_launch_hardening.sql"),
       "utf8",

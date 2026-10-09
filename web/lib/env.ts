@@ -1,6 +1,5 @@
 import { identityComplianceGaps } from "./sending-identity";
-import { loadDeliveryHealthThresholds } from "./delivery-health";
-import { parsePublicOrigin, validateAllowedLinkDomains } from "./preflight";
+import { parsePublicOrigin } from "./preflight";
 
 function isProductionLike(): boolean {
   return (
@@ -53,21 +52,6 @@ export function liveSendBootIssues(): string[] {
         ? error.message
         : "Live sending requires SENDSTACK_PUBLIC_URL to be a valid https:// origin.",
     );
-  }
-  const thresholds = loadDeliveryHealthThresholds();
-  if (!thresholds.configured) {
-    issues.push(
-      "Live sending requires SENDSTACK_HEALTH_MIN_SAMPLE and SENDSTACK_HEALTH_MAX_*_RATE thresholds.",
-    );
-  }
-  const domainErrors = validateAllowedLinkDomains(
-    (process.env.SENDSTACK_ALLOWED_LINK_DOMAINS ?? "")
-      .split(/[,\n]/)
-      .map((entry) => entry.trim())
-      .filter(Boolean),
-  );
-  if (domainErrors.length) {
-    issues.push(domainErrors[0]!);
   }
   return issues;
 }

@@ -26,7 +26,7 @@ export function liveSendAllowed(): boolean {
 }
 
 export function providerTimeoutMs(): number {
-  return Number(process.env.SENDSTACK_PROVIDER_TIMEOUT_MS ?? 8_000) || 8_000;
+  return Number(process.env.SENDSTACK_PROVIDER_TIMEOUT_MS ?? 30_000) || 30_000;
 }
 
 export function smtpHourlyLimit(): number {

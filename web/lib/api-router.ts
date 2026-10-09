@@ -5,10 +5,9 @@ import { getPool, query } from "./db";
 import { withSubmitBarrier } from "./submit-barrier";
 import { applyComplianceFooter } from "./compliance-footer";
 import {
-  activateContactWithConsent,
-  createPendingContact,
+  createContact,
   importContactStatus,
-  updateContactEmailWithConsentReset,
+  updateContact,
 } from "./consent";
 import {
   consumeDailyReservation,
@@ -18,8 +17,6 @@ import {
   utcDayString,
 } from "./daily-volume";
 import {
-  assertDeliveryHealthAllowsSubmit,
-  assertLaunchAllowedByHealth,
   blockedHealthSnapshot,
   getDeliveryHealthSnapshot,
   listOpenDeliveryHealthBlocks,
@@ -39,20 +36,27 @@ import { assertProductionSessionCookie, sessionCookieIsSecure } from "./env";
 import { inspectSchema, summarizeSchemaReport } from "./schema-guard";
 import { buildIdempotencyKey, liveSendAllowed, smtpConfigured } from "./live-send";
 import { sendSmtpEmail } from "./providers/smtp";
+import {
+  appendToSentFolder,
+  buildSentAppendSource,
+  getMailboxMessage,
+  listMailboxMessages,
+  mailboxConfigured,
+  mailboxReadAllowed,
+  type MailboxFolder,
+} from "./mailbox";
 import { isSpecialUseRecipientDomain, validateLiveRecipient } from "./recipients";
 import {
   enforcedFromEmail,
-  enforcedReplyTo,
   identityComplianceGaps,
   identityConfigured,
   isTestRecipientAllowed,
   loadSendingIdentity,
 } from "./sending-identity";
-import { applySuppression, isEmailSuppressed, removeSuppressionWithReconsent } from "./suppressions";
+import { applySuppression, isEmailSuppressed, removeSuppression } from "./suppressions";
 import {
   ATTACHMENT_MAX_COUNT,
   attachmentMeta,
-  isArchiveAttachmentFilename,
   validateCampaignAttachment,
 } from "./attachments";
 import { passwordChangeAllowedPath, requireCsrf } from "./auth";
@@ -369,7 +373,7 @@ async function summaryResponse() {
     `SELECT c.id, c.name, c.subject, c.status,
             COUNT(cr.id)::int AS recipients,
             COUNT(cr.id) FILTER (WHERE cr.status IN ('sent', 'delayed'))::int AS sent,
-            COUNT(cr.id) FILTER (WHERE cr.status IN ('failed', 'bounced', 'complained', 'suppressed'))::int AS issues
+            COUNT(cr.id) FILTER (WHERE cr.status IN ('failed', 'suppressed'))::int AS issues
        FROM campaigns c
        LEFT JOIN campaign_recipients cr ON cr.campaign_id = c.id
       GROUP BY c.id
@@ -518,13 +522,11 @@ async function loadCampaignAttachmentsForSend(campaignId: string) {
       ORDER BY created_at ASC`,
     [campaignId],
   );
-  return result.rows
-    .filter((row) => !isArchiveAttachmentFilename(row.filename))
-    .map((row) => ({
-      filename: row.filename,
-      contentType: row.content_type,
-      contentBase64: Buffer.from(row.content).toString("base64"),
-    }));
+  return result.rows.map((row) => ({
+    filename: row.filename,
+    contentType: row.content_type,
+    contentBase64: Buffer.from(row.content).toString("base64"),
+  }));
 }
 
 async function readinessResponse() {
@@ -616,7 +618,7 @@ async function readinessResponse() {
         label: "Sender identity",
         status: identityReady ? "ready" : "pending",
         detail: identityReady
-          ? `From ${identity.fromEmail}, Reply-To ${identity.replyToEmail}.`
+          ? `From ${identity.fromEmail}${identity.replyToEmail ? `, optional Reply-To ${identity.replyToEmail}` : ""}.`
           : `Missing: ${gaps.map((gap) => gap.label).join(", ")}.`,
       },
       {
@@ -954,23 +956,21 @@ export async function handleApi(request: Request, path: string[]) {
     if (auth.response) return auth.response;
     if (!hasValidCsrf(request, auth.session.csrf_token)) return json(403, { error: "CSRF validation failed." });
     const email = normalizeEmail(decodeURIComponent(suppressionMatch[1]));
-    const body = await request.json().catch(() => ({})) as { consent_note?: string };
     try {
-      const result = await removeSuppressionWithReconsent({
+      const result = await removeSuppression({
         email,
         actorUserId: auth.session.user_id,
-        consentNote: body.consent_note ?? "",
       });
       if (!result.removed) return json(404, { error: "Suppression not found." });
       return json(200, {
         ok: true,
         provider_reactivated: false,
-        resulting_status: "pending_consent",
+        resulting_status: "active",
         previous_reason: result.previousReason ?? null,
         previous_source: result.previousSource ?? null,
       });
     } catch (error) {
-      return json(400, { error: safeClientMessage(error, "Re-consent is required.") });
+      return json(400, { error: safeClientMessage(error, "Could not remove suppression.") });
     }
   }
   if (request.method === "POST" && route === "/users") {
@@ -1234,30 +1234,6 @@ export async function handleApi(request: Request, path: string[]) {
       importClient.release();
     }
   }
-  const contactActivateMatch = route.match(/^\/contacts\/([^/]+)\/activate$/);
-  if (request.method === "POST" && contactActivateMatch) {
-    const auth = await requirePermission(request, "contacts.edit");
-    if (auth.response) return auth.response;
-    if (!hasValidCsrf(request, auth.session.csrf_token)) return json(403, { error: "CSRF validation failed." });
-    const body = await request.json().catch(() => ({})) as {
-      consent_source?: string;
-      consent_evidence?: string;
-    };
-    try {
-      const result = await activateContactWithConsent({
-        contactId: contactActivateMatch[1],
-        actorUserId: auth.session.user_id,
-        consentSource: body.consent_source ?? "",
-        consentEvidence: body.consent_evidence ?? "",
-      });
-      // Audit row is written inside activateContactWithConsent's transaction.
-      return json(200, { contact: { id: contactActivateMatch[1], status: result.status, activated: result.activated } });
-    } catch (error) {
-      const message = safeClientMessage(error, "Activation failed.");
-      if (message === "Contact not found.") return json(404, { error: message });
-      return json(400, { error: message });
-    }
-  }
   const contactMatch = route.match(/^\/contacts\/([^/]+)$/);
   if (request.method === "GET" && contactMatch) {
     const auth = await requirePermission(request, "contacts.view");
@@ -1317,35 +1293,22 @@ export async function handleApi(request: Request, path: string[]) {
     if (!hasValidCsrf(request, auth.session.csrf_token)) return json(403, { error: "CSRF validation failed." });
     const body = await request.json().catch(() => ({})) as {
       email?: string;
-      first_name?: string;
-      last_name?: string;
       status?: string;
-      consent_source?: string;
       list_id?: string;
     };
     const email = normalizeEmail(body.email ?? "");
     if (!validEmail(email)) return json(400, { error: "Enter a valid email address." });
-    if (body.status === "active") {
-      return json(400, {
-        error: "Cannot set status to active via PATCH. Use POST /contacts/:id/activate with consent evidence.",
-      });
-    }
     const nextStatus = body.status?.trim() || undefined;
-    if (nextStatus && !["pending_consent", "suppressed"].includes(nextStatus)) {
-      return json(400, { error: "Select a valid contact status (pending_consent or suppressed)." });
+    if (nextStatus && !["active", "suppressed"].includes(nextStatus)) {
+      return json(400, { error: "Select a valid contact status (active or suppressed)." });
     }
-    const consentSource = (body.consent_source ?? "").trim();
-    if (!consentSource) return json(400, { error: "Consent source is required." });
 
     try {
-      const contact = await updateContactEmailWithConsentReset({
+      const contact = await updateContact({
         contactId: contactMatch[1],
         actorUserId: auth.session.user_id,
         email,
-        firstName: (body.first_name ?? "").trim(),
-        lastName: (body.last_name ?? "").trim(),
-        consentSource,
-        status: nextStatus as "pending_consent" | "suppressed" | undefined,
+        status: nextStatus as "active" | "suppressed" | undefined,
         listId: body.list_id ?? null,
       });
       return json(200, { contact });
@@ -1378,11 +1341,10 @@ export async function handleApi(request: Request, path: string[]) {
       `SELECT c.id, c.name, c.subject, c.from_name, c.from_email, c.content_mode,
               c.status, c.created_at, l.name AS list_name,
               COUNT(cr.id)::int AS recipients,
-              COUNT(cr.id) FILTER (WHERE cr.status = 'sent')::int AS sent,
               COUNT(cr.id) FILTER (WHERE cr.status = 'queued')::int AS queued,
-              COUNT(cr.id) FILTER (WHERE cr.status = 'failed')::int AS failed,
-              COUNT(cr.id) FILTER (WHERE cr.status = 'bounced')::int AS bounced,
-              COUNT(cr.id) FILTER (WHERE cr.status = 'complained')::int AS complained
+              COUNT(cr.id) FILTER (WHERE cr.status = 'sent')::int AS submitted,
+              COUNT(cr.id) FILTER (WHERE cr.status = 'sent')::int AS sent,
+              COUNT(cr.id) FILTER (WHERE cr.status = 'failed')::int AS failed
          FROM campaigns c JOIN lists l ON l.id = c.list_id
          LEFT JOIN campaign_recipients cr ON cr.campaign_id = c.id
         GROUP BY c.id, l.name ORDER BY c.created_at DESC`,
@@ -1718,11 +1680,11 @@ export async function handleApi(request: Request, path: string[]) {
       );
 
       let fromEmail = campaign.from_email;
-      let replyTo = identity.replyToEmail || undefined;
+      // Reply-To only when the campaign sets one — not from SENDSTACK_REPLY_TO_EMAIL.
+      let replyTo = campaign.reply_to_email || undefined;
       if (isLive) {
         try {
           fromEmail = enforcedFromEmail(campaign.from_email, identity);
-          replyTo = enforcedReplyTo(identity);
         } catch (error) {
           return json(403, { error: error instanceof Error ? error.message : "Sender identity is not configured." });
         }
@@ -1806,9 +1768,7 @@ export async function handleApi(request: Request, path: string[]) {
         return json(429, { error: reserved.error, used: reserved.used, limit: reserved.limit });
       }
 
-      const sendAttachments = (await loadCampaignAttachmentsForSend(campaign.id)).filter(
-        (file) => !isArchiveAttachmentFilename(file.filename),
-      );
+      const sendAttachments = await loadCampaignAttachmentsForSend(campaign.id);
       const contact = { id: null as string | null, email: targetEmail, first_name: "Test", last_name: "Recipient" };
       const messageId = existingUnknown?.id || makeId("msg");
       const unsubscribeToken = randomBytes(24).toString("base64url");
@@ -1837,7 +1797,14 @@ export async function handleApi(request: Request, path: string[]) {
           textBody,
           unsubscribeToken,
           idempotencyKey,
-          JSON.stringify({ intent: "test-send", list_unsubscribe: unsubscribeUrl }),
+          JSON.stringify({
+            intent: "test-send",
+            ...(footered.html.includes("{{unsubscribe_url}}") ||
+            footered.text.includes("{{unsubscribe_url}}") ||
+            campaign.subject.includes("{{unsubscribe_url}}")
+              ? { opt_out_url: unsubscribeUrl }
+              : {}),
+          }),
           reserved.reservationId,
         ],
       );
@@ -1872,28 +1839,38 @@ export async function handleApi(request: Request, path: string[]) {
               gate = json(403, { error: "That address is suppressed and cannot receive test email." });
               return;
             }
-            try {
-              await assertDeliveryHealthAllowsSubmit({ requireThresholds: true });
-            } catch (error) {
-              await releaseDailyReservation(reserved.reservationId, true);
-              gate = json(403, {
-                error: error instanceof Error ? error.message : "Delivery health gate blocked test send.",
-              });
-              return;
-            }
             providerAttempted = true;
             accepted.current = await sendSmtpEmail({
               to: targetEmail,
               subject,
-              html: htmlBody,
-              text: textBody,
+              html: htmlBody || undefined,
+              text: textBody || undefined,
               fromName: campaign.from_name,
               fromEmail,
-              replyTo,
-              unsubscribeUrl,
+              replyTo: replyTo || undefined,
               attachments: sendAttachments,
-              messageId: messageId,
             });
+            if (accepted.current) {
+              const raw =
+                accepted.current.raw ||
+                buildSentAppendSource({
+                  from: `${campaign.from_name} <${fromEmail}>`,
+                  to: targetEmail,
+                  subject,
+                  text: textBody || undefined,
+                  html: htmlBody || undefined,
+                  replyTo: replyTo || undefined,
+                });
+              const sentAppend = await appendToSentFolder(raw);
+              if (!sentAppend.ok) {
+                await query(
+                  `UPDATE messages
+                      SET diagnostic_json = COALESCE(diagnostic_json, '{}'::jsonb) || $1::jsonb
+                    WHERE id = $2`,
+                  [JSON.stringify({ sent_append_error: sentAppend.error }), messageId],
+                ).catch(() => undefined);
+              }
+            }
           });
           if (gate) return gate;
         }
@@ -1936,7 +1913,19 @@ export async function handleApi(request: Request, path: string[]) {
         try {
           await query(
             `UPDATE messages SET status = 'submitted', provider_id = $1, diagnostic_json = $2 WHERE id = $3`,
-            [accepted.current.id, JSON.stringify({ provider_id: accepted.current.id, list_unsubscribe: unsubscribeUrl, attempt_id: attemptId }), messageId],
+            [
+              accepted.current.id,
+              JSON.stringify({
+                provider_id: accepted.current.id,
+                attempt_id: attemptId,
+                ...(footered.html.includes("{{unsubscribe_url}}") ||
+                footered.text.includes("{{unsubscribe_url}}") ||
+                campaign.subject.includes("{{unsubscribe_url}}")
+                  ? { opt_out_url: unsubscribeUrl }
+                  : {}),
+              }),
+              messageId,
+            ],
           );
         } catch {
           await query(
@@ -1974,21 +1963,12 @@ export async function handleApi(request: Request, path: string[]) {
       `SELECT filename FROM campaign_attachments WHERE campaign_id = $1 AND blocked = FALSE`,
       [campaign.id],
     );
-    const blockedArchives = await query<{ filename: string }>(
-      `SELECT filename FROM campaign_attachments WHERE campaign_id = $1 AND (blocked = TRUE OR lower(filename) LIKE '%.zip')`,
-      [campaign.id],
-    );
-    if (blockedArchives.rows.length) {
-      return json(400, {
-        error: "This campaign has archive attachments that cannot be sent. Remove or leave them blocked before launch.",
-      });
-    }
     let fromEmail = campaign.from_email;
-    let replyTo: string | null = identity.replyToEmail || null;
+    // Reply-To only when the campaign sets one — not from SENDSTACK_REPLY_TO_EMAIL.
+    let replyTo: string | null = campaign.reply_to_email || null;
     if (isLive || isSmtpLaunch) {
       try {
         fromEmail = enforcedFromEmail(campaign.from_email, identity);
-        replyTo = enforcedReplyTo(identity);
       } catch (error) {
         return json(403, { error: error instanceof Error ? error.message : "Sender identity is not configured." });
       }
@@ -2014,17 +1994,6 @@ export async function handleApi(request: Request, path: string[]) {
     });
     if (!preflight.ok) {
       return json(400, { error: preflight.errors[0], errors: preflight.errors });
-    }
-
-    const health = await getDeliveryHealthSnapshot();
-    try {
-      assertLaunchAllowedByHealth(health, { requireThresholds: isLive });
-    } catch (error) {
-      return json(403, {
-        error: error instanceof Error ? error.message : "Delivery health gate blocked launch.",
-        blocking_reasons: health.blocking_reasons,
-        launch_blocked: true,
-      });
     }
 
     if (isSmtpLaunch && isLive) {
@@ -2087,6 +2056,58 @@ export async function handleApi(request: Request, path: string[]) {
       ...result,
     });
     return json(200, result);
+  }
+  if (request.method === "GET" && route === "/mailbox") {
+    const auth = await requirePermission(request, "deliveries.view");
+    if (auth.response) return auth.response;
+    if (!mailboxReadAllowed()) {
+      return json(503, {
+        error: mailboxConfigured()
+          ? "Mailbox reading is unavailable on preview deployments."
+          : "Configure Spacemail mailbox credentials to read Inbox and Sent.",
+      });
+    }
+    const folderParam = (new URL(request.url).searchParams.get("folder") || "inbox").trim().toLowerCase();
+    if (folderParam !== "inbox" && folderParam !== "sent") {
+      return json(400, { error: "folder must be inbox or sent." });
+    }
+    try {
+      const messages = await listMailboxMessages(folderParam as MailboxFolder);
+      return json(200, { folder: folderParam, messages });
+    } catch (error) {
+      return json(502, {
+        error: error instanceof Error ? error.message : "Could not read the mailbox.",
+      });
+    }
+  }
+  if (request.method === "GET" && route === "/mailbox/message") {
+    const auth = await requirePermission(request, "deliveries.view");
+    if (auth.response) return auth.response;
+    if (!mailboxReadAllowed()) {
+      return json(503, {
+        error: mailboxConfigured()
+          ? "Mailbox reading is unavailable on preview deployments."
+          : "Configure Spacemail mailbox credentials to read Inbox and Sent.",
+      });
+    }
+    const params = new URL(request.url).searchParams;
+    const folderParam = (params.get("folder") || "inbox").trim().toLowerCase();
+    const uid = Number(params.get("uid") || "");
+    if (folderParam !== "inbox" && folderParam !== "sent") {
+      return json(400, { error: "folder must be inbox or sent." });
+    }
+    if (!Number.isFinite(uid) || uid < 1) {
+      return json(400, { error: "uid must be a positive number." });
+    }
+    try {
+      const message = await getMailboxMessage(folderParam as MailboxFolder, uid);
+      if (!message) return json(404, { error: "Message not found." });
+      return json(200, { folder: folderParam, message });
+    } catch (error) {
+      return json(502, {
+        error: error instanceof Error ? error.message : "Could not open the mailbox message.",
+      });
+    }
   }
   if (request.method === "GET" && route === "/messages") {
     const auth = await requirePermission(request, "deliveries.view");
@@ -2264,17 +2285,10 @@ export async function handleApi(request: Request, path: string[]) {
 
     const body = await request.json().catch(() => ({})) as {
       email?: string;
-      first_name?: string;
-      last_name?: string;
-      consent_source?: string;
       list_id?: string;
     };
     const email = normalizeEmail(body.email ?? "");
-    const firstName = (body.first_name ?? "").trim();
-    const lastName = (body.last_name ?? "").trim();
-    const consentSource = (body.consent_source ?? "").trim();
     if (!validEmail(email)) return json(400, { error: "Enter a valid email address." });
-    if (!consentSource) return json(400, { error: "Consent source is required." });
     if (!body.list_id) return json(400, { error: "Select a destination list." });
 
     const list = await query(`SELECT id FROM lists WHERE id = $1`, [body.list_id]);
@@ -2284,12 +2298,9 @@ export async function handleApi(request: Request, path: string[]) {
 
     let created: { id: string; status: string };
     try {
-      created = await createPendingContact({
+      created = await createContact({
         email,
-        firstName,
-        lastName,
         listId: body.list_id,
-        consentSource,
       });
     } catch (error) {
       return json(400, { error: safeClientMessage(error, "Could not create contact.") });
@@ -2297,15 +2308,14 @@ export async function handleApi(request: Request, path: string[]) {
     await recordRequestAudit(request, auth.session.user_id, "contact_created", "contact", created.id, {
       email,
       list_id: body.list_id,
-      consent_source: consentSource,
       status: created.status,
     });
     return json(201, {
       contact: {
         id: created.id,
         email,
-        first_name: firstName,
-        last_name: lastName,
+        first_name: "",
+        last_name: "",
         status: created.status,
       },
     });

@@ -1,107 +1,138 @@
 const state = {
   session: null,
   csrf: "",
-  currentView: "dashboard",
+  route: { section: "overview", id: "", params: new URLSearchParams() },
+  pageKey: "",
   lists: [],
   users: [],
   roles: [],
   permissionDefinitions: [],
+  summary: null,
   pollTimer: null,
-  deliveryFilters: {
-    campaignId: null,
-    q: "",
-    status: "",
-    from: "",
-    to: "",
-  },
-  auditFilters: {
-    action: "",
-    entityType: "",
-    q: "",
-    from: "",
-    to: "",
-  },
+  renderToken: 0,
+  composerDirty: false,
+  reverting: false,
+  selectedContacts: new Set(),
+  contactSort: { key: "created_at", dir: "desc" },
+  campaignStatus: "",
+  lastFocus: null,
+  drawerFocus: null,
 };
 
-const els = {
-  loginScreen: document.querySelector("#login-screen"),
-  appShell: document.querySelector("#app-shell"),
-  loginForm: document.querySelector("#login-form"),
-  loginError: document.querySelector("#login-error"),
-  content: document.querySelector("#content"),
-  pageTitle: document.querySelector("#page-title"),
-  pageKicker: document.querySelector("#page-kicker"),
-  nav: document.querySelector("#main-nav"),
-  modal: document.querySelector("#modal"),
-  modalBody: document.querySelector("#modal-body"),
-  modalTitle: document.querySelector("#modal-title"),
-  modalKicker: document.querySelector("#modal-kicker"),
-  toastRegion: document.querySelector("#toast-region"),
-  modePill: document.querySelector("#mode-pill"),
-  queueStatus: document.querySelector("#queue-status"),
+const cache = new Map();
+const PROVIDER_HOURLY_CAP = 500;
+
+const ICONS = {
+  home: '<path d="M3 9.5 10 3l7 6.5V17a1 1 0 0 1-1 1h-4.5v-5h-3v5H4a1 1 0 0 1-1-1V9.5z"/>',
+  contacts: '<path d="M10 10a3 3 0 1 0-3-3 3 3 0 0 0 3 3z"/><path d="M4 16.5c.6-2.2 2.5-3.5 6-3.5s5.4 1.3 6 3.5"/>',
+  campaigns: '<path d="M3 5.5h14v9H3z"/><path d="m3 6 7 5 7-5"/>',
+  sending: '<circle cx="10" cy="10" r="3"/><path d="M10 2.5v2M10 15.5v2M2.5 10h2M15.5 10h2M4.4 4.4l1.4 1.4M14.2 14.2l1.4 1.4M15.6 4.4l-1.4 1.4M5.8 14.2l-1.4 1.4"/>',
+  deliveries: '<path d="M3 10h10"/><path d="m10 6 4 4-4 4"/><path d="M3 4h6M3 16h6"/>',
+  mailbox: '<path d="M3 6h14v10H3z"/><path d="m3 6 7 5 7-5"/>',
+  suppressions: '<circle cx="10" cy="10" r="6.5"/><path d="m5.5 5.5 9 9"/>',
+  users: '<circle cx="7" cy="8" r="2"/><circle cx="13.5" cy="8.5" r="1.7"/><path d="M3.5 15c.4-2 2-3 3.5-3s3.1 1 3.5 3M12 12.2c1.3.1 2.4.8 2.8 2.3"/>',
+  audit: '<path d="M6 3.5h8v13H6z"/><path d="M8 7h4M8 10h4M8 13h2"/>',
+  search: '<circle cx="8.5" cy="8.5" r="4.5"/><path d="m12 12 4 4"/>',
+  close: '<path d="m5 5 10 10M15 5 5 15"/>',
+  menu: '<path d="M3 5h14M3 10h14M3 15h14"/>',
+  eye: '<path d="M2 10s3-5 8-5 8 5 8 5-3 5-8 5-8-5-8-5z"/><circle cx="10" cy="10" r="2"/>',
+  eyeOff: '<path d="M3 3l14 14"/><path d="M8.2 5.3A8.8 8.8 0 0 1 10 5c5 0 8 5 8 5a15 15 0 0 1-3.1 3.4M6.1 6.8C3.7 8.2 2 10 2 10s3 5 8 5a8 8 0 0 0 3-.6"/>',
+  plus: '<path d="M10 4v12M4 10h12"/>',
 };
 
-const viewMeta = {
-  dashboard: ["Overview", "Operations"],
+const VIEW_META = {
+  overview: ["Overview", "Operations"],
   contacts: ["Contacts", "Audience"],
   campaigns: ["Campaigns", "Delivery"],
-  sending: ["Sending setup", "Production readiness"],
-  deliveries: ["Deliveries", "Message activity"],
-  suppressions: ["Suppressions", "Safety controls"],
-  users: ["Users & roles", "Access control"],
+  sending: ["Sending setup", "Readiness"],
+  deliveries: ["Deliveries", "Outcomes"],
+  mailbox: ["Mailbox", "Spacemail"],
+  suppressions: ["Suppressions", "Safety"],
+  users: ["Users & roles", "Access"],
   audit: ["Audit log", "Governance"],
+  _ui: ["Components", "Development"],
 };
 
-const viewPermissions = {
+const VIEW_PERMISSIONS = {
   contacts: "contacts.view",
   campaigns: "campaigns.view",
   sending: "sending.view",
   deliveries: "deliveries.view",
+  mailbox: "deliveries.view",
   suppressions: "suppressions.view",
   users: "users.view",
   audit: "audit.view",
 };
 
+const ROLE_LABELS = { admin: "Administrator", marketer: "Marketer", analyst: "Analyst" };
+
+const DELIVERY_STATUSES = [
+  ["captured", "Captured", "Stored in this workspace only. No email left the app."],
+  ["submitted", "Submitted", "Spacemail accepted the message over SMTP. That is not proof it reached the inbox."],
+  ["failed", "Failed", "The send failed before Spacemail accepted it."],
+  ["unsubscribed", "Unsubscribed", "The recipient opted out through this workspace."],
+  ["suppressed", "Suppressed", "Skipped because the address is on the suppression list."],
+];
+
+const FILTER_STATUSES = ["captured", "submitted", "failed", "unsubscribed", "suppressed"];
+
+const CAMPAIGN_STATUSES = ["draft", "sending", "paused", "completed", "cancelled", "failed", "submission_unknown", "reconciling", "partially_sent", "cancel_requested"];
+
+const PERMISSION_GROUPS = [
+  ["Audience", ["lists.view", "lists.manage", "contacts.view", "contacts.manage", "contacts.edit"]],
+  ["Campaigns", ["campaigns.view", "campaigns.manage", "campaigns.send"]],
+  ["Delivery", ["sending.view", "deliveries.view", "deliveries.feedback", "suppressions.view", "suppressions.manage"]],
+  ["Governance", ["overview.view", "audit.view", "users.view", "users.manage"]],
+];
+
+const ATTACHMENT_ACCEPT = ".png,.jpg,.jpeg,.gif,.webp,.pdf";
+const ATTACHMENT_MAX_FILE_BYTES = 5 * 1024 * 1024;
+const ATTACHMENT_MAX_COUNT = 3;
+const ATTACHMENT_MAX_TOTAL_BYTES = 10 * 1024 * 1024;
+
+const PLACEHOLDER_PATTERNS = [
+  [/replace this (text|copy|section)/i, "placeholder copy"],
+  [/write your message/i, "placeholder message prompt"],
+  [/lorem ipsum/i, "lorem ipsum"],
+  [/todo:\s*replace/i, "a todo placeholder"],
+  [/sample (subject|message|campaign)/i, "sample seed content"],
+];
+
+const contentModes = [
+  { id: "rich_text", title: "Rich text" },
+  { id: "visual", title: "Template" },
+  { id: "plain_text", title: "Plain text" },
+  { id: "custom_html", title: "HTML" },
+];
+
+const emptyVisual = {
+  schema_version: 1,
+  template: "announcement",
+  brand_name: "CTN",
+  preheader: "",
+  headline: "",
+  body: "",
+  cta_label: "",
+  cta_url: "",
+  accent_color: "#0f7a72",
+  footer: "",
+};
+
+const starterRich = "<p>Share the update here.</p>";
+const starterPlain = "Share the update here.";
+const starterHtml = `<!doctype html><html><body style="margin:0;background:#f4f7f8;font-family:Arial,sans-serif;color:#141821"><table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="padding:32px 16px"><tr><td align="center"><table role="presentation" width="100%" style="max-width:600px;background:#ffffff"><tr><td style="padding:28px;background:#0f7a72;color:#ffffff;font-size:20px">CTN</td></tr><tr><td style="padding:32px"><h1>Share the update here.</h1><p><a href="https://ctn-sk.com">Learn more</a></p></td></tr></table></td></tr></table></body></html>`;
+
+function icon(name) {
+  return `<svg class="icon" viewBox="0 0 20 20" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">${ICONS[name] || ""}</svg>`;
+}
+
 function can(permission) {
   return Boolean(state.session?.permissions?.includes(permission));
 }
 
-const defaultTemplate = `<!doctype html>
-<html>
-  <body style="margin:0;background:#f1f5fb;font-family:Arial,sans-serif;color:#14213d">
-    <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="background:#f1f5fb;padding:32px 16px">
-      <tr><td align="center">
-        <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="max-width:600px;background:white;border-radius:14px">
-          <tr><td style="padding:26px 30px;background:#0f7a72;color:white;font-size:20px;font-weight:bold">CTN</td></tr>
-          <tr><td style="padding:34px 30px">
-            <p style="margin:0 0 14px;font-size:16px">Hello {{first_name}},</p>
-            <h1 style="margin:0 0 16px;font-size:28px;line-height:1.2">A useful update from CTN.</h1>
-            <p style="margin:0 0 22px;color:#53627a;line-height:1.65">Hello {{first_name}}, here is your update. Preview shows the fully personalized result.</p>
-            <a href="#" style="display:inline-block;background:#0f7a72;color:white;text-decoration:none;padding:12px 18px;border-radius:8px;font-weight:bold">Learn more</a>
-          </td></tr>
-          <tr><td style="padding:21px 30px;background:#f7f9fc;color:#718097;font-size:12px;line-height:1.6">You are receiving this because you opted in to updates.<br><a href="{{unsubscribe_url}}" style="color:#0f7a72">Unsubscribe</a></td></tr>
-        </table>
-      </td></tr>
-    </table>
-  </body>
-</html>`;
-
-const defaultVisualContent = {
-  schema_version: 1,
-  template: "announcement",
-  brand_name: "CTN",
-  preheader: "A short update for you",
-  headline: "A useful update from CTN",
-  body: "Write the message your audience should read. The preview on the right updates as you type.",
-  cta_label: "Learn more",
-  cta_url: "https://ctn-sk.com",
-  accent_color: "#0f7a72",
-  footer: "You are receiving this because you opted in to updates.",
-};
-
-const defaultRichContent = `<h1>A useful update from CTN</h1><p>Hello {{first_name}},</p><p>Write your message here. Use the toolbar for emphasis and lists without touching HTML.</p><p><strong>Thank you for reading.</strong></p>`;
-
-const defaultPlainContent = "Hello {{first_name}},\n\nWrite your message here.\n\nUnsubscribe: {{unsubscribe_url}}";
+function isLive(mode = state.session?.delivery_mode) {
+  return mode === "smtp";
+}
 
 function escapeHtml(value) {
   return String(value ?? "")
@@ -112,13 +143,146 @@ function escapeHtml(value) {
     .replaceAll("'", "&#039;");
 }
 
+function titleCase(value) {
+  return String(value ?? "").replaceAll("_", " ").replace(/\b\w/g, (character) => character.toUpperCase());
+}
+
+function initials(name) {
+  return String(name || "CT").split(/\s+/).slice(0, 2).map((part) => part[0]).join("").toUpperCase() || "CT";
+}
+
+function personLabel(user) {
+  const role = user?.role_label || ROLE_LABELS[user?.role] || titleCase(user?.role || "");
+  const name = String(user?.name || "").trim();
+  const generic = !name || name.toLowerCase() === role.toLowerCase() || name.toLowerCase() === String(user?.role || "").toLowerCase();
+  const primary = generic ? (user?.email || "Signed in") : name;
+  return { primary, secondary: role, initials: initials(primary) };
+}
+
+function absoluteTime(value) {
+  if (!value) return "—";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return String(value);
+  return new Intl.DateTimeFormat(undefined, {
+    day: "numeric", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit", timeZoneName: "short",
+  }).format(date);
+}
+
+function relativeTime(value) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return absoluteTime(value);
+  const minutes = Math.round((Date.now() - date.getTime()) / 60000);
+  if (Math.abs(minutes) < 1) return "Just now";
+  if (Math.abs(minutes) < 60) return `${minutes} min ago`;
+  const hours = Math.round(minutes / 60);
+  if (Math.abs(hours) < 24) return `${hours} hour${Math.abs(hours) === 1 ? "" : "s"} ago`;
+  const days = Math.round(hours / 24);
+  if (Math.abs(days) < 14) return `${days} day${Math.abs(days) === 1 ? "" : "s"} ago`;
+  return absoluteTime(value);
+}
+
+function timeHtml(value, { relative = false } = {}) {
+  if (!value) return "—";
+  const abs = absoluteTime(value);
+  const label = relative ? relativeTime(value) : abs;
+  return `<time datetime="${escapeHtml(value)}" title="${escapeHtml(abs)}">${escapeHtml(label)}</time>`;
+}
+
+function dayKey(value) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "Unknown day";
+  return new Intl.DateTimeFormat(undefined, { day: "numeric", month: "short", year: "numeric" }).format(date);
+}
+
+function formatIp(ip) {
+  if (!ip || ip === "unknown") return "";
+  if (["::1", "127.0.0.1", "0:0:0:0:0:0:0:1", "localhost"].includes(ip)) return "Local / server";
+  return ip;
+}
+
+function formatByteSize(bytes) {
+  const value = Number(bytes) || 0;
+  if (value < 1024) return `${value} B`;
+  if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KB`;
+  return `${(value / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function validEmail(value) {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(value || "").trim());
+}
+
+function toast(message, type = "success") {
+  const item = document.createElement("div");
+  item.className = `toast${type === "error" ? " error" : ""}`;
+  item.textContent = message;
+  document.querySelector("#toast-region").append(item);
+  setTimeout(() => item.remove(), 4200);
+}
+
+function setBusy(button, busy) {
+  if (!button) return;
+  button.disabled = busy;
+  button.classList.toggle("is-loading", busy);
+  button.setAttribute("aria-busy", busy ? "true" : "false");
+}
+
+function setRefreshing(on) {
+  const node = document.querySelector("#refresh-indicator");
+  if (node) node.hidden = !on;
+}
+
+function setLoading() {
+  document.querySelector("#content").innerHTML = `<div class="loading-grid" aria-busy="true" aria-label="Loading"><div class="skeleton"></div><div class="skeleton"></div><div class="skeleton"></div></div>`;
+}
+
+async function api(path, options = {}) {
+  const request = { ...options, headers: { ...(options.headers || {}) } };
+  const isFormData = typeof FormData !== "undefined" && request.body instanceof FormData;
+  if (request.body && typeof request.body !== "string" && !isFormData) {
+    request.headers["Content-Type"] = "application/json";
+    request.body = JSON.stringify(request.body);
+  }
+  if (request.method && request.method !== "GET" && state.csrf) request.headers["X-CSRF-Token"] = state.csrf;
+  const response = await fetch(path, request);
+  const contentType = response.headers.get("content-type") || "";
+  const data = contentType.includes("application/json") ? await response.json() : await response.text();
+  if (response.status === 401 && path !== "/api/auth/login") {
+    showLogin();
+    throw new Error("Your session has ended. Sign in again.");
+  }
+  if (!response.ok) throw new Error(data?.error || `Request failed (${response.status})`);
+  return data;
+}
+
+async function submitForm(form, request, successMessage) {
+  const error = form.querySelector("[data-form-error]") || form.querySelector(".form-error");
+  const submit = form.querySelector('[type="submit"]');
+  if (error) error.textContent = "";
+  setBusy(submit, true);
+  try {
+    const result = await request();
+    if (successMessage) toast(successMessage);
+    return result;
+  } catch (requestError) {
+    if (error) error.textContent = requestError.message;
+    else toast(requestError.message, "error");
+    return null;
+  } finally {
+    setBusy(submit, false);
+  }
+}
+
+function invalidate(prefix) {
+  for (const key of [...cache.keys()]) if (String(key).startsWith(prefix)) cache.delete(key);
+}
+
 function safeContentObject(value) {
   if (value && typeof value === "object" && !Array.isArray(value)) return value;
   if (typeof value === "string") {
     try {
       const parsed = JSON.parse(value);
       if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) return parsed;
-    } catch (_) { /* legacy campaign metadata falls back safely */ }
+    } catch (_) { /* legacy content */ }
   }
   return { schema_version: 1 };
 }
@@ -160,1704 +324,111 @@ function sanitizeRichHtml(markup) {
 
 function richHtmlToText(markup) {
   const container = document.createElement("div");
-  container.innerHTML = sanitizeRichHtml(markup)
-    .replace(/<br\s*\/?\s*>/gi, "\n")
-    .replace(/<\/(p|div|h1|h2|h3|li|blockquote)>/gi, "\n");
+  container.innerHTML = sanitizeRichHtml(markup).replace(/<br\s*\/?\s*>/gi, "\n").replace(/<\/(p|div|h1|h2|h3|li|blockquote)>/gi, "\n");
   return (container.textContent || "").replace(/\n{3,}/g, "\n\n").trim();
 }
 
 function visualEmailContent(input) {
-  const data = { ...defaultVisualContent, ...(input || {}), schema_version: 1 };
-  const accent = /^#[0-9a-f]{6}$/i.test(data.accent_color || "") ? data.accent_color : defaultVisualContent.accent_color;
-  const template = ["announcement", "newsletter", "simple"].includes(data.template) ? data.template : "announcement";
-  const background = template === "simple" ? "#ffffff" : "#f1f5fb";
-  const headerBackground = template === "simple" ? "#ffffff" : template === "newsletter" ? accent : "#172952";
-  const headerColor = template === "simple" ? "#14213d" : "#ffffff";
-  const cardBorder = template === "simple" ? "1px solid #dfe6f1" : "0";
-  const paragraphs = escapeHtml(data.body).split(/\n{2,}/).map((paragraph) => `<p style="margin:0 0 16px;color:#53627a;line-height:1.65">${paragraph.replaceAll("\n", "<br>")}</p>`).join("");
+  const data = { ...emptyVisual, ...(input || {}), schema_version: 1 };
+  const accent = /^#[0-9a-f]{6}$/i.test(data.accent_color || "") ? data.accent_color : "#0f7a72";
+  const paragraphs = escapeHtml(data.body || "").split(/\n{2,}/).filter(Boolean).map((paragraph) => `<p style="margin:0 0 16px;color:#3d4a5c;line-height:1.65">${paragraph.replaceAll("\n", "<br>")}</p>`).join("");
   const ctaUrl = safeComposerUrl(data.cta_url);
   const cta = data.cta_label && ctaUrl ? `<a href="${escapeHtml(ctaUrl)}" style="display:inline-block;background:${accent};color:#ffffff;text-decoration:none;padding:12px 18px;border-radius:8px;font-weight:bold">${escapeHtml(data.cta_label)}</a>` : "";
-  const htmlBody = `<!doctype html><html><body style="margin:0;background:${background};font-family:Arial,sans-serif;color:#14213d"><div style="max-height:0;line-height:1px;font-size:1px;color:#ffffff">${escapeHtml(data.preheader)}</div><table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="background:${background};padding:32px 16px"><tr><td align="center"><table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="max-width:600px;background:#ffffff;border:${cardBorder};border-radius:14px"><tr><td style="padding:26px 30px;background:${headerBackground};color:${headerColor};font-size:20px;font-weight:bold">${escapeHtml(data.brand_name)}</td></tr><tr><td style="padding:34px 30px"><p style="margin:0 0 14px;font-size:16px">Hello {{first_name}},</p><h1 style="margin:0 0 16px;font-size:28px;line-height:1.2">${escapeHtml(data.headline)}</h1>${paragraphs}${cta}</td></tr><tr><td style="padding:21px 30px;background:#f7f9fc;color:#718097;font-size:12px;line-height:1.6">${escapeHtml(data.footer)}<br><a href="{{unsubscribe_url}}" style="color:${accent}">Unsubscribe</a></td></tr></table></td></tr></table></body></html>`;
-  const textParts = [data.brand_name, `Hello {{first_name}},`, data.headline, data.body];
-  if (data.cta_label && ctaUrl) textParts.push(`${data.cta_label}: ${ctaUrl}`);
-  textParts.push(data.footer, "Unsubscribe: {{unsubscribe_url}}");
+  const footerCell = data.footer
+    ? `<tr><td style="padding:21px 30px;background:#f7f9fc;color:#3d4a5c;font-size:12px;line-height:1.6">${escapeHtml(data.footer)}</td></tr>`
+    : "";
+  const htmlBody = `<!doctype html><html><body style="margin:0;background:#f4f7f8;font-family:Arial,sans-serif;color:#141821"><div style="max-height:0;overflow:hidden;color:#f4f7f8">${escapeHtml(data.preheader || "")}</div><table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="padding:32px 16px"><tr><td align="center"><table role="presentation" width="100%" style="max-width:600px;background:#ffffff"><tr><td style="padding:26px 30px;background:${accent};color:#ffffff;font-size:20px;font-weight:bold">${escapeHtml(data.brand_name || "CTN")}</td></tr><tr><td style="padding:34px 30px"><h1 style="margin:0 0 16px;font-size:28px;line-height:1.2">${escapeHtml(data.headline || "")}</h1>${paragraphs}${cta}</td></tr>${footerCell}</table></td></tr></table></body></html>`;
+  const textParts = [data.brand_name, data.headline, data.body, data.cta_label && ctaUrl ? `${data.cta_label}: ${ctaUrl}` : "", data.footer];
   return { html_body: htmlBody, text_body: textParts.filter(Boolean).join("\n\n"), content_json: data };
 }
 
 function richEmailContent(input) {
-  const richHtml = sanitizeRichHtml(input?.rich_html || defaultRichContent);
-  const htmlBody = `<!doctype html><html><body style="margin:0;background:#f1f5fb;font-family:Arial,sans-serif;color:#14213d"><table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="padding:32px 16px"><tr><td align="center"><table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="max-width:600px;background:#ffffff;border-radius:14px"><tr><td style="padding:34px 30px;line-height:1.65">${richHtml}</td></tr><tr><td style="padding:20px 30px;background:#f7f9fc;color:#718097;font-size:12px">You are receiving this because you opted in.<br><a href="{{unsubscribe_url}}" style="color:#536fd9">Unsubscribe</a></td></tr></table></td></tr></table></body></html>`;
+  const richHtml = sanitizeRichHtml(input?.rich_html || "");
+  const htmlBody = `<!doctype html><html><body style="margin:0;background:#f4f7f8;font-family:Arial,sans-serif;color:#141821"><table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="padding:32px 16px"><tr><td align="center"><table role="presentation" width="100%" style="max-width:600px;background:#ffffff"><tr><td style="padding:34px 30px;line-height:1.65">${richHtml}</td></tr></table></td></tr></table></body></html>`;
   const text = richHtmlToText(richHtml);
-  return { html_body: htmlBody, text_body: `${text}\n\nUnsubscribe: {{unsubscribe_url}}`, content_json: { schema_version: 1, rich_html: richHtml } };
+  return { html_body: htmlBody, text_body: text, content_json: { schema_version: 1, rich_html: richHtml } };
 }
 
 function plainEmailContent(input) {
-  let text = String(input?.plain_text || "Hello {{first_name}},\n\nWrite your message here.").trim();
-  if (!text.includes("{{unsubscribe_url}}")) text += "\n\nUnsubscribe: {{unsubscribe_url}}";
-  const htmlBody = `<!doctype html><html><body style="margin:0;background:#f1f5fb;font-family:Arial,sans-serif;color:#14213d"><table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="padding:32px 16px"><tr><td align="center"><div style="max-width:600px;background:#ffffff;border-radius:12px;padding:30px;white-space:pre-wrap;line-height:1.65">${escapeHtml(text).replaceAll("\n", "<br>")}</div></td></tr></table></body></html>`;
-  return { html_body: htmlBody, text_body: text, content_json: { schema_version: 1, plain_text: text } };
+  const text = String(input?.plain_text || "").trim();
+  // Plain-text mode sends text only — same as Spacemail webmail plain compose.
+  return { html_body: "", text_body: text, content_json: { schema_version: 1, plain_text: text } };
 }
 
 function buildCampaignContent(mode, draft) {
   if (mode === "visual") return visualEmailContent(draft);
   if (mode === "rich_text") return richEmailContent(draft);
   if (mode === "plain_text") return plainEmailContent(draft);
-  return {
-    html_body: String(draft?.html_body || defaultTemplate),
-    text_body: String(draft?.text_body || "Hello {{first_name}},\n\nWrite your message here.\n\nUnsubscribe: {{unsubscribe_url}}"),
-    content_json: { schema_version: 1 },
+  const html = String(draft?.html_body || "");
+  const text = String(draft?.text_body || "").trim();
+  return { html_body: html, text_body: text, content_json: { schema_version: 1 } };
+}
+
+function contentModeLabel(mode) {
+  return contentModes.find((entry) => entry.id === mode)?.title || titleCase(mode || "campaign");
+}
+
+function statusMeaning(status) {
+  const found = DELIVERY_STATUSES.find(([id]) => id === String(status || "").toLowerCase());
+  if (found) return found[2];
+  if (status === "sandboxed") return DELIVERY_STATUSES[0][2];
+  if (status === "paused") return "Launch is paused. Unsent recipients will not be submitted.";
+  if (status === "cancelled") return "Unsent recipients were cancelled. Mail already accepted cannot be recalled.";
+  if (status === "draft") return "Not sent.";
+  return "";
+}
+
+function statusLabel(status) {
+  const safe = String(status || "unknown").toLowerCase();
+  const map = {
+    sandboxed: "Captured", captured: "Captured", submitted: "Submitted", delivered: "Delivered", delayed: "Delayed",
+    bounced: "Bounced", complained: "Complained", suppressed: "Suppressed", unsubscribed: "Unsubscribed",
+    queued: "Queued", processing: "Processing", sending: "Sending", paused: "Paused", cancelled: "Cancelled",
+    completed: "Completed", draft: "Draft", failed: "Failed", active: "Active",
+    inactive: "Disabled", disabled: "Disabled", manual: "Manual", hard_bounce: "Hard bounce", complaint: "Complaint",
+    unsubscribe: "Unsubscribed", submission_unknown: "Submission unknown", reconciling: "Reconciling",
+    partially_sent: "Partly sent", cancel_requested: "Cancel requested",
   };
+  return map[safe] || titleCase(safe);
 }
 
-function formatDate(value) {
-  if (!value) return "—";
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return value;
-  return new Intl.DateTimeFormat(undefined, {
-    month: "short",
-    day: "numeric",
-    hour: "2-digit",
-    minute: "2-digit",
-  }).format(date);
+function statusPill(status) {
+  const safe = String(status || "unknown").toLowerCase();
+  const tip = statusMeaning(safe);
+  return `<span class="status ${escapeHtml(safe)}"${tip ? ` title="${escapeHtml(tip)}"` : ""}>${escapeHtml(statusLabel(safe))}</span>`;
 }
 
-function titleCase(value) {
-  return String(value ?? "")
-    .replaceAll("_", " ")
-    .replace(/\b\w/g, (character) => character.toUpperCase());
+function deliveryLegend() {
+  const items = DELIVERY_STATUSES.filter(([id]) => FILTER_STATUSES.includes(id));
+  return `<details class="panel" style="margin-bottom:16px"><summary class="panel-head"><span>What do statuses mean?</span></summary><div class="panel-body stack">${items.map(([status, , meaning]) => `<div class="check">${statusPill(status)}<span>${escapeHtml(meaning)}</span></div>`).join("")}<p class="help">Spacemail does not report inbox delivery, bounces, or complaints back to this workspace.</p></div></details>`;
 }
 
 const AUDIT_DETAIL_OMIT = new Set(["ip", "user_agent"]);
-const AUDIT_DETAIL_ORDER = [
-  "email",
-  "name",
-  "role",
-  "active",
-  "status",
-  "recipients",
-  "reason",
-  "consent_source",
-  "content_mode",
-  "delivery_mode",
-];
+const AUDIT_DETAIL_ORDER = ["email", "name", "role", "active", "status", "recipients", "reason", "consent_source", "content_mode", "delivery_mode"];
 
-function formatAuditDetailValue(value) {
+function formatAuditDetailValue(key, value) {
   if (value === null || value === undefined || value === "") return null;
+  if (key === "role") return ROLE_LABELS[String(value)] || titleCase(value);
   if (typeof value === "boolean") return value ? "Yes" : "No";
   if (typeof value === "object") {
-    try {
-      return JSON.stringify(value);
-    } catch {
-      return String(value);
-    }
+    try { return JSON.stringify(value); } catch { return String(value); }
   }
   return String(value);
 }
 
 function formatAuditDetail(detail) {
   const source = detail && typeof detail === "object" ? detail : {};
-  const preferred = [];
   const seen = new Set();
-  for (const key of AUDIT_DETAIL_ORDER) {
-    if (!(key in source) || AUDIT_DETAIL_OMIT.has(key)) continue;
-    const formatted = formatAuditDetailValue(source[key]);
-    if (formatted === null) continue;
-    preferred.push(`${titleCase(key)}: ${formatted}`);
+  const parts = [];
+  for (const key of [...AUDIT_DETAIL_ORDER, ...Object.keys(source).sort()]) {
+    if (seen.has(key) || AUDIT_DETAIL_OMIT.has(key) || !(key in source)) continue;
     seen.add(key);
+    const formatted = formatAuditDetailValue(key, source[key]);
+    if (formatted === null) continue;
+    parts.push(`${titleCase(key)}: ${formatted}`);
   }
-  const leftovers = Object.keys(source)
-    .filter((key) => !AUDIT_DETAIL_OMIT.has(key) && !seen.has(key))
-    .sort()
-    .map((key) => {
-      const formatted = formatAuditDetailValue(source[key]);
-      return formatted === null ? null : `${titleCase(key)}: ${formatted}`;
-    })
-    .filter(Boolean);
-  const primary = [...preferred, ...leftovers].join(" · ") || "—";
-  const ip = typeof source.ip === "string" && source.ip && source.ip !== "unknown" ? source.ip : "";
-  return { primary, ip };
-}
-
-function statusPill(status, { title } = {}) {
-  const safe = String(status || "unknown").toLowerCase();
-  const labels = {
-    sandboxed: "Captured",
-    captured: "Captured",
-    submitted: "Submitted",
-    delivered: "Delivered",
-    delayed: "Delayed",
-    bounced: "Bounced",
-    complained: "Complained",
-    suppressed: "Suppressed",
-    unsubscribed: "Unsubscribed",
-    queued: "Queued",
-    processing: "Processing",
-    sending: "Sending",
-    paused: "Paused",
-    cancelled: "Cancelled",
-    completed: "Completed",
-    draft: "Draft",
-    failed: "Failed",
-    active: "Active",
-    pending_consent: "Pending consent",
-    inactive: "Inactive",
-  };
-  const label = labels[safe] || titleCase(safe);
-  const tip = title || deliveryStatusMeaning(safe);
-  const titleAttr = tip ? ` title="${escapeHtml(tip)}"` : "";
-  return `<span class="status ${escapeHtml(safe)}"${titleAttr}>${escapeHtml(label)}</span>`;
-}
-
-function deliveryStatusMeaning(status) {
-  switch (String(status || "").toLowerCase()) {
-    case "captured":
-    case "sandboxed":
-      return "Stored in this workspace only — no email left the app";
-    case "submitted":
-      return "Accepted by Spacemail SMTP — not proof it reached the inbox";
-    case "delivered":
-      return "Legacy status — Spacemail SMTP does not report inbox delivery";
-    case "delayed":
-      return "Legacy status — Spacemail SMTP does not report delays";
-    case "failed":
-      return "Send attempt failed before Spacemail accepted it";
-    case "bounced":
-      return "Hard bounce — address rejected; recipient is suppressed";
-    case "complained":
-      return "Marked as spam — recipient is suppressed";
-    case "unsubscribed":
-      return "Recipient opted out via unsubscribe";
-    case "suppressed":
-      return "Skipped because the address is on the suppression list";
-    case "cancelled":
-      return "Unsent recipients cancelled locally — already-accepted mail cannot be recalled";
-    case "paused":
-      return "Launch paused locally — unsent recipients will not be submitted";
-    default:
-      return "";
-  }
-}
-
-function deliveryStatusLegend(live) {
-  const items = live
-    ? [
-        ["submitted", "Accepted by Spacemail SMTP — not inbox proof"],
-        ["bounced", "Rejected address · suppressed"],
-        ["complained", "Marked spam · suppressed"],
-        ["failed", "Send failed before SMTP accept"],
-        ["unsubscribed", "Opted out via unsubscribe"],
-      ]
-    : [
-        ["captured", "Stored here only — not mailed"],
-        ["submitted", "Accepted by Spacemail SMTP"],
-        ["bounced", "Rejected address · suppressed"],
-        ["failed", "Send failed before accept"],
-      ];
-  return `<div class="status-legend" role="list">${items.map(([status, meaning]) => `
-    <div class="status-legend-item" role="listitem">${statusPill(status)}<span>${escapeHtml(meaning)}</span></div>`).join("")}</div>`;
-}
-
-function deliveryModeLabel(mode) {
-  if (mode === "smtp") return "Spacemail SMTP";
-  return "Preview";
-}
-
-function deliveryStatusLabel(mode = state.session?.delivery_mode) {
-  return isLiveDelivery(mode) ? "LIVE" : "Dev Mode";
-}
-
-function isLiveDelivery(mode = state.session?.delivery_mode) {
-  return mode === "smtp";
-}
-
-function testSendNotice(mode = state.session?.delivery_mode) {
-  if (isLiveDelivery(mode)) {
-    return "This sends a real test through your Spacemail mailbox to the address you enter.";
-  }
-  return "Dev Mode: the message is captured in Deliveries. Nothing is mailed externally.";
-}
-
-function testSendSuccessMessage(email, mode = state.session?.delivery_mode) {
-  if (isLiveDelivery(mode)) {
-    return `Test sent via Spacemail to ${email}`;
-  }
-  return `Test captured for ${email} — open Deliveries to inspect it`;
-}
-
-function launchConfirmCopy(mode = state.session?.delivery_mode) {
-  const live = isLiveDelivery(mode);
-  return {
-    title: live ? "Send to audience?" : "Send in Dev Mode?",
-    notice: live
-      ? "Eligible recipients will receive a real email through Spacemail SMTP."
-      : "Dev Mode: messages are captured in this workspace. No email leaves the app.",
-    confirm: live ? "Send to audience" : "Capture in Dev Mode",
-    outcome: live
-      ? "After you confirm, Spacemail begins accepting one message per recipient."
-      : "After you confirm, messages appear in Deliveries as Captured.",
-  };
-}
-
-function launchOutcomeMessage(result, mode = state.session?.delivery_mode) {
-  const queued = Number(result?.queued ?? 0);
-  const sent = Number(result?.sent ?? queued);
-  const failed = Number(result?.failed ?? 0);
-  if (isLiveDelivery(mode)) {
-    if (failed) return `Sending via Spacemail: ${queued} queued · ${failed} failed`;
-    return queued === 1 ? "Sending via Spacemail to 1 recipient" : `Sending via Spacemail to ${queued} recipients`;
-  }
-  if (failed) return `Dev Mode finished: ${sent} captured · ${failed} failed`;
-  if (sent === 0) return "Dev Mode finished — no eligible recipients";
-  return sent === 1 ? "Dev Mode: 1 message captured in Deliveries" : `Dev Mode: ${sent} messages captured in Deliveries`;
-}
-
-function initials(name) {
-  return String(name || "User")
-    .split(/\s+/)
-    .slice(0, 2)
-    .map((part) => part[0])
-    .join("")
-    .toUpperCase();
-}
-
-function toast(message, type = "success") {
-  const item = document.createElement("div");
-  item.className = `toast ${type === "error" ? "error" : ""}`;
-  item.textContent = message;
-  els.toastRegion.append(item);
-  setTimeout(() => item.remove(), 4200);
-}
-
-async function api(path, options = {}) {
-  const request = { ...options, headers: { ...(options.headers || {}) } };
-  const isFormData = typeof FormData !== "undefined" && request.body instanceof FormData;
-  if (request.body && typeof request.body !== "string" && !isFormData) {
-    request.headers["Content-Type"] = "application/json";
-    request.body = JSON.stringify(request.body);
-  }
-  if (request.method && request.method !== "GET" && state.csrf) {
-    request.headers["X-CSRF-Token"] = state.csrf;
-  }
-  const response = await fetch(path, request);
-  const contentType = response.headers.get("content-type") || "";
-  const data = contentType.includes("application/json") ? await response.json() : await response.text();
-  if (response.status === 401 && path !== "/api/auth/login") {
-    showLogin();
-    throw new Error("Your session has ended. Sign in again.");
-  }
-  if (!response.ok) {
-    throw new Error(data?.error || `Request failed (${response.status})`);
-  }
-  return data;
-}
-
-const ATTACHMENT_ACCEPT = ".png,.jpg,.jpeg,.gif,.webp,.pdf";
-const ATTACHMENT_MAX_FILE_BYTES = 5 * 1024 * 1024;
-const ATTACHMENT_MAX_COUNT = 3;
-const ATTACHMENT_MAX_TOTAL_BYTES = 10 * 1024 * 1024;
-
-function formatByteSize(bytes) {
-  const value = Number(bytes) || 0;
-  if (value < 1024) return `${value} B`;
-  if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KB`;
-  return `${(value / (1024 * 1024)).toFixed(1)} MB`;
-}
-
-function attachmentListMarkup(attachments, { editable = false } = {}) {
-  if (!attachments?.length) {
-    return editable ? "" : `<p class="help attachment-empty">No attachments.</p>`;
-  }
-  return `<ul class="attachment-list">${attachments.map((file) => `
-    <li class="attachment-item">
-      <div><strong>${escapeHtml(file.filename)}</strong><span class="subtext">${escapeHtml(formatByteSize(file.byte_size))} · uploaded</span></div>
-      ${editable ? `<button type="button" class="button small ghost" data-remove-attachment="${escapeHtml(file.id)}">Remove</button>` : ""}
-    </li>`).join("")}</ul>`;
-}
-
-function pendingAttachmentListMarkup(pendingFiles) {
-  if (!pendingFiles.length) return "";
-  return `<ul class="attachment-list">${pendingFiles.map((file, index) => `
-    <li class="attachment-item pending">
-      <div><strong>${escapeHtml(file.name)}</strong><span class="subtext">${escapeHtml(formatByteSize(file.size))} · uploads on save</span></div>
-      <button type="button" class="button small ghost" data-remove-pending="${index}">Remove</button>
-    </li>`).join("")}</ul>`;
-}
-
-function showLogin() {
-  state.session = null;
-  state.csrf = "";
-  clearInterval(state.pollTimer);
-  els.appShell.hidden = true;
-  els.loginScreen.hidden = false;
-  document.querySelector("#login-email")?.focus();
-}
-
-function showApp(sessionData) {
-  state.session = sessionData;
-  state.csrf = sessionData.csrf_token;
-  els.loginScreen.hidden = true;
-  els.appShell.hidden = false;
-  const user = sessionData.user;
-  document.querySelector("#user-name").textContent = user.name;
-  document.querySelector("#user-role").textContent = user.role_label || titleCase(user.role);
-  document.querySelector("#user-initials").textContent = initials(user.name);
-  document.querySelectorAll("[data-permission]").forEach((element) => {
-    element.hidden = !can(element.dataset.permission);
-  });
-  els.modePill.innerHTML = `<span></span> ${deliveryStatusLabel(sessionData.delivery_mode)}`;
-  els.modePill.dataset.status = isLiveDelivery(sessionData.delivery_mode) ? "live" : "dev";
-  if (sessionData.must_change_password || user?.must_change_password) {
-    openChangePasswordModal(true);
-    return;
-  }
-  startPolling();
-  navigate(state.currentView || "dashboard");
-}
-
-function openChangePasswordModal(required = false) {
-  openModal(
-    "Change password",
-    required ? "Security" : "Account",
-    `<form id="change-password-form" class="stack">
-      <p class="subtext">${required ? "You must set a new password before using this workspace." : "Update your account password."}</p>
-      <label>Current password<input name="current_password" type="password" autocomplete="current-password" required /></label>
-      <label>New password<input name="new_password" type="password" autocomplete="new-password" minlength="12" required /></label>
-      <p class="form-error" role="alert"></p>
-      <button class="button primary" type="submit">Save password</button>
-    </form>`,
-  );
-  if (required) {
-    document.querySelector("#modal-close")?.setAttribute("disabled", "true");
-  }
-  const form = document.querySelector("#change-password-form");
-  form?.addEventListener("submit", async (event) => {
-    event.preventDefault();
-    const result = await submitForm(form, () =>
-      api("/api/auth/change-password", {
-        method: "POST",
-        body: {
-          current_password: form.current_password.value,
-          new_password: form.new_password.value,
-        },
-      }), "Password updated");
-    if (result) {
-      document.querySelector("#modal-close")?.removeAttribute("disabled");
-      closeModal();
-      showApp(result);
-    }
-  });
-}
-
-function setLoading() {
-  els.content.innerHTML = `<div class="loading-grid" aria-label="Loading"><div></div><div></div><div></div></div>`;
-}
-
-function setEmpty(icon, title, copy, actionHtml = "") {
-  els.content.innerHTML = `<section class="panel empty-state"><div><div class="empty-mark">${icon}</div><h2>${escapeHtml(title)}</h2><p>${escapeHtml(copy)}</p>${actionHtml}</div></section>`;
-}
-
-async function navigate(view) {
-  if (!viewMeta[view]) view = "dashboard";
-  if (viewPermissions[view] && !can(viewPermissions[view])) {
-    toast("You don’t have permission to open that section.", "error");
-    view = "dashboard";
-  }
-  state.currentView = view;
-  document.body.classList.remove("nav-open");
-  els.nav.querySelectorAll("[data-view]").forEach((button) => {
-    button.classList.toggle("active", button.dataset.view === view);
-  });
-  els.pageTitle.textContent = viewMeta[view][0];
-  els.pageKicker.textContent = viewMeta[view][1];
-  setLoading();
-  els.content.focus({ preventScroll: true });
-  try {
-    if (view === "dashboard") await renderDashboard();
-    if (view === "contacts") await renderContacts();
-    if (view === "campaigns") await renderCampaigns();
-    if (view === "sending") await renderSendingSetup();
-    if (view === "deliveries") await renderDeliveries();
-    if (view === "suppressions") await renderSuppressions();
-    if (view === "users") await renderUsers();
-    if (view === "audit") await renderAudit();
-  } catch (error) {
-    renderError(error);
-  }
-}
-
-function renderError(error) {
-  els.content.innerHTML = `<div class="notice warning"><span>!</span><div><strong>Couldn’t load this view.</strong><br>${escapeHtml(error.message)}</div></div>`;
-}
-
-async function getLists(force = false) {
-  if (!state.lists.length || force) {
-    state.lists = (await api("/api/lists")).lists;
-  }
-  return state.lists;
-}
-
-function updateQueueStatus(summary) {
-  const queued = summary.counts?.queued || 0;
-  els.queueStatus.innerHTML = `<span></span><strong>${queued ? `${queued} queued` : "Queue clear"}</strong>`;
-  els.queueStatus.querySelector("span").style.background = queued ? "#f3b65a" : "#50d4c2";
-}
-
-function startPolling() {
-  clearInterval(state.pollTimer);
-  const poll = async () => {
-    if (!state.session || document.hidden) return;
-    try {
-      const summary = await api("/api/summary");
-      updateQueueStatus(summary);
-    } catch (_) {
-      // Authentication handling occurs in api(); transient polling errors stay quiet.
-    }
-  };
-  poll();
-  state.pollTimer = setInterval(poll, 3000);
-}
-
-async function renderDashboard() {
-  const data = await api("/api/summary");
-  updateQueueStatus(data);
-  const remaining = Math.max(0, data.daily_limit - data.counts.sent_today);
-  els.content.innerHTML = `
-    <section class="stat-grid" aria-label="Delivery overview">
-      <article class="stat-card"><span class="stat-label">Active contacts</span><strong class="stat-value">${data.counts.contacts.toLocaleString()}</strong><span class="stat-detail">Ready for eligible campaigns</span></article>
-      <article class="stat-card" style="--stat-glow:rgba(80,212,194,.15)"><span class="stat-label">Sent today</span><strong class="stat-value">${data.counts.sent_today.toLocaleString()}</strong><span class="stat-detail"><strong>${remaining.toLocaleString()}</strong> remaining under today’s limit</span></article>
-      <article class="stat-card" style="--stat-glow:rgba(243,182,90,.14)"><span class="stat-label">Queue</span><strong class="stat-value">${data.counts.queued.toLocaleString()}</strong><span class="stat-detail">Messages waiting or processing</span></article>
-      <article class="stat-card" style="--stat-glow:rgba(255,111,125,.12)"><span class="stat-label">Suppressed</span><strong class="stat-value">${data.counts.suppressed.toLocaleString()}</strong><span class="stat-detail">Globally excluded before delivery</span></article>
-    </section>
-    <div class="two-column">
-      <section class="panel">
-        <div class="panel-head"><div><h2>Recent campaigns</h2><p>Latest audience runs and current states</p></div><button class="button small ghost" data-go="campaigns">View all</button></div>
-        ${renderRecentCampaignTable(data.recent_campaigns)}
-      </section>
-      ${can("deliveries.view") ? `<section class="panel">
-        <div class="panel-head"><div><h2>Latest messages</h2><p>${escapeHtml(deliveryStatusLabel(data.delivery_mode))} delivery activity</p></div><button class="button small ghost" data-go="deliveries">Open inbox</button></div>
-        <div class="panel-body">${renderRecentMessages(data.recent_messages)}</div>
-      </section>` : `<section class="panel access-summary"><div class="panel-body"><div class="access-lock">◌</div><h2>Recipient data is protected</h2><p>Your Analyst role includes aggregate campaign reporting without contact addresses or message contents.</p></div></section>`}
-    </div>
-    ${can("sending.view") ? `<section class="production-target-strip" data-status="${isLiveDelivery(data.delivery_mode) ? "live" : "dev"}">
-      <div class="target-strip-copy"><span class="readiness-status ${isLiveDelivery(data.delivery_mode) ? "ready" : "pending"}">${escapeHtml(deliveryStatusLabel(data.delivery_mode))}</span><div><strong>${isLiveDelivery(data.delivery_mode) ? "Live Spacemail SMTP is on" : "Workspace is in Dev Mode"}</strong><p>${isLiveDelivery(data.delivery_mode) ? "Campaigns and previews can reach real mailboxes through Spacemail. Review setup anytime if something looks off." : "Messages stay inside this workspace until an administrator turns on live delivery."}</p></div></div>
-      <button class="button" data-go="sending">Open setup</button>
-    </section>` : ""}
-    <div class="notice" style="margin-top:16px"><span>i</span><div><strong>${isLiveDelivery(data.delivery_mode) ? "Live delivery is active." : "Dev Mode is active."}</strong> ${isLiveDelivery(data.delivery_mode) ? "Outbound messages leave this workspace through Spacemail SMTP." : "Messages stay within this workspace until live delivery is enabled."}</div></div>`;
-}
-
-function readinessStatusLabel(status) {
-  const labels = {
-    ready: "Ready",
-    pending: "Pending",
-    migration_required: "Setup required",
-    not_connected: "Not connected",
-    not_verified: "Not verified",
-    configured_locked: "Configured (live off)",
-    configured: "Configured",
-  };
-  return labels[status] || titleCase(status);
-}
-
-function checkById(checks, id) {
-  return checks.find((check) => check.id === id) || { status: "pending", detail: "" };
-}
-
-async function renderSendingSetup() {
-  const data = await api("/api/production-readiness");
-  const target = data.target;
-  const readyCount = data.checks.filter((check) => check.status === "ready").length;
-  const vercel = checkById(data.checks, "vercel_runtime");
-  const postgres = checkById(data.checks, "postgres_database");
-  const smtp = checkById(data.checks, "spacemail_smtp");
-  const health = data.delivery_health || {};
-  const liveReady = Boolean(data.ready_for_live_sending);
-  const healthReady = Boolean(health.healthy);
-  els.content.innerHTML = `
-    <section class="production-hero">
-      <div>
-        <span class="readiness-status ${liveReady ? "ready" : "pending"}">${liveReady ? "Live email on" : "Live email off"}</span>
-        <p class="eyebrow">DELIVERY ARCHITECTURE</p>
-        <h2>${escapeHtml(target.platform)} + ${escapeHtml(target.database)} + ${escapeHtml(target.provider)}</h2>
-        <p>Current runtime: ${escapeHtml(data.current.runtime)}. Database: ${escapeHtml(data.current.database)}. Transport: ${escapeHtml(deliveryModeLabel(data.current.transport))}.</p>
-        <p>From: ${escapeHtml(data.current.from_email || "not configured")} · Reply-To: ${escapeHtml(data.current.reply_to_email || "not configured")}</p>
-      </div>
-      <div class="readiness-score"><strong>${readyCount}/${data.checks.length}</strong><span>setup checks complete</span></div>
-    </section>
-
-    <section class="target-grid" aria-label="Delivery architecture">
-      <article class="target-card"><span class="target-card-index">01</span><h3>Vercel</h3><p>${escapeHtml(vercel.detail)}</p><span class="readiness-status ${vercel.status === "ready" ? "ready" : "pending"}">${escapeHtml(readinessStatusLabel(vercel.status))}</span></article>
-      <article class="target-card"><span class="target-card-index">02</span><h3>PostgreSQL</h3><p>${escapeHtml(postgres.detail)}</p><span class="readiness-status ${postgres.status === "ready" ? "ready" : "pending"}">${escapeHtml(readinessStatusLabel(postgres.status))}</span></article>
-      <article class="target-card"><span class="target-card-index">03</span><h3>Spacemail SMTP</h3><p>${escapeHtml(smtp.detail)}</p><span class="readiness-status ${smtp.status === "ready" ? "ready" : "pending"}">${escapeHtml(readinessStatusLabel(smtp.status))}</span></article>
-    </section>
-
-    <section class="panel" style="margin-bottom:18px">
-      <div class="panel-head"><div><h2>Delivery health (7 days)</h2><p>Aggregate outcomes without recipient addresses</p></div><span class="readiness-status ${healthReady ? "ready" : "pending"}">${healthReady ? "Healthy" : "Not healthy"}</span></div>
-      <div class="panel-body">
-        <div class="stat-grid" style="margin:0">
-          <article class="stat-card"><span class="stat-label">Submitted</span><strong class="stat-value">${Number(health.submitted || 0).toLocaleString()}</strong></article>
-          <article class="stat-card"><span class="stat-label">Bounced</span><strong class="stat-value">${Number(health.bounced || 0).toLocaleString()}</strong></article>
-          <article class="stat-card"><span class="stat-label">Complained</span><strong class="stat-value">${Number(health.complained || 0).toLocaleString()}</strong></article>
-          <article class="stat-card"><span class="stat-label">Failed</span><strong class="stat-value">${Number(health.failed || 0).toLocaleString()}</strong></article>
-          <article class="stat-card"><span class="stat-label">Suppressed</span><strong class="stat-value">${Number(health.suppressed || 0).toLocaleString()}</strong></article>
-          <article class="stat-card"><span class="stat-label">Unsubscribed</span><strong class="stat-value">${Number(health.unsubscribed || 0).toLocaleString()}</strong></article>
-        </div>
-        ${(health.issues || []).length ? `<div class="notice warning" style="margin-top:14px"><span>!</span><div>${(health.issues || []).map((issue) => escapeHtml(issue)).join("<br>")}</div></div>` : `<div class="notice" style="margin-top:14px"><span>i</span><div>Delivery health thresholds are configured. Spacemail reports acceptance at SMTP submit time.</div></div>`}
-      </div>
-    </section>
-
-    <div class="readiness-layout">
-      <section class="panel">
-        <div class="panel-head"><div><h2>Delivery readiness</h2><p>Every item is checked before production delivery is enabled</p></div><span class="readiness-status ${liveReady ? "ready" : "locked"}">${liveReady ? "Ready for delivery" : "Dev Mode"}</span></div>
-        <div class="readiness-list">${data.checks.map((check) => `
-          <div class="readiness-item">
-            <span class="readiness-marker ${escapeHtml(check.status)}">${check.status === "ready" ? "✓" : ""}</span>
-            <div><strong>${escapeHtml(check.label)}</strong><p>${escapeHtml(check.detail)}</p></div>
-            <span class="readiness-status ${check.status === "ready" ? "ready" : "pending"}">${escapeHtml(readinessStatusLabel(check.status))}</span>
-          </div>`).join("")}</div>
-      </section>
-
-      <div class="readiness-side">
-        <section class="panel">
-          <div class="panel-head"><div><h2>Delivery path</h2><p>How a campaign reaches the provider</p></div></div>
-          <ol class="delivery-path">${data.delivery_path.map((step, index) => `<li><span>${index + 1}</span><p>${escapeHtml(step)}</p></li>`).join("")}</ol>
-        </section>
-        <section class="panel volume-plan">
-          <div class="panel-head"><div><h2>Volume goal</h2><p>Operating target after a careful ramp</p></div></div>
-          <div class="panel-body"><strong class="volume-goal">${escapeHtml(data.volume_plan.goal)}</strong><p>${escapeHtml(data.volume_plan.launch_policy)}</p><div class="notice warning"><span>!</span><div>Bounce, complaint, and unsubscribe signals must remain healthy before volume increases. Spacemail paid mailboxes are limited to 500 outgoing messages per hour.</div></div></div>
-        </section>
-      </div>
-    </div>
-
-    <div class="notice setup-note"><span>i</span><div><strong>DNS can remain with your existing provider.</strong> Vercel runs the application; Spacemail handles email delivery over SMTP. DNS hosting does not replace either service.</div></div>`;
-}
-
-function renderRecentCampaignTable(campaigns) {
-  if (!campaigns.length) return `<div class="empty-state"><div><p>No messages yet.</p>${can("campaigns.manage") ? `<button class="button primary" data-new-campaign>New message</button>` : ""}</div></div>`;
-  return `<div class="table-wrap"><table><thead><tr><th>Campaign</th><th>Status</th><th>Progress</th><th>Issues</th></tr></thead><tbody>${campaigns.map((campaign) => {
-    const recipients = Number(campaign.recipients || 0);
-    const sent = Number(campaign.sent || 0);
-    const progress = recipients ? Math.round((sent / recipients) * 100) : 0;
-    return `<tr><td><strong>${escapeHtml(campaign.name)}</strong><span class="subtext">${escapeHtml(campaign.subject)}</span></td><td>${statusPill(campaign.status)}</td><td><span class="subtext">${sent}/${recipients}</span><div class="progress"><span style="width:${progress}%"></span></div></td><td>${Number(campaign.issues || 0)}</td></tr>`;
-  }).join("")}</tbody></table></div>`;
-}
-
-function renderRecentMessages(messages) {
-  if (!messages.length) return `<div class="empty-state" style="min-height:180px;padding:20px"><div><p>Messages will appear here after a preview or campaign delivery.</p></div></div>`;
-  return `<div class="activity-list">${messages.map((message) => `<div class="activity-item"><div class="activity-icon">↗</div><div><strong>${escapeHtml(message.to_email)}</strong><p>${escapeHtml(message.subject)} · ${formatDate(message.created_at)}</p></div></div>`).join("")}</div>`;
-}
-
-async function renderContacts(query = "", listId = "") {
-  const params = new URLSearchParams();
-  if (query) params.set("q", query);
-  if (listId) params.set("list_id", listId);
-  const queryString = params.toString();
-  const [data, lists] = await Promise.all([
-    api(`/api/contacts${queryString ? `?${queryString}` : ""}`),
-    getLists(),
-  ]);
-  const canManage = can("contacts.manage");
-  const canEdit = can("contacts.edit");
-  const contacts = data.contacts || [];
-  const activeListId = data.list_id || listId || "";
-  const activeCount = contacts.filter((contact) => contact.status === "active").length;
-  const suppressedCount = contacts.filter((contact) => contact.status === "suppressed").length;
-  const searching = Boolean(query);
-  const filtering = Boolean(activeListId);
-  const activeList = lists.find((list) => list.id === activeListId);
-  const listSummary = lists.length
-    ? lists.slice(0, 6).map((list) => `<span class="list-chip">${escapeHtml(list.name)}<em>${Number(list.contact_count || 0)}</em></span>`).join("")
-    : `<span class="list-chip muted">No lists yet</span>`;
-  const listFilterOptions = [
-    `<option value="">All lists</option>`,
-    ...lists.map((list) => `<option value="${escapeHtml(list.id)}" ${list.id === activeListId ? "selected" : ""}>${escapeHtml(list.name)} (${Number(list.contact_count || 0)})</option>`),
-  ].join("");
-
-  const tableRows = contacts.map((contact) => {
-    const displayName = [contact.first_name, contact.last_name].filter(Boolean).join(" ") || "Unnamed contact";
-    const listNames = String(contact.lists || "")
-      .split(",")
-      .map((name) => name.trim())
-      .filter(Boolean);
-    return `<tr data-contact-id="${escapeHtml(contact.id)}">
-      <td>
-        <div class="contact-identity">
-          <span class="contact-avatar" aria-hidden="true">${escapeHtml(initials(displayName === "Unnamed contact" ? contact.email : displayName))}</span>
-          <div>
-            <strong>${escapeHtml(displayName)}</strong>
-            <span class="subtext email">${escapeHtml(contact.email)}</span>
-          </div>
-        </div>
-      </td>
-      <td>${listNames.length ? `<div class="list-chip-row">${listNames.map((name) => `<span class="list-chip">${escapeHtml(name)}</span>`).join("")}</div>` : `<span class="muted-dash">—</span>`}</td>
-      <td><span class="consent-tag">${escapeHtml(titleCase(contact.consent_source))}</span></td>
-      <td>${statusPill(contact.status)}</td>
-      <td><span class="date-cell">${formatDate(contact.created_at)}</span></td>
-      <td class="table-actions">
-        <button class="button small ghost" data-contact-view="${escapeHtml(contact.id)}">View</button>
-        ${canEdit ? `<button class="button small ghost" data-contact-edit="${escapeHtml(contact.id)}">Edit</button><button class="button small ghost danger-text" data-contact-delete="${escapeHtml(contact.id)}">Delete</button>` : ""}
-      </td>
-    </tr>`;
-  }).join("");
-
-  let emptyMarkup;
-  if (searching || filtering) {
-    emptyMarkup = `<div class="empty-state contacts-empty"><div><div class="empty-mark">⌕</div><h2>${searching ? `No matches for “${escapeHtml(query)}”` : "No contacts in this list"}</h2><p>${filtering && searching ? `Nothing found in ${escapeHtml(activeList?.name || "this list")}.` : filtering ? "Try another list, or clear the filter to see everyone." : "Try another email or name, or clear the search to see everyone."}</p><button class="button" id="clear-contact-filters">Clear filters</button></div></div>`;
-  } else {
-    emptyMarkup = `<div class="empty-state contacts-empty"><div><div class="empty-mark">◎</div><h2>No contacts yet</h2><p>Add someone manually or import a consented CSV audience to get started.</p>${canManage ? `<div class="empty-actions"><button class="button" id="empty-import-contacts">Import CSV</button><button class="button primary" id="empty-add-contact">Add contact</button></div>` : ""}</div></div>`;
-  }
-
-  const subtitle = searching
-    ? `${contacts.length.toLocaleString()} match${contacts.length === 1 ? "" : "es"} for “${escapeHtml(query)}”${activeList ? ` in ${escapeHtml(activeList.name)}` : ""}`
-    : filtering
-      ? `${contacts.length.toLocaleString()} contact${contacts.length === 1 ? "" : "s"} in ${escapeHtml(activeList?.name || "this list")}`
-      : `${contacts.length.toLocaleString()} contact${contacts.length === 1 ? "" : "s"} across ${lists.length.toLocaleString()} list${lists.length === 1 ? "" : "s"}`;
-
-  els.content.innerHTML = `
-    <div class="contacts-view">
-      <div class="section-lead contacts-lead">
-        <div>
-          <h2>${searching ? "Search results" : "Audience"}</h2>
-          <p>${subtitle}</p>
-        </div>
-        ${canManage ? `<div class="section-actions"><button class="button" id="import-contacts">Import CSV</button><button class="button primary" id="add-contact">Add contact</button></div>` : ""}
-      </div>
-
-      <div class="contacts-meta">
-        <div class="contacts-stat"><span>Shown</span><strong>${contacts.length.toLocaleString()}</strong></div>
-        <div class="contacts-stat"><span>Active</span><strong>${activeCount.toLocaleString()}</strong></div>
-        <div class="contacts-stat"><span>Suppressed</span><strong>${suppressedCount.toLocaleString()}</strong></div>
-        <div class="contacts-stat contacts-stat-lists"><span>Lists</span><div class="list-chip-row">${listSummary}${lists.length > 6 ? `<span class="list-chip muted">+${lists.length - 6}</span>` : ""}</div></div>
-      </div>
-
-      <div class="toolbar contacts-toolbar">
-        <div class="search"><input id="contact-search" type="search" placeholder="Search by email or name" value="${escapeHtml(query)}" aria-label="Search contacts" /></div>
-        <select id="contact-list-filter" aria-label="Filter by list">${listFilterOptions}</select>
-        <div class="toolbar-group">
-          ${can("lists.manage") ? `<button class="button small ghost" id="create-list">+ New list</button>` : ""}
-        </div>
-      </div>
-
-      <section class="panel contacts-panel">
-        ${contacts.length ? `<div class="table-wrap"><table class="contacts-table"><thead><tr><th>Contact</th><th>Lists</th><th>Consent</th><th>Status</th><th>Added</th><th></th></tr></thead><tbody>${tableRows}</tbody></table></div>` : emptyMarkup}
-      </section>
-    </div>`;
-
-  const search = document.querySelector("#contact-search");
-  const listFilter = document.querySelector("#contact-list-filter");
-  let searchTimer;
-  const currentListId = () => listFilter?.value || "";
-  const refresh = (nextQuery = search?.value.trim() || "", nextListId = currentListId()) => renderContacts(nextQuery, nextListId);
-
-  search?.addEventListener("input", () => {
-    clearTimeout(searchTimer);
-    searchTimer = setTimeout(() => refresh(search.value.trim(), currentListId()), 280);
-  });
-  listFilter?.addEventListener("change", () => refresh(search?.value.trim() || "", currentListId()));
-  document.querySelector("#clear-contact-filters")?.addEventListener("click", () => renderContacts("", ""));
-  document.querySelector("#add-contact")?.addEventListener("click", () => openContactModal(null, currentListId()));
-  document.querySelector("#empty-add-contact")?.addEventListener("click", () => openContactModal(null, currentListId()));
-  document.querySelector("#import-contacts")?.addEventListener("click", () => openImportModal(currentListId()));
-  document.querySelector("#empty-import-contacts")?.addEventListener("click", () => openImportModal(currentListId()));
-  document.querySelector("#create-list")?.addEventListener("click", openListModal);
-  els.content.querySelectorAll("[data-contact-view]").forEach((button) => {
-    button.addEventListener("click", () => openContactDetail(button.getAttribute("data-contact-view"), currentListId()));
-  });
-  els.content.querySelectorAll("[data-contact-edit]").forEach((button) => {
-    button.addEventListener("click", () => {
-      const contact = contacts.find((row) => row.id === button.getAttribute("data-contact-edit"));
-      if (contact) openContactModal(contact, currentListId());
-    });
-  });
-  els.content.querySelectorAll("[data-contact-delete]").forEach((button) => {
-    button.addEventListener("click", async () => {
-      const contact = contacts.find((row) => row.id === button.getAttribute("data-contact-delete"));
-      if (!contact) return;
-      const label = [contact.first_name, contact.last_name].filter(Boolean).join(" ") || contact.email;
-      if (!window.confirm(`Delete ${label}? This cannot be undone.`)) return;
-      try {
-        await api(`/api/contacts/${contact.id}`, { method: "DELETE" });
-        toast("Contact deleted");
-        await refresh(query, currentListId());
-      } catch (error) {
-        toast(error.message, "error");
-      }
-    });
-  });
-}
-
-
-function listOptions(lists, selected = "") {
-  return lists.map((list) => `<option value="${escapeHtml(list.id)}" ${list.id === selected ? "selected" : ""}>${escapeHtml(list.name)} (${Number(list.contact_count || 0)})</option>`).join("");
-}
-
-async function openContactDetail(contactId, preferredListId = "") {
-  if (!contactId) return;
-  try {
-    const data = await api(`/api/contacts/${contactId}`);
-    const contact = data.contact;
-    const displayName = [contact.first_name, contact.last_name].filter(Boolean).join(" ") || "Unnamed contact";
-    const listNames = String(contact.lists || "")
-      .split(",")
-      .map((name) => name.trim())
-      .filter(Boolean);
-    const canOpenMessage = can("deliveries.view");
-    const messages = Array.isArray(data.messages) ? data.messages : [];
-    const suppression = data.suppression;
-    const messageRows = messages.map((message) => {
-      const subjectCell = canOpenMessage
-        ? `<button type="button" class="text-link" data-message-id="${escapeHtml(message.id)}">${escapeHtml(message.subject || "Untitled")}</button>`
-        : escapeHtml(message.subject || "Untitled");
-      return `<tr>
-        <td>${escapeHtml(message.campaign_name || "—")}</td>
-        <td>${subjectCell}</td>
-        <td>${statusPill(message.status)}</td>
-        <td><span class="date-cell">${formatDate(message.created_at)}</span></td>
-      </tr>`;
-    }).join("");
-
-    openModal(displayName, "Contact", `
-      <div class="contact-detail">
-        <dl class="message-meta">
-          <dt>Email</dt><dd class="email">${escapeHtml(contact.email)}</dd>
-          <dt>Status</dt><dd>${statusPill(contact.status)}</dd>
-          <dt>Consent</dt><dd>${escapeHtml(titleCase(contact.consent_source))}</dd>
-          <dt>Lists</dt><dd>${listNames.length ? listNames.map((name) => escapeHtml(name)).join(", ") : "—"}</dd>
-          <dt>Added</dt><dd>${formatDate(contact.created_at)}</dd>
-          <dt>Updated</dt><dd>${formatDate(contact.updated_at)}</dd>
-        </dl>
-
-        ${suppression
-          ? `<div class="notice warning"><span>!</span><div><strong>On the global suppression list.</strong><br>${escapeHtml(titleCase(suppression.reason))} · ${escapeHtml(titleCase(suppression.source))} · ${formatDate(suppression.created_at)}</div></div>`
-          : `<div class="notice"><span>i</span><div><strong>Not on the global suppression list.</strong><br>This address is eligible for campaign sends unless contact status is suppressed.</div></div>`}
-
-        <div class="contact-detail-section">
-          <h3>Send history</h3>
-          ${messages.length
-            ? `<div class="table-wrap"><table><thead><tr><th>Campaign</th><th>Subject</th><th>Status</th><th>Sent</th></tr></thead><tbody>${messageRows}</tbody></table></div>`
-            : `<p class="help">No sends recorded for this contact yet.</p>`}
-        </div>
-
-        <div class="form-actions">
-          <button class="button" data-close-modal>Close</button>
-          ${can("contacts.edit") ? `<button class="button" id="contact-detail-edit">Edit</button>` : ""}
-        </div>
-      </div>`, false);
-
-    if (canOpenMessage) {
-      els.modalBody.querySelectorAll("[data-message-id]").forEach((button) => {
-        button.addEventListener("click", async () => {
-          try {
-            await openMessage(button.getAttribute("data-message-id"));
-          } catch (error) {
-            toast(error.message, "error");
-          }
-        });
-      });
-    }
-    document.querySelector("#contact-detail-edit")?.addEventListener("click", () => {
-      openContactModal(contact, preferredListId);
-    });
-  } catch (error) {
-    toast(error.message, "error");
-  }
-}
-
-async function openContactModal(contact = null, preferredListId = "") {
-  const lists = await getLists();
-  const editing = Boolean(contact?.id);
-  const selectedListId = Array.isArray(contact?.list_ids) && contact.list_ids.length
-    ? contact.list_ids[0]
-    : preferredListId || lists[0]?.id || "";
-  const filterListId = preferredListId || "";
-  const statusValue = contact?.status === "suppressed"
-    ? "suppressed"
-    : contact?.status === "active"
-      ? ""
-      : "pending_consent";
-  openModal(editing ? "Edit contact" : "Add contact", "Audience", `
-    <form id="contact-form" class="stack">
-      <div class="form-grid"><label>First name<input name="first_name" maxlength="120" value="${escapeHtml(contact?.first_name || "")}" /></label><label>Last name<input name="last_name" maxlength="120" value="${escapeHtml(contact?.last_name || "")}" /></label></div>
-      <label>Email address<input name="email" type="email" value="${escapeHtml(contact?.email || "")}" required /></label>
-      <label>List<select name="list_id" required>${listOptions(lists, selectedListId)}</select></label>
-      ${editing ? `<label>Status<select name="status">
-        ${contact?.status === "active" ? `<option value="" selected>Keep Active</option>` : ""}
-        <option value="pending_consent" ${statusValue === "pending_consent" ? "selected" : ""}>Pending consent</option>
-        <option value="suppressed" ${statusValue === "suppressed" ? "selected" : ""}>Suppressed</option>
-      </select><span class="help">Active cannot be set here. Use “Activate with consent evidence” for activation.</span></label>
-      <button type="button" class="button" id="open-activate-contact">Activate with consent evidence…</button>` : ""}
-      <label>Consent source<input name="consent_source" value="${escapeHtml(contact?.consent_source || "manual_entry")}" maxlength="120" required /><span class="help">Use only permission-based contacts with documented consent.</span></label>
-      <p class="form-error" role="alert"></p>
-      <div class="form-actions"><button type="button" class="button" data-close-modal>Cancel</button><button class="button primary" type="submit">${editing ? "Save changes" : "Add contact"}</button></div>
-    </form>`, true);
-  document.querySelector("#open-activate-contact")?.addEventListener("click", () => {
-    openActivateContactModal(contact);
-  });
-  document.querySelector("#contact-form").addEventListener("submit", async (event) => {
-    event.preventDefault();
-    const form = event.currentTarget;
-    const data = Object.fromEntries(new FormData(form));
-    const path = editing ? `/api/contacts/${contact.id}` : "/api/contacts";
-    const method = editing ? "PATCH" : "POST";
-    if (!editing) delete data.status;
-    if (editing && !data.status) delete data.status;
-    await submitForm(form, () => api(path, { method, body: data }), editing ? "Contact updated" : "Contact added");
-    if (!form.querySelector(".form-error").textContent) {
-      closeModal();
-      await renderContacts(document.querySelector("#contact-search")?.value.trim() || "", filterListId);
-    }
-  });
-}
-
-async function openActivateContactModal(contact) {
-  if (!contact?.id) return;
-  openModal("Activate contact", "Consent evidence", `
-    <form id="activate-contact-form" class="stack">
-      <div class="notice"><span>i</span><div>Activation sets status to <strong>Active</strong> only when there is no suppression. Provide how permission was obtained and durable evidence/attestation.</div></div>
-      <p class="subtext">Contact: <strong class="email">${escapeHtml(contact.email || "")}</strong> · Current status: ${statusPill(contact.status || "pending_consent")}</p>
-      <label>Consent source<input name="consent_source" value="${escapeHtml(contact.consent_source || "")}" maxlength="200" required /><span class="help">e.g. double_opt_in_form, written_agreement, in_person_signup</span></label>
-      <label>Consent evidence / attestation<textarea name="consent_evidence" rows="5" maxlength="4000" required placeholder="Describe the evidence (form URL + timestamp, ticket id, signed note, etc.). Minimum 20 characters."></textarea></label>
-      <p class="form-error" role="alert"></p>
-      <div class="form-actions"><button type="button" class="button" data-close-modal>Cancel</button><button class="button primary" type="submit">Activate</button></div>
-    </form>`, true);
-  document.querySelector("#activate-contact-form").addEventListener("submit", async (event) => {
-    event.preventDefault();
-    const form = event.currentTarget;
-    const data = Object.fromEntries(new FormData(form));
-    await submitForm(
-      form,
-      () => api(`/api/contacts/${contact.id}/activate`, { method: "POST", body: data }),
-      "Contact activation recorded",
-    );
-    if (!form.querySelector(".form-error").textContent) {
-      closeModal();
-      await renderContacts(document.querySelector("#contact-search")?.value.trim() || "", "");
-    }
-  });
-}
-
-async function openListModal() {
-  openModal("Create list", "Audience", `
-    <form id="list-form" class="stack"><label>List name<input name="name" required maxlength="120" /></label><label>Description<textarea name="description" maxlength="500" placeholder="What this audience opted in to receive"></textarea></label><p class="form-error" role="alert"></p><div class="form-actions"><button type="button" class="button" data-close-modal>Cancel</button><button class="button primary" type="submit">Create list</button></div></form>`, true);
-  document.querySelector("#list-form").addEventListener("submit", async (event) => {
-    event.preventDefault();
-    const form = event.currentTarget;
-    await submitForm(form, () => api("/api/lists", { method: "POST", body: Object.fromEntries(new FormData(form)) }), "List created");
-    if (!form.querySelector(".form-error").textContent) {
-      state.lists = [];
-      closeModal();
-      await renderContacts();
-    }
-  });
-}
-
-function downloadTextFile(filename, text, mime = "text/csv;charset=utf-8") {
-  const blob = new Blob([text], { type: mime });
-  const url = URL.createObjectURL(blob);
-  const link = document.createElement("a");
-  link.href = url;
-  link.download = filename;
-  document.body.appendChild(link);
-  link.click();
-  link.remove();
-  URL.revokeObjectURL(url);
-}
-
-function importIssueLabel(reason) {
-  if (reason === "invalid_email") return "Invalid email";
-  if (reason === "duplicate_in_file") return "Duplicate in file";
-  return reason || "Skipped";
-}
-
-async function openImportModal(preferredListId = "") {
-  const lists = await getLists();
-  openModal("Import contacts", "CSV audience", `
-    <form id="import-form" class="stack">
-      <div class="notice"><span>i</span><div>The CSV must include an <strong>email</strong> column. Optional fields: <strong>first_name</strong> and <strong>last_name</strong>. Import only permission-based contacts. <button type="button" class="text-link" id="download-sample-csv">Download sample CSV</button></div></div>
-      <label>Destination list<select name="list_id" required>${listOptions(lists, preferredListId)}</select></label>
-      <label>CSV file<input name="file" type="file" accept=".csv,text/csv" required /></label>
-      <p class="form-error" role="alert"></p>
-      <div id="import-progress" class="import-progress" hidden>
-        <div class="import-progress-label">Importing…</div>
-        <div class="progress indeterminate" aria-hidden="true"><span></span></div>
-      </div>
-      <div id="import-result"></div>
-      <div class="form-actions"><button type="button" class="button" data-close-modal>Close</button><button class="button primary" type="submit">Import CSV</button></div>
-    </form>`, true);
-
-  document.querySelector("#download-sample-csv")?.addEventListener("click", () => {
-    downloadTextFile(
-      "sendstack-contacts-sample.csv",
-      "email,first_name,last_name\nalex@example.com,Alex,Rivera\njordan@example.com,Jordan,Lee\n",
-    );
-  });
-
-  document.querySelector("#import-form").addEventListener("submit", async (event) => {
-    event.preventDefault();
-    const form = event.currentTarget;
-    const file = form.elements.file.files[0];
-    const error = form.querySelector(".form-error");
-    const progress = document.querySelector("#import-progress");
-    const resultEl = document.querySelector("#import-result");
-    const submit = form.querySelector('button[type="submit"]');
-    const controls = [form.elements.list_id, form.elements.file, submit].filter(Boolean);
-    error.textContent = "";
-    resultEl.innerHTML = "";
-    if (!file) return;
-
-    controls.forEach((el) => { el.disabled = true; });
-    if (progress) progress.hidden = false;
-
-    try {
-      const csvText = await file.text();
-      const result = await api("/api/contacts/import", { method: "POST", body: { csv_text: csvText, list_id: form.elements.list_id.value } });
-      if (progress) progress.hidden = true;
-      controls.forEach((el) => { el.disabled = false; });
-      const issues = Array.isArray(result.issues) ? result.issues : [];
-      const issueRows = issues.map((issue) => `<tr><td>${Number(issue.row) || "—"}</td><td>${escapeHtml(issue.email || "—")}</td><td>${escapeHtml(importIssueLabel(issue.reason))}</td></tr>`).join("");
-      const truncatedNote = result.issues_truncated
-        ? `<p class="help">Showing the first ${issues.length} skipped rows.</p>`
-        : "";
-      resultEl.innerHTML = `
-        <div class="notice"><span>✓</span><div><strong>${Number(result.imported) || 0} imported, ${Number(result.updated) || 0} updated.</strong><br>${Number(result.duplicates) || 0} duplicates and ${Number(result.invalid) || 0} invalid rows skipped.</div></div>
-        ${issues.length ? `
-          <div class="import-issues">
-            <div class="import-issues-head">
-              <strong>Skipped rows</strong>
-              <button type="button" class="button small ghost" id="download-import-issues">Download skipped rows</button>
-            </div>
-            <div class="table-wrap"><table><thead><tr><th>Row</th><th>Email</th><th>Reason</th></tr></thead><tbody>${issueRows}</tbody></table></div>
-            ${truncatedNote}
-          </div>` : ""}`;
-      if (issues.length) {
-        document.querySelector("#download-import-issues")?.addEventListener("click", () => {
-          const lines = ["row,email,reason", ...issues.map((issue) => {
-            const email = String(issue.email || "").replace(/"/g, '""');
-            const reason = String(issue.reason || "").replace(/"/g, '""');
-            return `${Number(issue.row) || ""},"${email}","${reason}"`;
-          })];
-          downloadTextFile("sendstack-import-skipped.csv", `${lines.join("\n")}\n`);
-        });
-      }
-      state.lists = [];
-      toast("CSV import complete");
-      await renderContacts(document.querySelector("#contact-search")?.value.trim() || "", preferredListId || form.elements.list_id.value);
-    } catch (requestError) {
-      error.textContent = requestError.message;
-    } finally {
-      controls.forEach((el) => { el.disabled = false; });
-      if (progress) progress.hidden = true;
-    }
-  });
-}
-
-async function renderCampaigns() {
-  const data = await api("/api/campaigns");
-  await getLists();
-  els.content.innerHTML = `
-    <div class="section-lead"><div><h2>${data.campaigns.length} message${data.campaigns.length === 1 ? "" : "s"}</h2><p>${can("campaigns.manage") ? (can("campaigns.send") ? "Write mail, send a Spacemail test, then deliver to your audience." : "Create and edit drafts, and send tests. An administrator sends to the audience.") : "Read-only campaign reporting without recipient-level personal data."}</p></div>${can("campaigns.manage") ? `<button class="button primary" data-new-campaign>New message</button>` : ""}</div>
-    ${data.campaigns.length ? `<section class="campaign-grid">${data.campaigns.map(renderCampaignCard).join("")}</section>` : `<section class="panel empty-state"><div><div class="empty-mark">✦</div><h2>No messages yet</h2><p>${can("campaigns.manage") ? "Compose your first message through the Spacemail mailbox, then send a test." : "Messages will appear here after one is created."}</p>${can("campaigns.manage") ? `<button class="button primary" data-new-campaign>New message</button>` : ""}</div></section>`}`;
-}
-
-function renderCampaignCard(campaign) {
-  const recipients = Number(campaign.recipients || 0);
-  const sent = Number(campaign.sent || 0);
-  const queued = Number(campaign.queued || 0);
-  const issues = Number(campaign.failed || 0) + Number(campaign.bounced || 0) + Number(campaign.complained || 0);
-  const editable = can("campaigns.manage") && (
-    campaign.status === "draft"
-    || (campaign.status === "paused" && can("campaigns.send"))
-  );
-  const launchable = can("campaigns.send") && ["draft", "paused"].includes(campaign.status);
-  const canTest = can("campaigns.send");
-  return `<article class="campaign-card" data-campaign-id="${escapeHtml(campaign.id)}">
-    <div class="campaign-card-top"><span class="subtext">${escapeHtml(campaign.list_name)} · ${escapeHtml(contentModeLabel(campaign.content_mode))}</span>${statusPill(campaign.status)}</div>
-    <h3>${escapeHtml(campaign.name)}</h3><p>${escapeHtml(campaign.subject)}</p>
-    <div class="campaign-stats"><div><span>Recipients</span><strong>${recipients}</strong></div><div><span>${isLiveDelivery() ? "Sent" : "Captured"}</span><strong>${sent}</strong></div><div><span>Issues</span><strong>${issues}</strong></div></div>
-    ${queued ? `<div class="progress" style="margin-bottom:14px"><span style="width:${recipients ? Math.round((sent / recipients) * 100) : 0}%"></span></div>` : ""}
-    <div class="campaign-card-actions">
-      <button class="button small" data-action="view" data-id="${escapeHtml(campaign.id)}">Details</button>
-      ${editable ? `<button class="button small ghost" data-action="edit" data-id="${escapeHtml(campaign.id)}">Edit</button>` : ""}
-      ${canTest ? `<button class="button small ghost" data-action="test" data-id="${escapeHtml(campaign.id)}">Send test</button>` : ""}
-      ${can("campaigns.send") && campaign.status === "sending" ? `<button class="button small" data-action="pause" data-id="${escapeHtml(campaign.id)}">${isLiveDelivery() ? "Cancel unsent" : "Pause"}</button>` : ""}
-      ${launchable ? `<button class="button small primary" data-action="${campaign.status === "paused" ? "resume" : "launch"}" data-id="${escapeHtml(campaign.id)}">${campaign.status === "paused" ? "Return to draft" : (isLiveDelivery() ? "Send" : "Send in Dev Mode")}</button>` : ""}
-    </div>
-  </article>`;
-}
-
-const contentModes = [
-  { id: "rich_text", title: "Message" },
-  { id: "visual", title: "Template" },
-  { id: "custom_html", title: "HTML" },
-  { id: "plain_text", title: "Plain text" },
-];
-
-function contentModeLabel(mode) {
-  return contentModes.find((entry) => entry.id === mode)?.title || titleCase(mode || "message");
-}
-
-function modeEditorMarkup(mode, draft) {
-  if (mode === "visual") {
-    const data = { ...defaultVisualContent, ...(draft || {}) };
-    return `<div class="mode-editor visual-editor" data-mode-editor="visual">
-      <div class="form-grid"><label>Layout<select data-visual-field="template"><option value="announcement" ${data.template === "announcement" ? "selected" : ""}>Announcement</option><option value="newsletter" ${data.template === "newsletter" ? "selected" : ""}>Newsletter</option><option value="simple" ${data.template === "simple" ? "selected" : ""}>Simple</option></select></label><label>Accent colour<input data-visual-field="accent_color" type="color" value="${escapeHtml(data.accent_color)}" /></label></div>
-      <label>Brand name<input data-visual-field="brand_name" maxlength="80" value="${escapeHtml(data.brand_name)}" /></label>
-      <label>Inbox preview text<input data-visual-field="preheader" maxlength="160" value="${escapeHtml(data.preheader)}" /></label>
-      <label>Headline<input data-visual-field="headline" maxlength="180" value="${escapeHtml(data.headline)}" /></label>
-      <label>Message<textarea data-visual-field="body" rows="7">${escapeHtml(data.body)}</textarea></label>
-      <div class="form-grid"><label>Button label<input data-visual-field="cta_label" maxlength="80" value="${escapeHtml(data.cta_label)}" /></label><label>Button link<input data-visual-field="cta_url" type="url" value="${escapeHtml(data.cta_url)}" placeholder="https://" /></label></div>
-      <label>Closing line<input data-visual-field="footer" maxlength="240" value="${escapeHtml(data.footer)}" /></label>
-    </div>`;
-  }
-  if (mode === "rich_text") {
-    const richHtml = sanitizeRichHtml(draft?.rich_html || defaultRichContent);
-    return `<div class="mode-editor" data-mode-editor="rich_text"><div class="rich-toolbar" role="toolbar" aria-label="Text formatting"><button type="button" data-rich-command="bold" aria-label="Bold"><strong>B</strong></button><button type="button" data-rich-command="italic" aria-label="Italic"><em>I</em></button><button type="button" data-rich-command="underline" aria-label="Underline"><u>U</u></button><button type="button" data-rich-command="insertUnorderedList" aria-label="Bulleted list">• List</button></div><div id="rich-editor" class="rich-editor" contenteditable="true" role="textbox" aria-multiline="true" aria-label="Message body">${richHtml}</div></div>`;
-  }
-  if (mode === "plain_text") {
-    return `<div class="mode-editor" data-mode-editor="plain_text"><label>Message<textarea id="plain-editor" class="plain-editor" rows="15">${escapeHtml(draft?.plain_text || defaultPlainContent)}</textarea></label></div>`;
-  }
-  return `<div class="mode-editor" data-mode-editor="custom_html"><label>HTML<textarea id="html-editor" class="code-area" rows="16" required>${escapeHtml(draft?.html_body || defaultTemplate)}</textarea></label><label>Plain-text alternative<textarea id="html-text-fallback" rows="8">${escapeHtml(draft?.text_body || defaultPlainContent)}</textarea></label></div>`;
-}
-
-async function openCampaignComposer(campaignId = null) {
-  const [lists, campaignData] = await Promise.all([
-    getLists(),
-    campaignId ? api(`/api/campaigns/${campaignId}`) : Promise.resolve(null),
-  ]);
-  const campaign = campaignData?.campaign || {};
-  let activeCampaignId = campaignId;
-  let attachments = Array.isArray(campaign.attachments) ? [...campaign.attachments] : [];
-  let pendingFiles = [];
-  const storedContent = safeContentObject(campaign.content_json);
-  const selectedMode = contentModes.some((mode) => mode.id === campaign.content_mode)
-    ? campaign.content_mode
-    : "rich_text";
-  const modeDrafts = {
-    visual: selectedMode === "visual" ? { ...defaultVisualContent, ...storedContent } : { ...defaultVisualContent },
-    rich_text: selectedMode === "rich_text" ? { schema_version: 1, rich_html: storedContent.rich_html || defaultRichContent } : { schema_version: 1, rich_html: defaultRichContent },
-    custom_html: { schema_version: 1, html_body: campaign.html_body || defaultTemplate, text_body: campaign.text_body || defaultPlainContent },
-    plain_text: selectedMode === "plain_text" ? { schema_version: 1, plain_text: storedContent.plain_text || campaign.text_body || defaultPlainContent } : { schema_version: 1, plain_text: defaultPlainContent },
-  };
-  const defaultFromName = campaign.from_name || state.session?.user?.name || "CTN";
-  const enforcedFrom = state.session?.enforced_from_email || "";
-  const defaultFromEmail = campaign.from_email || enforcedFrom || "";
-  const existingCampaignName = campaign.name || "";
-  const fromIdentity = defaultFromEmail
-    ? `From: ${escapeHtml(defaultFromName)} &lt;${escapeHtml(defaultFromEmail)}&gt;`
-    : "From address is not configured — set it in Sending setup before live send.";
-  const totalAttachmentCount = () => attachments.length + pendingFiles.length;
-  const totalAttachmentBytes = () => (
-    attachments.reduce((sum, file) => sum + Number(file.byte_size || 0), 0)
-    + pendingFiles.reduce((sum, file) => sum + Number(file.size || 0), 0)
-  );
-  openModal(campaignId ? "Edit message" : "New message", "Compose", `
-    <form id="campaign-form" class="composer">
-      <div class="composer-fields">
-        <label>To<select name="list_id" required>${listOptions(lists, campaign.list_id || lists[0]?.id)}</select></label>
-        <label>Subject<input name="subject" maxlength="250" value="${escapeHtml(campaign.subject || "")}" placeholder="Subject" required /></label>
-        <p class="help compose-from-line">${fromIdentity}</p>
-        <div id="mode-editor-host">${modeEditorMarkup(selectedMode, modeDrafts[selectedMode])}</div>
-        <section class="compose-attach" id="attachment-panel">
-          <div id="attachment-list">${activeCampaignId ? attachmentListMarkup(attachments, { editable: true }) : pendingAttachmentListMarkup(pendingFiles)}</div>
-          <label class="attachment-upload button small">Add files<input id="attachment-input" type="file" accept="${ATTACHMENT_ACCEPT}" multiple ${totalAttachmentCount() >= ATTACHMENT_MAX_COUNT ? "disabled" : ""} /></label>
-          <p class="form-error" id="attachment-error" role="alert"></p>
-        </section>
-        <p class="form-error" data-form-error role="alert"></p>
-        <div class="form-actions"><button type="button" class="button" data-close-modal>Cancel</button><button class="button primary" type="submit">${campaignId ? "Save changes" : "Save draft"}</button></div>
-      </div>
-    </form>`, false);
-  const form = document.querySelector("#campaign-form");
-  const editorHost = form.querySelector("#mode-editor-host");
-  const captureModeDraft = () => {
-    if (selectedMode === "visual") {
-      const visual = { schema_version: 1 };
-      form.querySelectorAll("[data-visual-field]").forEach((field) => { visual[field.dataset.visualField] = field.value; });
-      modeDrafts.visual = visual;
-    } else if (selectedMode === "rich_text") {
-      modeDrafts.rich_text = { schema_version: 1, rich_html: sanitizeRichHtml(form.querySelector("#rich-editor")?.innerHTML || "") };
-    } else if (selectedMode === "plain_text") {
-      modeDrafts.plain_text = { schema_version: 1, plain_text: form.querySelector("#plain-editor")?.value || "" };
-    } else {
-      modeDrafts.custom_html = { schema_version: 1, html_body: form.querySelector("#html-editor")?.value || "", text_body: form.querySelector("#html-text-fallback")?.value || "" };
-    }
-  };
-  const attachEditorEvents = () => {
-    const richEditor = editorHost.querySelector("#rich-editor");
-    richEditor?.addEventListener("paste", (event) => {
-      event.preventDefault();
-      document.execCommand("insertText", false, event.clipboardData.getData("text/plain"));
-    });
-    editorHost.querySelectorAll("[data-rich-command]").forEach((button) => button.addEventListener("click", () => {
-      richEditor?.focus();
-      document.execCommand(button.dataset.richCommand, false);
-    }));
-  };
-  attachEditorEvents();
-  const refreshAttachmentUi = () => {
-    const listHost = form.querySelector("#attachment-list");
-    const input = form.querySelector("#attachment-input");
-    if (listHost) {
-      listHost.innerHTML = activeCampaignId
-        ? attachmentListMarkup(attachments, { editable: true })
-        : pendingAttachmentListMarkup(pendingFiles);
-    }
-    if (input) input.disabled = totalAttachmentCount() >= ATTACHMENT_MAX_COUNT;
-  };
-  const queueOrUploadFiles = async (fileList) => {
-    const errorEl = form.querySelector("#attachment-error");
-    if (errorEl) errorEl.textContent = "";
-    const files = Array.from(fileList || []);
-    if (!files.length) return;
-    for (const file of files) {
-      if (file.size > ATTACHMENT_MAX_FILE_BYTES) {
-        if (errorEl) errorEl.textContent = `"${file.name}" is larger than 5 MB.`;
-        return;
-      }
-      if (totalAttachmentCount() >= ATTACHMENT_MAX_COUNT) {
-        if (errorEl) errorEl.textContent = "A campaign can have at most 3 attachments.";
-        return;
-      }
-      if (totalAttachmentBytes() + file.size > ATTACHMENT_MAX_TOTAL_BYTES) {
-        if (errorEl) errorEl.textContent = "Attachments for one campaign cannot exceed 10 MB total.";
-        return;
-      }
-      if (!activeCampaignId) {
-        pendingFiles.push(file);
-        continue;
-      }
-      try {
-        const body = new FormData();
-        body.append("file", file);
-        const result = await api(`/api/campaigns/${activeCampaignId}/attachments`, { method: "POST", body });
-        attachments = result.attachments || [];
-      } catch (error) {
-        if (errorEl) errorEl.textContent = error.message;
-        else toast(error.message, "error");
-        refreshAttachmentUi();
-        return;
-      }
-    }
-    refreshAttachmentUi();
-    if (!activeCampaignId) toast(files.length === 1 ? "Attachment queued — uploads on save" : `${files.length} attachments queued — upload on save`);
-    else toast(files.length === 1 ? "Attachment added" : `${files.length} attachments added`);
-  };
-  const uploadPendingFiles = async (campaignIdForUpload) => {
-    const errorEl = form.querySelector("#attachment-error");
-    if (errorEl) errorEl.textContent = "";
-    const queued = [...pendingFiles];
-    pendingFiles = [];
-    for (let index = 0; index < queued.length; index += 1) {
-      const file = queued[index];
-      try {
-        const body = new FormData();
-        body.append("file", file);
-        const result = await api(`/api/campaigns/${campaignIdForUpload}/attachments`, { method: "POST", body });
-        attachments = result.attachments || [];
-      } catch (error) {
-        pendingFiles = queued.slice(index);
-        if (errorEl) errorEl.textContent = error.message;
-        else toast(error.message, "error");
-        refreshAttachmentUi();
-        return false;
-      }
-    }
-    refreshAttachmentUi();
-    return true;
-  };
-  const bindAttachmentControls = () => {
-    const input = form.querySelector("#attachment-input");
-    input?.addEventListener("change", async () => {
-      const files = input.files;
-      input.value = "";
-      await queueOrUploadFiles(files);
-    });
-    form.querySelector("#attachment-list")?.addEventListener("click", async (event) => {
-      const pendingButton = event.target.closest("[data-remove-pending]");
-      if (pendingButton) {
-        const index = Number(pendingButton.dataset.removePending);
-        if (Number.isInteger(index)) {
-          pendingFiles.splice(index, 1);
-          refreshAttachmentUi();
-          toast("Attachment removed");
-        }
-        return;
-      }
-      const button = event.target.closest("[data-remove-attachment]");
-      if (!button || !activeCampaignId) return;
-      try {
-        const result = await api(`/api/campaigns/${activeCampaignId}/attachments/${button.dataset.removeAttachment}`, { method: "DELETE", body: {} });
-        attachments = result.attachments || [];
-        refreshAttachmentUi();
-        toast("Attachment removed");
-      } catch (error) {
-        toast(error.message, "error");
-      }
-    });
-  };
-  bindAttachmentControls();
-  form.addEventListener("submit", async (event) => {
-    event.preventDefault();
-    captureModeDraft();
-    const content = buildCampaignContent(selectedMode, modeDrafts[selectedMode]);
-    const payload = Object.fromEntries(new FormData(form));
-    delete payload.file;
-    const subject = String(payload.subject || "").trim();
-    const creating = !activeCampaignId;
-    payload.from_name = defaultFromName;
-    payload.from_email = defaultFromEmail;
-    payload.name = creating
-      ? (subject || "Untitled message").slice(0, 160)
-      : (existingCampaignName || subject || "Untitled message").slice(0, 160);
-    payload.content_mode = selectedMode;
-    payload.content_json = content.content_json;
-    payload.html_body = content.html_body;
-    payload.text_body = content.text_body;
-    const path = activeCampaignId ? `/api/campaigns/${activeCampaignId}` : "/api/campaigns";
-    const method = activeCampaignId ? "PATCH" : "POST";
-    const result = await submitForm(form, () => api(path, { method, body: payload }), creating ? "Draft saved" : "Campaign updated");
-    const formError = form.querySelector("[data-form-error]");
-    if (formError?.textContent) return;
-    if (creating && result?.campaign?.id) {
-      activeCampaignId = result.campaign.id;
-      const uploaded = await uploadPendingFiles(activeCampaignId);
-      if (!uploaded) {
-        const submitBtn = form.querySelector("button[type=submit]");
-        if (submitBtn) submitBtn.textContent = "Save changes";
-        refreshAttachmentUi();
-        return;
-      }
-    }
-    closeModal();
-    if (state.currentView === "campaigns") await renderCampaigns();
-    else await navigate("campaigns");
-  });
-}
-
-async function openCampaignDetails(campaignId) {
-  const { campaign } = await api(`/api/campaigns/${campaignId}`);
-  const stats = campaign.stats || {};
-  const total = Object.values(stats).reduce((sum, value) => sum + Number(value || 0), 0);
-  const sentLabel = isLiveDelivery() ? "Sent / submitted" : "Captured";
-  openModal(campaign.name, "Campaign detail", `
-    <div class="stack">
-      <div class="notice"><span>i</span><div><strong>${escapeHtml(campaign.subject)}</strong><br>${escapeHtml(campaign.list_name)} · ${escapeHtml(campaign.from_name)} &lt;${escapeHtml(campaign.from_email)}&gt;</div></div>
-      <div class="form-grid">
-        <section class="panel"><div class="panel-head"><h3>Delivery totals</h3>${statusPill(campaign.status)}</div><div class="panel-body">
-          <div class="metric-line"><span>Audience snapshot</span><strong>${total}</strong></div>
-          <div class="metric-line"><span>${sentLabel}</span><strong>${Number(stats.sent || 0)}</strong></div>
-          <div class="metric-line"><span>Queued</span><strong>${Number(stats.queued || 0) + Number(stats.processing || 0)}</strong></div>
-          <div class="metric-line"><span>Suppressed</span><strong>${Number(stats.suppressed || 0)}</strong></div>
-          <div class="metric-line"><span>Failed / bounced / complained</span><strong>${Number(stats.failed || 0) + Number(stats.bounced || 0) + Number(stats.complained || 0)}</strong></div>
-        </div></section>
-        <section class="panel"><div class="panel-head"><h3>Timing</h3></div><div class="panel-body"><div class="metric-line"><span>Created</span><strong>${formatDate(campaign.created_at)}</strong></div><div class="metric-line"><span>Launched</span><strong>${formatDate(campaign.launched_at)}</strong></div><div class="metric-line"><span>Completed</span><strong>${formatDate(campaign.completed_at)}</strong></div></div></section>
-      </div>
-      <section class="panel">
-        <div class="panel-head"><h3>Attachments</h3></div>
-        <div class="panel-body">${attachmentListMarkup(campaign.attachments || [], { editable: false })}</div>
-      </section>
-      <div class="form-actions"><button class="button" data-close-modal>Close</button>${can("deliveries.view") ? `<button class="button primary" id="view-campaign-deliveries">View deliveries</button>` : ""}</div>
-    </div>`, false);
-  document.querySelector("#view-campaign-deliveries")?.addEventListener("click", () => {
-    closeModal();
-    state.deliveryFilters.campaignId = campaignId;
-    navigate("deliveries");
-  });
-}
-
-async function openTestSend(campaignId) {
-  if (!can("campaigns.send")) {
-    toast("Only administrators can send live or counted test previews.", true);
-    return;
-  }
-  const { campaign } = await api(`/api/campaigns/${campaignId}`);
-  const live = isLiveDelivery();
-  const defaultEmail = live
-    ? (state.session?.user?.email || "")
-    : (state.session?.user?.email || "");
-  const noticeClass = live ? "notice warning" : "notice";
-  const submitLabel = live ? "Send test via Spacemail" : "Capture test locally";
-  openModal("Send a test", "Before you send", `
-    <form id="test-send-form" class="stack">
-      <div class="${noticeClass}"><span>${live ? "!" : "i"}</span><div><strong>${escapeHtml(testSendNotice())}</strong></div></div>
-      <div class="metric-line"><span>Message</span><strong>${escapeHtml(campaign.name)}</strong></div>
-      <div class="metric-line"><span>Subject</span><strong>${escapeHtml(campaign.subject)}</strong></div>
-      <div class="metric-line"><span>Status</span><strong>${escapeHtml(deliveryStatusLabel())}</strong></div>
-      <label>Test recipient<input name="email" type="email" value="${escapeHtml(defaultEmail)}" placeholder="name@example.com" required autocomplete="email" /><span class="help">${live ? "Must be on the test allowlist in Sending setup. Counts toward the daily limit." : "Counts toward the daily limit. Special-use domains are rejected."}</span></label>
-      ${live ? `<label class="confirm-ack"><input type="checkbox" name="ack_live" required /><span>I understand this sends a real email through Spacemail.</span></label>` : `<p class="help">Result appears in Deliveries as Captured — nothing is mailed externally.</p>`}
-      <p class="form-error" role="alert"></p>
-      <div class="form-actions">
-        <button type="button" class="button" data-close-modal>Cancel</button>
-        <button class="button ${live ? "danger" : "primary"}" type="submit">${escapeHtml(submitLabel)}</button>
-      </div>
-    </form>`, true);
-  const form = document.querySelector("#test-send-form");
-  form.addEventListener("submit", async (event) => {
-    event.preventDefault();
-    const email = String(form.elements.email.value || "").trim();
-    const result = await submitForm(
-      form,
-      () => api(`/api/campaigns/${campaignId}/test-send`, { method: "POST", body: { email } }),
-      testSendSuccessMessage(email),
-    );
-    if (!result) return;
-    closeModal();
-    state.deliveryFilters.campaignId = campaignId;
-    navigate("deliveries");
-  });
-}
-
-async function openLaunchConfirm(campaignId) {
-  const { campaign } = await api(`/api/campaigns/${campaignId}`);
-  const copy = launchConfirmCopy();
-  const live = isLiveDelivery();
-  const eligible = Number(campaign.eligible_recipients || 0);
-  const noticeClass = live ? "notice warning" : "notice";
-  const setupHelp = can("sending.view") && !live
-    ? `<p class="help">Enable live Spacemail delivery in Sending setup when you are ready for real recipients.</p>`
-    : "";
-  const emptyWarn = eligible === 0
-    ? `<div class="notice warning"><span>!</span><div>No eligible recipients on this list (active and not suppressed). Send will complete with nothing mailed.</div></div>`
-    : "";
-  openModal(copy.title, "Confirm send", `
-    <div class="stack" id="launch-confirm">
-      <div class="${noticeClass}"><span>!</span><div><strong>${escapeHtml(copy.notice)}</strong><br>${escapeHtml(copy.outcome)}</div></div>
-      ${emptyWarn}
-      <div class="metric-line"><span>Message</span><strong>${escapeHtml(campaign.name)}</strong></div>
-      <div class="metric-line"><span>Subject</span><strong>${escapeHtml(campaign.subject)}</strong></div>
-      <div class="metric-line"><span>To</span><strong>${escapeHtml(campaign.list_name)}</strong></div>
-      <div class="metric-line"><span>Eligible now</span><strong>${eligible.toLocaleString()}</strong></div>
-      <div class="metric-line"><span>Status</span><strong>${escapeHtml(deliveryStatusLabel())}</strong></div>
-      <div class="metric-line"><span>Daily send limit</span><strong>${Number(state.session.daily_limit).toLocaleString()}</strong></div>
-      ${setupHelp}
-      ${live ? `<label class="confirm-ack"><input type="checkbox" id="launch-ack" /><span>I understand this will email up to ${eligible.toLocaleString()} real recipient${eligible === 1 ? "" : "s"} through Spacemail.</span></label>` : ""}
-      <p class="form-error" id="launch-error" role="alert"></p>
-      <div class="form-actions">
-        <button class="button" data-close-modal type="button">Cancel</button>
-        <button class="button ${live ? "danger" : "primary"}" id="confirm-launch" ${live ? "disabled" : ""}>${escapeHtml(copy.confirm)}</button>
-      </div>
-    </div>`, true);
-  const ack = document.querySelector("#launch-ack");
-  const confirmBtn = document.querySelector("#confirm-launch");
-  const errorEl = document.querySelector("#launch-error");
-  ack?.addEventListener("change", () => {
-    confirmBtn.disabled = !ack.checked;
-  });
-  confirmBtn.addEventListener("click", async () => {
-    if (live && !ack?.checked) return;
-    confirmBtn.disabled = true;
-    if (errorEl) errorEl.textContent = "";
-    try {
-      const result = await api(`/api/campaigns/${campaignId}/launch`, { method: "POST", body: {} });
-      closeModal();
-      toast(launchOutcomeMessage(result));
-      state.deliveryFilters.campaignId = campaignId;
-      if (state.currentView === "campaigns") await renderCampaigns();
-      else await navigate("campaigns");
-    } catch (error) {
-      if (errorEl) errorEl.textContent = error.message;
-      else toast(error.message, "error");
-      confirmBtn.disabled = live ? !ack?.checked : false;
-    }
-  });
-}
-
-async function campaignAction(action, id) {
-  if (action === "view") return openCampaignDetails(id);
-  if (action === "edit") return openCampaignComposer(id);
-  if (action === "test") return openTestSend(id);
-  if (action === "launch") return openLaunchConfirm(id);
-  if (action === "resume") {
-    openModal("Resume delivery?", "Confirm", `
-      <div class="stack">
-        <div class="notice"><span>i</span><div>Delivery will continue for remaining eligible recipients under <strong>${escapeHtml(deliveryStatusLabel())}</strong>.</div></div>
-        <div class="form-actions">
-          <button class="button" data-close-modal type="button">Cancel</button>
-          <button class="button primary" id="confirm-resume">Resume delivery</button>
-        </div>
-      </div>`, true);
-    document.querySelector("#confirm-resume").addEventListener("click", async () => {
-      closeModal();
-      await executeCampaignAction("resume", id);
-    });
-    return;
-  }
-  return executeCampaignAction(action, id);
-}
-
-async function executeCampaignAction(action, id) {
-  try {
-    const result = await api(`/api/campaigns/${id}/${action}`, { method: "POST", body: {} });
-    if (action === "launch") toast(launchOutcomeMessage(result));
-    else if (action === "pause") toast(isLiveDelivery() ? "Unsent recipients cancelled" : "Delivery paused");
-    else if (action === "resume") toast("Delivery resumed");
-    else toast(`Campaign ${action}d`);
-    await renderCampaigns();
-  } catch (error) {
-    toast(error.message, "error");
-  }
-}
-
-async function renderDeliveries() {
-  const filters = state.deliveryFilters;
-  const params = new URLSearchParams();
-  if (filters.campaignId) params.set("campaign_id", filters.campaignId);
-  if (filters.q) params.set("q", filters.q);
-  if (filters.status) params.set("status", filters.status);
-  if (filters.from) params.set("from", filters.from);
-  if (filters.to) params.set("to", filters.to);
-  const queryString = params.toString();
-  const data = await api(`/api/messages${queryString ? `?${queryString}` : ""}`);
-  const live = isLiveDelivery();
-  const count = data.messages.length;
-  const filtering = Boolean(filters.campaignId || filters.q || filters.status || filters.from || filters.to);
-  const statusOptions = [
-    ["", "All statuses"],
-    ["captured", "Captured"],
-    ["submitted", "Submitted"],
-    ["delivered", "Delivered"],
-    ["failed", "Failed"],
-    ["bounced", "Bounced"],
-    ["complained", "Complained"],
-    ["unsubscribed", "Unsubscribed"],
-    ["suppressed", "Suppressed"],
-  ].map(([value, label]) => `<option value="${value}" ${filters.status === value ? "selected" : ""}>${label}</option>`).join("");
-  const heading = filtering
-    ? `${count.toLocaleString()} match${count === 1 ? "" : "es"}`
-    : live
-      ? `${count.toLocaleString()} deliver${count === 1 ? "y" : "ies"}`
-      : `${count.toLocaleString()} captured message${count === 1 ? "" : "s"}`;
-  const lead = live
-    ? "Review Spacemail SMTP acceptance, open rendered content, and check durable bounce or complaint signals."
-    : "Inspect rendered content captured in this workspace. No email leaves the app in Dev Mode.";
-  const emptyCopy = filtering
-    ? "Nothing matches these filters. Try clearing search, status, or date range."
-    : live
-      ? "Send a campaign or preview to see delivery records here."
-      : "Create a campaign and send a preview to inspect the rendered result in this workspace.";
-  const filterBits = [];
-  if (filters.campaignId) filterBits.push(live ? "campaign deliveries" : "campaign messages");
-  if (filters.q) filterBits.push(`“${escapeHtml(filters.q)}”`);
-  if (filters.status) filterBits.push(filters.status === "captured" ? "Captured" : titleCase(filters.status));
-  if (filters.from || filters.to) {
-    filterBits.push([filters.from || "…", filters.to || "…"].join(" → "));
-  }
-  const filterNote = filterBits.length
-    ? `<p class="delivery-filter-note">Filtered by ${filterBits.join(" · ")}.</p>`
-    : "";
-  const emptyMarkup = filtering
-    ? `<div class="empty-state"><div><div class="empty-mark">⌕</div><h2>No matching deliveries</h2><p>${emptyCopy}</p><button class="button" id="clear-delivery-filters">Clear filters</button></div></div>`
-    : `<div class="empty-state"><div><div class="empty-mark">↗</div><h2>No deliveries yet</h2><p>${emptyCopy}</p><button class="button primary" data-new-campaign>New message</button></div></div>`;
-
-  const tableRows = data.messages.map((message) => `<tr>
-      <td class="delivery-recipient"><strong class="email">${escapeHtml(message.to_email)}</strong></td>
-      <td class="delivery-message"><strong>${escapeHtml(message.subject)}</strong><span class="subtext">${escapeHtml(message.from_email)}</span></td>
-      <td class="delivery-campaign">${escapeHtml(message.campaign_name || "Test send")}</td>
-      <td class="delivery-status">${statusPill(message.status)}</td>
-      <td class="delivery-time"><span class="date-cell">${formatDate(message.created_at)}</span></td>
-      <td class="table-actions"><button class="button small ghost" data-message-id="${escapeHtml(message.id)}">View</button></td>
-    </tr>`).join("");
-
-  els.content.innerHTML = `
-    <div class="section-lead"><div><h2>${heading}</h2><p>${lead}</p></div><div class="section-actions">${filtering ? `<button class="button" id="clear-delivery-filters">Clear filters</button>` : ""}</div></div>
-    ${deliveryStatusLegend(live)}
-    ${filterNote}
-    <div class="toolbar deliveries-toolbar">
-      <div class="search"><input id="delivery-search" type="search" placeholder="Search recipient, subject, or campaign" value="${escapeHtml(filters.q)}" aria-label="Search deliveries" /></div>
-      <select id="delivery-status-filter" aria-label="Filter by status">${statusOptions}</select>
-      <label class="delivery-date"><span>From</span><input id="delivery-from" type="date" value="${escapeHtml(filters.from)}" aria-label="From date" /></label>
-      <label class="delivery-date"><span>To</span><input id="delivery-to" type="date" value="${escapeHtml(filters.to)}" aria-label="To date" /></label>
-    </div>
-    <section class="panel deliveries-panel">${data.messages.length ? `<div class="table-wrap"><table class="deliveries-table"><thead><tr><th>Recipient</th><th>Message</th><th>Campaign</th><th>Status</th><th>Time</th><th></th></tr></thead><tbody>${tableRows}</tbody></table></div>` : emptyMarkup}</section>`;
-
-  const search = document.querySelector("#delivery-search");
-  const statusFilter = document.querySelector("#delivery-status-filter");
-  const fromInput = document.querySelector("#delivery-from");
-  const toInput = document.querySelector("#delivery-to");
-  let searchTimer;
-
-  const applyFilters = (next = {}) => {
-    state.deliveryFilters = {
-      ...state.deliveryFilters,
-      ...next,
-    };
-    if ("q" in next) state.deliveryFilters._focusSearch = true;
-    renderDeliveries();
-  };
-  const clearFilters = () => {
-    state.deliveryFilters = { campaignId: null, q: "", status: "", from: "", to: "" };
-    renderDeliveries();
-  };
-
-  search?.addEventListener("input", () => {
-    clearTimeout(searchTimer);
-    searchTimer = setTimeout(() => applyFilters({ q: search.value.trim() }), 280);
-  });
-  statusFilter?.addEventListener("change", () => applyFilters({ status: statusFilter.value || "" }));
-  fromInput?.addEventListener("change", () => {
-    const from = fromInput.value || "";
-    if (from && filters.to && from > filters.to) {
-      toast("Start date must be on or before end date.", "error");
-      fromInput.value = filters.from;
-      return;
-    }
-    applyFilters({ from });
-  });
-  toInput?.addEventListener("change", () => {
-    const to = toInput.value || "";
-    if (filters.from && to && filters.from > to) {
-      toast("End date must be on or after start date.", "error");
-      toInput.value = filters.to;
-      return;
-    }
-    applyFilters({ to });
-  });
-  document.querySelectorAll("#clear-delivery-filters").forEach((button) => {
-    button.addEventListener("click", clearFilters);
-  });
-
-  if (state.deliveryFilters._focusSearch) {
-    delete state.deliveryFilters._focusSearch;
-    search?.focus();
-    const len = search?.value.length || 0;
-    search?.setSelectionRange(len, len);
-  }
-}
-
-async function openMessage(messageId) {
-  const { message } = await api(`/api/messages/${messageId}`);
-  openModal(message.subject, "Message", `
-    <dl class="message-meta"><dt>To</dt><dd>${escapeHtml(message.to_email)}</dd><dt>From</dt><dd>${escapeHtml(message.from_email)}</dd><dt>Status</dt><dd>${statusPill(message.status)}${deliveryStatusMeaning(message.status) ? `<span class="status-hint">${escapeHtml(deliveryStatusMeaning(message.status))}</span>` : ""}</dd><dt>${isLiveDelivery() ? "Sent" : "Captured"}</dt><dd>${formatDate(message.created_at)}</dd></dl>
-    <div class="message-preview"><iframe title="Message preview" sandbox=""></iframe></div>
-    <div class="form-actions" style="margin-top:16px"><button class="button" data-close-modal>Close</button>${can("deliveries.feedback") ? `<a class="button" href="/u/${encodeURIComponent(message.unsubscribe_token)}" target="_blank" rel="noopener">Test unsubscribe</a><button class="button danger" data-feedback="hard_bounce">Simulate hard bounce</button><button class="button danger" data-feedback="complaint">Simulate complaint</button>` : ""}</div>`, false);
-  const policy = `<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src data:">`;
-  document.querySelector(".message-preview iframe").srcdoc = policy + message.html_body;
-  document.querySelectorAll("[data-feedback]").forEach((button) => button.addEventListener("click", async () => {
-    if (!window.confirm(`Mark this recipient as a ${titleCase(button.dataset.feedback)} and suppress it globally?`)) return;
-    try {
-      await api(`/api/messages/${messageId}/event`, { method: "POST", body: { event: button.dataset.feedback } });
-      toast("Feedback recorded and recipient suppressed");
-      closeModal();
-      renderDeliveries();
-    } catch (error) { toast(error.message, "error"); }
-  }));
-}
-
-async function renderSuppressions() {
-  const data = await api("/api/suppressions");
-  els.content.innerHTML = `
-    <div class="section-lead"><div><h2>${data.suppressions.length} globally suppressed</h2><p>These addresses are excluded from every campaign at execution time.</p></div>${can("suppressions.manage") ? `<button class="button primary" id="add-suppression">Add suppression</button>` : ""}</div>
-    <section class="panel">${data.suppressions.length ? `<div class="table-wrap"><table><thead><tr><th>Email</th><th>Reason</th><th>Source</th><th>Created</th></tr></thead><tbody>${data.suppressions.map((entry) => `<tr><td><strong class="email">${escapeHtml(entry.email)}</strong></td><td>${statusPill(entry.reason)}</td><td>${escapeHtml(titleCase(entry.source))}</td><td>${formatDate(entry.created_at)}</td></tr>`).join("")}</tbody></table></div>` : `<div class="empty-state"><div><div class="empty-mark">⊘</div><h2>No suppressions yet</h2><p>Unsubscribes, hard bounces, complaints, and manual exclusions appear here.</p></div></div>`}</section>`;
-  document.querySelector("#add-suppression")?.addEventListener("click", openSuppressionModal);
-}
-
-function openSuppressionModal() {
-  openModal("Suppress an address", "Safety control", `<form id="suppression-form" class="stack"><div class="notice warning"><span>!</span><div>This creates a manual exclusion. Unsubscribes, bounces, and complaints must come from recipient or verified delivery events.</div></div><label>Email address<input name="email" type="email" required /></label><input name="reason" type="hidden" value="manual" /><p class="form-error" role="alert"></p><div class="form-actions"><button type="button" class="button" data-close-modal>Cancel</button><button class="button danger" type="submit">Suppress globally</button></div></form>`, true);
-  const form = document.querySelector("#suppression-form");
-  form.addEventListener("submit", async (event) => {
-    event.preventDefault();
-    await submitForm(form, () => api("/api/suppressions", { method: "POST", body: Object.fromEntries(new FormData(form)) }), "Address suppressed");
-    if (!form.querySelector(".form-error").textContent) { closeModal(); renderSuppressions(); }
-  });
-}
-
-function roleOptions(roles, selected = "marketer") {
-  return roles.map((role) => `<option value="${escapeHtml(role.id)}" ${role.id === selected ? "selected" : ""}>${escapeHtml(role.label)}</option>`).join("");
-}
-
-function rolePill(role) {
-  const safeRole = String(role.role || role.id || "unknown").toLowerCase();
-  const label = role.role_label || role.label || titleCase(safeRole);
-  return `<span class="role-pill ${escapeHtml(safeRole)}">${escapeHtml(label)}</span>`;
-}
-
-async function renderUsers() {
-  const data = await api("/api/users");
-  state.users = data.users;
-  state.roles = data.roles;
-  state.permissionDefinitions = data.permissions;
-  els.content.innerHTML = `
-    <div class="section-lead"><div><h2>${data.users.length} user${data.users.length === 1 ? "" : "s"}</h2><p>Create accounts, assign least-privilege access, and disable access without deleting audit history.</p></div><button class="button primary" id="create-user">Create user</button></div>
-    <section class="panel user-directory">
-      <div class="panel-head"><div><h2>User directory</h2><p>Role and status changes take effect immediately</p></div></div>
-      <div class="table-wrap"><table><thead><tr><th>User</th><th>Role</th><th>Status</th><th>Last sign-in</th><th>Created</th><th></th></tr></thead><tbody>${data.users.map((user) => `<tr>
-        <td><div class="table-user"><span class="avatar">${escapeHtml(initials(user.name))}</span><div><strong>${escapeHtml(user.name)}${user.is_current_user ? `<span class="you-badge">You</span>` : ""}</strong><span class="subtext email">${escapeHtml(user.email)}</span></div></div></td>
-        <td>${rolePill(user)}</td><td>${statusPill(user.active ? "active" : "disabled")}</td><td>${user.last_login_at ? formatDate(user.last_login_at) : "Never"}</td><td>${formatDate(user.created_at)}</td><td><button class="button small ghost" data-user-id="${escapeHtml(user.id)}">Manage</button></td>
-      </tr>`).join("")}</tbody></table></div>
-    </section>
-
-    <section class="role-grid" aria-label="Built-in roles">${data.roles.map((role) => `<article class="role-card ${escapeHtml(role.id)}"><div class="role-card-head"><span class="role-symbol">${role.id === "admin" ? "A" : role.id === "marketer" ? "M" : "R"}</span>${rolePill(role)}</div><h3>${escapeHtml(role.label)}</h3><p>${escapeHtml(role.description)}</p><span class="role-count">${role.permissions.length} permissions</span></article>`).join("")}</section>
-
-    <section class="panel permission-panel">
-      <div class="panel-head"><div><h2>Built-in permissions</h2><p>Roles are fixed for this release; every permission is enforced by the server</p></div></div>
-      <div class="table-wrap"><table class="permission-table"><thead><tr><th>Capability</th>${data.roles.map((role) => `<th>${escapeHtml(role.label)}</th>`).join("")}</tr></thead><tbody>${data.permissions.map((permission) => `<tr><td><strong>${escapeHtml(permission.label)}</strong><span class="subtext">${escapeHtml(permission.description)}</span></td>${data.roles.map((role) => `<td><span class="permission-check ${role.permissions.includes(permission.id) ? "granted" : "denied"}" aria-label="${role.permissions.includes(permission.id) ? "Granted" : "Not granted"}">${role.permissions.includes(permission.id) ? "✓" : "—"}</span></td>`).join("")}</tr>`).join("")}</tbody></table></div>
-    </section>`;
-  document.querySelector("#create-user")?.addEventListener("click", openCreateUserModal);
-}
-
-function openCreateUserModal() {
-  openModal("Create user", "Access control", `
-    <form id="create-user-form" class="stack" autocomplete="off">
-      <div class="notice"><span>i</span><div>Create the account directly and share the temporary password through a secure channel.</div></div>
-      <label>Full name<input name="name" maxlength="120" autocomplete="off" required /></label>
-      <label>Email address<input name="email" type="email" autocomplete="off" required /></label>
-      <label>Role<select name="role">${roleOptions(state.roles)}</select><span class="help">Choose the least access needed. Roles can be changed later by an administrator.</span></label>
-      <label>Temporary password<input name="password" type="password" minlength="12" maxlength="256" autocomplete="new-password" required /><span class="help">Use at least 12 characters.</span></label>
-      <p class="form-error" role="alert"></p>
-      <div class="form-actions"><button type="button" class="button" data-close-modal>Cancel</button><button class="button primary" type="submit">Create user</button></div>
-    </form>`, true);
-  const form = document.querySelector("#create-user-form");
-  form.addEventListener("submit", async (event) => {
-    event.preventDefault();
-    const result = await submitForm(form, () => api("/api/users", { method: "POST", body: Object.fromEntries(new FormData(form)) }), "User created");
-    if (result) {
-      closeModal();
-      await renderUsers();
-    }
-  });
-}
-
-function openManageUserModal(userId) {
-  const user = state.users.find((entry) => entry.id === userId);
-  if (!user) return;
-  const selfLocked = user.is_current_user;
-  openModal(`Manage ${user.name}`, "Access control", `
-    <div class="stack">
-      ${selfLocked ? `<div class="notice"><span>i</span><div><strong>This is your account.</strong> Another administrator must change your role or disable your access.</div></div>` : `<div class="notice warning"><span>!</span><div>Role or status changes revoke this user’s active sessions. Disabled users keep their audit history.</div></div>`}
-      <form id="user-access-form" class="stack">
-        <label>Full name<input name="name" maxlength="120" value="${escapeHtml(user.name)}" required /></label>
-        <label>Email address<input name="email" type="email" value="${escapeHtml(user.email)}" required /></label>
-        <div class="form-grid"><label>Role<select name="role" ${selfLocked ? "disabled" : ""}>${roleOptions(state.roles, user.role)}</select></label><label>Account status<select name="active" ${selfLocked ? "disabled" : ""}><option value="true" ${user.active ? "selected" : ""}>Active</option><option value="false" ${!user.active ? "selected" : ""}>Disabled</option></select></label></div>
-        <p class="form-error" role="alert"></p>
-        <div class="form-actions"><button type="button" class="button" data-close-modal>Cancel</button><button class="button primary" type="submit">Save access</button></div>
-      </form>
-      <section class="reset-password-section">
-        <div><strong>Reset password</strong><p>All active sessions for this user will be revoked.</p></div>
-        <form id="reset-password-form" class="stack"><label>New temporary password<input name="password" type="password" minlength="12" maxlength="256" autocomplete="new-password" required /></label><p class="form-error" role="alert"></p><div class="form-actions"><button class="button" type="submit">Reset password</button></div></form>
-      </section>
-    </div>`, false);
-  const accessForm = document.querySelector("#user-access-form");
-  accessForm.addEventListener("submit", async (event) => {
-    event.preventDefault();
-    const payload = {
-      name: accessForm.elements.name.value,
-      email: accessForm.elements.email.value,
-      role: selfLocked ? user.role : accessForm.elements.role.value,
-      active: selfLocked ? user.active : accessForm.elements.active.value === "true",
-    };
-    const result = await submitForm(accessForm, () => api(`/api/users/${encodeURIComponent(user.id)}`, { method: "PATCH", body: payload }), "User access updated");
-    if (result) {
-      closeModal();
-      await renderUsers();
-    }
-  });
-  const passwordForm = document.querySelector("#reset-password-form");
-  passwordForm.addEventListener("submit", async (event) => {
-    event.preventDefault();
-    const result = await submitForm(passwordForm, () => api(`/api/users/${encodeURIComponent(user.id)}/reset-password`, { method: "POST", body: { password: passwordForm.elements.password.value } }), "Password reset; active sessions revoked");
-    if (!result) return;
-    closeModal();
-    if (user.is_current_user) showLogin();
-    else await renderUsers();
-  });
+  const rawIp = typeof source.ip === "string" ? source.ip : "";
+  return { primary: parts.join(" · ") || "—", ip: rawIp && rawIp !== "unknown" ? rawIp : "" };
 }
 
 const AUDIT_ACTION_OPTIONS = [
@@ -1888,288 +459,1943 @@ const AUDIT_ACTION_OPTIONS = [
   ["campaign_resumed", "Campaign resumed"],
   ["suppression_created", "Suppression added"],
   ["suppression_deleted", "Suppression removed"],
-  ["message_deleted", "Message deleted"],
+  ["suppression_reconsent_removed", "Suppression removed"],
+  ["suppression_removed", "Suppression removed"],
+  ["contact_updated", "Contact updated"],
+  ["message_deleted", "Delivery deleted"],
+  ["message_feedback_simulated", "Delivery feedback"],
 ];
-
-const AUDIT_ACTION_LABELS = Object.fromEntries(
-  AUDIT_ACTION_OPTIONS.filter(([value]) => value).map(([value, label]) => [value, label]),
-);
+const AUDIT_ACTION_LABELS = Object.fromEntries(AUDIT_ACTION_OPTIONS.filter(([value]) => value));
+const AUDIT_ENTITY_OPTIONS = ["", "authentication", "session", "user", "list", "contact", "campaign", "suppression", "message"].map((value) => [value, value ? titleCase(value) : "All records"]);
 
 function auditActionLabel(action) {
-  const key = String(action ?? "");
-  return AUDIT_ACTION_LABELS[key] || titleCase(key);
+  return AUDIT_ACTION_LABELS[String(action ?? "")] || titleCase(action);
 }
 
-const AUDIT_ENTITY_OPTIONS = [
-  ["", "All entities"],
-  ["authentication", "Authentication"],
-  ["session", "Session"],
-  ["user", "User"],
-  ["list", "List"],
-  ["contact", "Contact"],
-  ["campaign", "Campaign"],
-  ["suppression", "Suppression"],
-  ["message", "Message"],
-];
+function searchField(id, label, value, placeholder) {
+  return `<div class="search">${icon("search")}<input id="${id}" type="search" value="${escapeHtml(value)}" placeholder="${escapeHtml(placeholder)}" aria-label="${escapeHtml(label)}" /></div>`;
+}
 
-async function renderAudit() {
-  const filters = state.auditFilters;
-  const params = new URLSearchParams();
-  if (filters.action) params.set("action", filters.action);
-  if (filters.entityType) params.set("entity_type", filters.entityType);
-  if (filters.q) params.set("q", filters.q);
-  if (filters.from) params.set("from", filters.from);
-  if (filters.to) params.set("to", filters.to);
-  const queryString = params.toString();
-  const data = await api(`/api/audit${queryString ? `?${queryString}` : ""}`);
-  const filtering = Boolean(filters.action || filters.entityType || filters.q || filters.from || filters.to);
-  const count = data.events.length;
-  const actionOptions = AUDIT_ACTION_OPTIONS
-    .map(([value, label]) => `<option value="${escapeHtml(value)}" ${filters.action === value ? "selected" : ""}>${escapeHtml(label)}</option>`)
-    .join("");
-  const entityOptions = AUDIT_ENTITY_OPTIONS
-    .map(([value, label]) => `<option value="${escapeHtml(value)}" ${filters.entityType === value ? "selected" : ""}>${escapeHtml(label)}</option>`)
-    .join("");
-  const heading = filtering
-    ? `${count.toLocaleString()} match${count === 1 ? "" : "es"}`
-    : "Recent administrative activity";
-  const filterBits = [];
-  if (filters.q) filterBits.push(`“${escapeHtml(filters.q)}”`);
-  if (filters.action) {
-    filterBits.push(escapeHtml(AUDIT_ACTION_OPTIONS.find(([value]) => value === filters.action)?.[1] || titleCase(filters.action)));
+function optionsHtml(pairs, selected) {
+  return pairs.map(([value, label]) => `<option value="${escapeHtml(value)}" ${String(value) === String(selected) ? "selected" : ""}>${escapeHtml(label)}</option>`).join("");
+}
+
+function listOptions(lists, selected = "") {
+  return (lists || []).map((list) => `<option value="${escapeHtml(list.id)}" ${list.id === selected ? "selected" : ""}>${escapeHtml(list.name)} (${Number(list.contact_count || 0)})</option>`).join("");
+}
+
+function readRoute() {
+  const raw = (location.hash || "#/overview").replace(/^#/, "");
+  const [pathPart, query = ""] = raw.split("?");
+  const parts = pathPart.replace(/^\//, "").split("/").filter(Boolean);
+  return {
+    section: parts[0] || "overview",
+    id: parts[1] ? decodeURIComponent(parts[1]) : "",
+    params: new URLSearchParams(query),
+  };
+}
+
+function pageKey(route) {
+  if (route.section === "campaigns") return `campaigns:${route.id || "list"}`;
+  if (route.section === "contacts") return `contacts:${route.params.get("q") || ""}:${route.params.get("list") || ""}`;
+  if (route.section === "deliveries") return `deliveries:${route.params.toString()}`;
+  if (route.section === "audit") return `audit:${route.params.toString()}`;
+  if (route.section === "suppressions") return `suppressions:${route.params.toString()}`;
+  return route.section;
+}
+
+function hashFor(section, id = "", params = null) {
+  const path = id ? `/${section}/${encodeURIComponent(id)}` : `/${section}`;
+  const query = params && [...params.keys()].length ? `?${params.toString()}` : "";
+  return `#${path}${query}`;
+}
+
+function isLocalHost() {
+  return ["localhost", "127.0.0.1"].includes(location.hostname);
+}
+
+function go(section, id = "", params = null, fresh = false) {
+  if (fresh) state.pageKey = "";
+  const next = hashFor(section, id, params);
+  if (location.hash === next) onRoute();
+  else location.hash = next;
+}
+
+function setChrome(section, title) {
+  const [base, kicker] = VIEW_META[section] || ["CTN", ""];
+  const shown = title || base;
+  const titleNode = document.querySelector("#page-title");
+  const kickerNode = document.querySelector("#page-kicker");
+  if (titleNode) titleNode.textContent = shown;
+  if (kickerNode) kickerNode.textContent = kicker;
+  document.title = section === "login" ? "Sign in · CTN" : `${shown} · CTN`;
+  document.querySelectorAll("#main-nav [data-view]").forEach((link) => {
+    if (link.dataset.view === section) link.setAttribute("aria-current", "page");
+    else link.removeAttribute("aria-current");
+  });
+}
+
+function updatePrimaryAction() {
+  const button = document.querySelector("#global-new-campaign");
+  if (!button) return;
+  const allowed = can("campaigns.manage");
+  button.disabled = !allowed;
+  button.setAttribute("aria-disabled", allowed ? "false" : "true");
+  button.setAttribute("aria-label", allowed ? "New campaign" : "New campaign, not available for your role");
+}
+
+function updateStatus(summary = state.summary) {
+  const button = document.querySelector("#status-button");
+  const pop = document.querySelector("#status-popover");
+  if (!button || !summary) return;
+  const queued = Number(summary.counts?.queued || 0);
+  const sent = Number(summary.counts?.sent_today || 0);
+  const limit = Number(summary.daily_limit || state.session?.daily_limit || 0);
+  const remaining = Math.max(0, limit - sent);
+  const live = isLive(summary.delivery_mode);
+  const sending = live && queued > 0;
+  button.dataset.state = sending ? "sending" : live ? "live" : "preview";
+  document.querySelector("#status-label").textContent = sending ? "Sending" : live ? "Live" : "Preview";
+  const setup = can("sending.view") ? `<a href="#/sending">Review sending setup</a>` : "";
+  pop.innerHTML = `
+    <strong>${sending ? "A campaign is sending" : live ? "Live delivery is on" : "Preview"}</strong>
+    <p>${live ? "Submitted means the sending service accepted the message. It does not prove inbox placement." : "Campaigns stay in this workspace. Nothing is mailed out."}</p>
+    <p class="nums">Queue: ${queued.toLocaleString()}</p>
+    <p class="nums">Today: ${sent.toLocaleString()} of ${limit.toLocaleString()} · ${remaining.toLocaleString()} remaining</p>
+    ${setup}`;
+}
+
+function showLogin() {
+  state.session = null;
+  state.csrf = "";
+  clearTimeout(state.pollTimer);
+  document.querySelector("#app-shell").hidden = true;
+  document.querySelector("#login-screen").hidden = false;
+  setNav(false);
+  document.title = "Sign in · CTN";
+  document.querySelector(".skip-link")?.setAttribute("href", "#login-email");
+  document.querySelector("#login-email")?.focus();
+}
+
+function showApp(sessionData) {
+  state.session = sessionData;
+  state.csrf = sessionData.csrf_token;
+  document.querySelector("#login-screen").hidden = true;
+  document.querySelector("#app-shell").hidden = false;
+  document.querySelector(".skip-link")?.setAttribute("href", "#content");
+  const identity = personLabel(sessionData.user);
+  document.querySelector("#user-name").textContent = identity.primary;
+  document.querySelector("#user-role").textContent = identity.secondary;
+  document.querySelector("#user-initials").textContent = identity.initials;
+  updatePrimaryAction();
+  if (sessionData.must_change_password || sessionData.user?.must_change_password) {
+    openChangePassword(true);
+    return;
   }
-  if (filters.entityType) {
-    filterBits.push(escapeHtml(AUDIT_ENTITY_OPTIONS.find(([value]) => value === filters.entityType)?.[1] || titleCase(filters.entityType)));
+  schedulePoll(0);
+  if (!location.hash) history.replaceState(null, "", "#/overview");
+  onRoute();
+}
+
+function schedulePoll(delay) {
+  clearTimeout(state.pollTimer);
+  if (!state.session) return;
+  state.pollTimer = setTimeout(async () => {
+    if (!state.session || document.hidden) return;
+    try {
+      const summary = await api("/api/summary");
+      state.summary = summary;
+      cache.set("summary", summary);
+      updateStatus(summary);
+    } catch (_) { /* quiet */ }
+    const queued = Number(state.summary?.counts?.queued || 0);
+    schedulePoll(queued > 0 ? 5000 : 20000);
+  }, delay);
+}
+
+function onRoute() {
+  const route = readRoute();
+  if (state.reverting) {
+    state.reverting = false;
+    return;
   }
-  if (filters.from || filters.to) {
-    filterBits.push(escapeHtml([filters.from || "…", filters.to || "…"].join(" → ")));
+  const nextKey = pageKey(route);
+  if (state.composerDirty && nextKey !== state.pageKey) {
+    if (!window.confirm("You have unsaved changes to this campaign. Leave without saving them?")) {
+      state.reverting = true;
+      history.back();
+      return;
+    }
+    state.composerDirty = false;
   }
-  const filterNote = filterBits.length
-    ? `<p class="audit-filter-note">Filtered by ${filterBits.join(" · ")}.</p>`
-    : "";
-  const emptyMarkup = filtering
-    ? `<div class="empty-state"><div><div class="empty-mark">⌕</div><h2>No matching events</h2><p>Nothing matches these filters. Try clearing search, action, entity, or date range.</p><button class="button" id="clear-audit-filters">Clear filters</button></div></div>`
-    : `<div class="empty-state"><div><p>No audit events yet.</p></div></div>`;
-  const tableRows = data.events.map((event) => {
-    const detail = formatAuditDetail(event.detail);
-    const entityLabel = typeof event.entity_label === "string" ? event.entity_label.trim() : "";
+  const same = nextKey === state.pageKey && state.session;
+  state.route = route;
+  setNav(false);
+  if (!state.session) {
+    if (route.section === "_ui" && isLocalHost()) {
+      document.querySelector("#login-screen").hidden = true;
+      document.querySelector("#app-shell").hidden = false;
+      renderKit();
+    } else showLogin();
+    return;
+  }
+  if (!same) {
+    state.pageKey = nextKey;
+    renderSection(route);
+  } else if (route.section !== "campaigns") {
+    syncOverlay(route);
+    setChrome(route.section);
+  }
+}
+
+async function renderSection(route) {
+  clearInterval(state.composerClock);
+  const token = ++state.renderToken;
+  closeDrawer({ skipHash: true });
+  setChrome(route.section, route.section === "campaigns" && route.id ? (route.id === "new" ? "New campaign" : "Campaign") : "");
+    if (route.section === "_ui") {
+    if (!isLocalHost()) {
+      document.querySelector("#content").innerHTML = `<section class="panel empty-state"><div><h2>Not available</h2><p>The component reference is only on a local development host.</p></div></section>`;
+      return;
+    }
+    renderKit();
+    return;
+  }
+  if (!VIEW_META[route.section]) {
+    go("overview");
+    return;
+  }
+  const permission = VIEW_PERMISSIONS[route.section];
+  if (permission && !can(permission)) {
+    renderDenied(route.section);
+    return;
+  }
+  try {
+    if (route.section === "campaigns" && route.id) await renderComposer(route.id === "new" ? null : route.id, token);
+    else if (route.section === "overview") await renderOverview(token);
+    else if (route.section === "contacts") await renderContacts(token);
+    else if (route.section === "campaigns") await renderCampaigns(token);
+    else if (route.section === "sending") await renderSending(token);
+    else if (route.section === "deliveries") await renderDeliveries(token);
+    else if (route.section === "mailbox") await renderMailbox(token);
+    else if (route.section === "suppressions") await renderSuppressions(token);
+    else if (route.section === "users") await renderUsers(token);
+    else if (route.section === "audit") await renderAudit(token);
+    if (token !== state.renderToken) return;
+    if (route.id && !["campaigns", "overview", "sending", "audit", "suppressions"].includes(route.section)) syncOverlay(route);
+  } catch (error) {
+    if (token !== state.renderToken) return;
+    setRefreshing(false);
+    const content = document.querySelector("#content");
+    if (content.querySelector(".stat-grid, table, .panel")) {
+      toast(error.message, "error");
+      return;
+    }
+    content.innerHTML = `<div class="notice warning"><div><strong>Couldn’t load this view.</strong><p>${escapeHtml(error.message)}</p></div></div>`;
+  }
+}
+
+function renderDenied(section) {
+  const role = personLabel(state.session?.user || {}).secondary || "this role";
+  const name = VIEW_META[section]?.[0] || "This section";
+  document.querySelector("#content").innerHTML = `<section class="panel empty-state"><div><h2>${escapeHtml(name)} is not available for ${escapeHtml(role)}</h2><p>Your role does not include this record. Overview stays available. An administrator can change access from Users &amp; roles.</p></div></section>`;
+}
+
+function syncOverlay(route) {
+  if (!route.id) {
+    closeDrawer({ skipHash: true });
+    return;
+  }
+  if (route.section === "contacts") openContactDetail(route.id);
+  if (route.section === "deliveries") openDelivery(route.id);
+  if (route.section === "mailbox" && route.id) openMailboxMessage(route.id);
+  if (route.section === "users") openManageUser(route.id);
+}
+
+function paintOverview(data, lists = state.lists) {
+  if (!data) return;
+  const remaining = Math.max(0, Number(data.daily_limit) - Number(data.counts.sent_today));
+  const contacts = Number(data.counts.contacts || 0);
+  const card = (href, label, value, detail, allowed) => allowed
+    ? `<a class="stat-card" href="${href}"><span class="stat-label">${label}</span><strong class="stat-value nums">${value}</strong><span class="stat-detail">${detail}</span></a>`
+    : `<article class="stat-card"><span class="stat-label">${label}</span><strong class="stat-value nums">${value}</strong><span class="stat-detail">${detail}</span></article>`;
+  const checklist = contacts === 0 ? renderChecklist(data, lists) : "";
+  document.querySelector("#content").innerHTML = `
+    ${checklist}
+    <section class="stat-grid" aria-label="Delivery overview">
+      ${card("#/contacts", "Active contacts", contacts.toLocaleString(), "Eligible to include in a campaign", can("contacts.view"))}
+      ${card("#/deliveries", "Sent today", Number(data.counts.sent_today || 0).toLocaleString(), `${remaining.toLocaleString()} remaining today`, can("deliveries.view"))}
+      ${card("#/campaigns", "Queue", Number(data.counts.queued || 0).toLocaleString(), Number(data.counts.queued) ? "Waiting to send" : "Nothing waiting", can("campaigns.view"))}
+      ${card("#/suppressions", "Suppressed", Number(data.counts.suppressed || 0).toLocaleString(), "Excluded from every campaign", can("suppressions.view"))}
+    </section>
+    <div class="two-column">
+      <section class="panel">
+        <div class="panel-head"><div><h2>Recent campaigns</h2><p>Latest campaigns and their state</p></div><a class="button small ghost" href="#/campaigns">View all</a></div>
+        ${renderRecentCampaigns(data.recent_campaigns || [])}
+      </section>
+      ${can("deliveries.view") ? `<section class="panel"><div class="panel-head"><div><h2>Latest deliveries</h2><p>One row is one email to one recipient</p></div><a class="button small ghost" href="#/deliveries">View deliveries</a></div><div class="panel-body">${renderRecentDeliveries(data.recent_messages || [])}</div></section>` : `<section class="panel"><div class="panel-body"><h2>Recipient data is protected</h2><p class="help">The Analyst role includes campaign totals without contact addresses or message contents.</p></div></section>`}
+    </div>`;
+}
+
+function renderChecklist(data, lists) {
+  const hasLists = (lists || []).length > 0;
+  const hasCampaigns = (data.recent_campaigns || []).length > 0;
+  const hasDeliveries = (data.recent_messages || []).length > 0;
+  const step = (done, label, href) => `<li>${href && !done ? `<a href="${href}">${done ? "Done" : "To do"} · ${label}</a>` : `<span class="${done ? "done" : ""}">${done ? "Done" : "To do"} · ${label}</span>`}</li>`;
+  return `<section class="panel" style="margin-bottom:24px"><div class="panel-head"><div><h2>Get started</h2><p>Create an audience before the first campaign.</p></div></div><div class="panel-body"><ol class="checklist">
+    ${step(hasLists, "Create a list", can("lists.manage") ? "#/contacts" : "")}
+    ${step(false, "Add or import contacts", can("contacts.manage") ? "#/contacts" : "")}
+    ${step(hasCampaigns, "Compose a campaign", can("campaigns.manage") ? "#/campaigns/new" : "#/campaigns")}
+    ${step(hasDeliveries, "Send a test", can("campaigns.send") ? "#/campaigns" : "")}
+    ${step(false, "Launch to the audience", "")}
+  </ol></div></section>`;
+}
+
+function renderRecentCampaigns(campaigns) {
+  if (!campaigns.length) return `<div class="empty-state"><div><h2>No campaigns yet</h2><p>${can("campaigns.manage") ? "Use New campaign once a list has contacts." : "Campaigns will appear here after someone creates one."}</p></div></div>`;
+  return `<div class="table-wrap"><table class="responsive"><thead><tr><th>Campaign</th><th>Status</th><th>Submitted</th><th>Issues</th></tr></thead><tbody>${campaigns.map((campaign) => {
+    const recipients = Number(campaign.recipients || 0);
+    const submitted = Number(campaign.submitted ?? campaign.sent ?? 0);
+    return `<tr><td data-label="Campaign"><strong>${escapeHtml(campaign.name)}</strong><span class="subtext">${escapeHtml(campaign.subject || "")}</span></td><td data-label="Status">${statusPill(campaign.status)}</td><td data-label="Submitted" class="nums">${submitted}/${recipients}</td><td data-label="Issues" class="nums">${Number(campaign.issues || 0)}</td></tr>`;
+  }).join("")}</tbody></table></div>`;
+}
+
+function renderRecentDeliveries(messages) {
+  if (!messages.length) return `<div class="empty-state"><div><p>Deliveries appear here after a test or a launch.</p></div></div>`;
+  return `<div class="stack">${messages.map((message) => `<div><strong class="email">${escapeHtml(message.to_email)}</strong><p class="help">${escapeHtml(message.subject || "")} · ${timeHtml(message.created_at, { relative: true })}</p></div>`).join("")}</div>`;
+}
+
+async function renderOverview(token) {
+  if (cache.get("summary")) paintOverview(cache.get("summary"), state.lists);
+  else setLoading();
+  setRefreshing(Boolean(cache.get("summary")));
+  const summary = await api("/api/summary");
+  if (token !== state.renderToken) return;
+  let lists = state.lists;
+  if (can("lists.view")) {
+    try { lists = (await api("/api/lists")).lists || []; state.lists = lists; } catch (_) { lists = []; }
+  }
+  if (token !== state.renderToken) return;
+  cache.set("summary", summary);
+  state.summary = summary;
+  updateStatus(summary);
+  paintOverview(summary, lists);
+  setRefreshing(false);
+}
+
+async function getLists(force = false) {
+  if (!force && state.lists.length) return state.lists;
+  if (!can("lists.view")) return [];
+  state.lists = (await api("/api/lists")).lists || [];
+  return state.lists;
+}
+
+async function renderContacts(token) {
+  const params = state.route.params;
+  const query = params.get("q") || "";
+  const listId = params.get("list") || "";
+  const key = `contacts:${query}:${listId}`;
+  const cachedContacts = cache.get(key);
+  if (cachedContacts) paintContacts(cachedContacts, cachedContacts.lists || state.lists, query, listId);
+  else setLoading();
+  setRefreshing(Boolean(cachedContacts));
+  const search = new URLSearchParams();
+  if (query) search.set("q", query);
+  if (listId) search.set("list_id", listId);
+  const [data, lists] = await Promise.all([
+    api(`/api/contacts${search.toString() ? `?${search}` : ""}`),
+    getLists(),
+  ]);
+  if (token !== state.renderToken) return;
+  cache.set(key, { ...data, lists });
+  paintContacts(data, lists, query, listId);
+  setRefreshing(false);
+}
+
+function paintContacts(data, lists, query, listId) {
+  const canManage = can("contacts.manage");
+  const canEdit = can("contacts.edit");
+  let contacts = [...(data.contacts || [])];
+  const { key, dir } = state.contactSort;
+  contacts.sort((a, b) => {
+    const left = String(a[key] || "").toLowerCase();
+    const right = String(b[key] || "").toLowerCase();
+    return left < right ? (dir === "asc" ? -1 : 1) : left > right ? (dir === "asc" ? 1 : -1) : 0;
+  });
+  const activeCount = contacts.filter((contact) => contact.status === "active").length;
+  const suppressedCount = contacts.filter((contact) => contact.status === "suppressed").length;
+  const sortBtn = (id, label) => `<button type="button" data-sort="${id}" aria-sort="${state.contactSort.key === id ? (state.contactSort.dir === "asc" ? "ascending" : "descending") : "none"}">${label}</button>`;
+  const rows = contacts.map((contact) => {
+    const email = contact.email || "";
+    const checked = state.selectedContacts.has(contact.id) ? "checked" : "";
     return `<tr>
-      <td>${formatDate(event.created_at)}</td>
-      <td>${escapeHtml(event.actor_name || "System / recipient")}</td>
-      <td><strong>${escapeHtml(auditActionLabel(event.action))}</strong></td>
-      <td class="audit-entity"><span>${escapeHtml(titleCase(event.entity_type))}</span>${entityLabel ? `<span class="subtext">${escapeHtml(entityLabel)}</span>` : ""}</td>
-      <td class="audit-detail"><span>${escapeHtml(detail.primary)}</span>${detail.ip ? `<span class="subtext">from ${escapeHtml(detail.ip)}</span>` : ""}</td>
+      ${canEdit ? `<td data-label="Select"><input type="checkbox" data-select-contact="${escapeHtml(contact.id)}" ${checked} aria-label="Select ${escapeHtml(email)}" /></td>` : ""}
+      <td data-label="Contact"><div class="contact-identity"><span class="avatar" aria-hidden="true">${escapeHtml(initials(email))}</span><div><strong class="email">${escapeHtml(email)}</strong></div></div></td>
+      <td data-label="Lists">${escapeHtml(contact.lists || "—")}</td>
+      <td data-label="Status">${statusPill(contact.status)}</td>
+      <td data-label="Added">${timeHtml(contact.created_at)}</td>
+      <td class="table-actions" data-label="Actions"><a class="button small ghost" href="#/contacts/${encodeURIComponent(contact.id)}">View</a>${canEdit ? `<button type="button" class="button small ghost" data-edit-contact="${escapeHtml(contact.id)}">Edit</button>` : ""}</td>
     </tr>`;
   }).join("");
-
-  const sectionActions = [
-    count ? `<button class="button" id="export-audit-csv">Export CSV</button>` : "",
-    filtering ? `<button class="button" id="clear-audit-filters">Clear filters</button>` : "",
-  ].filter(Boolean).join("");
-
-  els.content.innerHTML = `
-    <div class="section-lead"><div><h2>${heading}</h2><p>Authentication, imports, campaigns, delivery feedback, and suppressions.</p></div><div class="section-actions">${sectionActions}</div></div>
-    ${filterNote}
-    <div class="toolbar audit-toolbar">
-      <div class="search"><input id="audit-search" type="search" placeholder="Search actor, action, entity, or detail" value="${escapeHtml(filters.q)}" aria-label="Search audit log" /></div>
-      <select id="audit-action-filter" aria-label="Filter by action">${actionOptions}</select>
-      <select id="audit-entity-filter" aria-label="Filter by entity type">${entityOptions}</select>
-      <label class="delivery-date"><span>From</span><input id="audit-from" type="date" value="${escapeHtml(filters.from)}" aria-label="From date" /></label>
-      <label class="delivery-date"><span>To</span><input id="audit-to" type="date" value="${escapeHtml(filters.to)}" aria-label="To date" /></label>
-    </div>
-    <section class="panel">${data.events.length ? `<div class="table-wrap"><table><thead><tr><th>Time</th><th>Actor</th><th>Action</th><th>Entity</th><th>Detail</th></tr></thead><tbody>${tableRows}</tbody></table></div>` : emptyMarkup}</section>`;
-
-  const search = document.querySelector("#audit-search");
-  const fromInput = document.querySelector("#audit-from");
-  const toInput = document.querySelector("#audit-to");
-  let searchTimer;
-
-  const applyFilters = (next = {}) => {
-    state.auditFilters = {
-      ...state.auditFilters,
-      ...next,
-    };
-    if ("q" in next) state.auditFilters._focusSearch = true;
-    renderAudit();
-  };
-  const clearFilters = () => {
-    state.auditFilters = { action: "", entityType: "", q: "", from: "", to: "" };
-    renderAudit();
-  };
-
+  const empty = query || listId
+    ? `<div class="empty-state"><div><h2>No matching contacts</h2><p>Try another email or list.</p><a class="button" href="#/contacts">Clear filters</a></div></div>`
+    : `<div class="empty-state"><div><h2>No contacts yet</h2><p>${canManage ? "Import a CSV or add a contact from the header." : "Contacts will appear here after they are added."}</p></div></div>`;
+  const rail = [`<a href="#/contacts" ${listId ? "" : 'aria-current="true"'}>All contacts</a>`, ...(lists || []).map((list) => `<a href="#/contacts?list=${encodeURIComponent(list.id)}" ${list.id === listId ? 'aria-current="true"' : ""}>${escapeHtml(list.name)} <span class="nums">${Number(list.contact_count || 0)}</span></a>`)].join("");
+  document.querySelector("#content").innerHTML = `
+    <div class="section-lead"><div><h2 class="nums">${contacts.length.toLocaleString()} ${contacts.length === 1 ? "contact" : "contacts"}</h2><p>${contacts.length === 500 ? "Showing the 500 most recent matches." : "People you can email through Spacemail."}</p></div>
+      ${canManage ? `<div class="section-actions"><button type="button" class="button" id="import-contacts">Import CSV</button><button type="button" class="button primary" id="add-contact">Add contact</button></div>` : ""}</div>
+    <div class="contacts-layout">
+      <aside class="list-rail" aria-label="Lists">${rail}${can("lists.manage") ? `<button type="button" id="create-list">+ New list</button>` : (lists || []).length ? "" : `<span class="help">No lists yet</span>`}</aside>
+      <div>
+        <div class="contacts-stats"><span>Active <strong>${activeCount.toLocaleString()}</strong></span><span>Suppressed <strong>${suppressedCount.toLocaleString()}</strong></span><span>Lists <strong>${(lists || []).length.toLocaleString()}</strong></span>${canEdit && state.selectedContacts.size ? `<button type="button" class="button small danger" id="delete-selected">Delete ${state.selectedContacts.size} selected</button>` : ""}</div>
+        <div class="toolbar">${searchField("contact-search", "Search contacts", query, "Search by email")}</div>
+        <section class="panel">${contacts.length ? `<div class="table-wrap"><table class="responsive contacts-table"><thead><tr>${canEdit ? `<th></th>` : ""}<th>${sortBtn("email", "Contact")}</th><th>Lists</th><th>${sortBtn("status", "Status")}</th><th>${sortBtn("created_at", "Added")}</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>` : empty}</section>
+      </div>
+    </div>`;
+  const search = document.querySelector("#contact-search");
+  let timer;
   search?.addEventListener("input", () => {
-    clearTimeout(searchTimer);
-    searchTimer = setTimeout(() => applyFilters({ q: search.value.trim() }), 280);
+    clearTimeout(timer);
+    timer = setTimeout(() => {
+      const next = new URLSearchParams(state.route.params);
+      const value = search.value.trim();
+      if (value) next.set("q", value); else next.delete("q");
+      go("contacts", "", next);
+    }, 280);
   });
-  document.querySelector("#audit-action-filter")?.addEventListener("change", (event) => {
-    applyFilters({ action: event.target.value || "" });
-  });
-  document.querySelector("#audit-entity-filter")?.addEventListener("change", (event) => {
-    applyFilters({ entityType: event.target.value || "" });
-  });
-  fromInput?.addEventListener("change", () => {
-    const from = fromInput.value || "";
-    if (from && filters.to && from > filters.to) {
-      toast("Start date must be on or before end date.", "error");
-      fromInput.value = filters.from;
-      return;
-    }
-    applyFilters({ from });
-  });
-  toInput?.addEventListener("change", () => {
-    const to = toInput.value || "";
-    if (filters.from && to && filters.from > to) {
-      toast("End date must be on or after start date.", "error");
-      toInput.value = filters.to;
-      return;
-    }
-    applyFilters({ to });
-  });
-  document.querySelectorAll("#clear-audit-filters").forEach((button) => {
-    button.addEventListener("click", clearFilters);
-  });
-  document.querySelector("#export-audit-csv")?.addEventListener("click", () => {
-    exportAuditCsv(data.events);
-  });
-
-  if (state.auditFilters._focusSearch) {
-    delete state.auditFilters._focusSearch;
+  if (query) {
     search?.focus();
-    const len = search?.value.length || 0;
-    search?.setSelectionRange(len, len);
+    search?.setSelectionRange(query.length, query.length);
   }
+  document.querySelector("#add-contact")?.addEventListener("click", () => openContactModal(null, listId));
+  document.querySelector("#import-contacts")?.addEventListener("click", () => openImportModal(listId));
+  document.querySelector("#create-list")?.addEventListener("click", openListModal);
+  document.querySelectorAll("[data-sort]").forEach((button) => button.addEventListener("click", () => {
+    const sortKey = button.dataset.sort;
+    state.contactSort = { key: sortKey, dir: state.contactSort.key === sortKey && state.contactSort.dir === "asc" ? "desc" : "asc" };
+    paintContacts(data, lists, query, listId);
+  }));
+  document.querySelectorAll("[data-select-contact]").forEach((box) => box.addEventListener("change", () => {
+    if (box.checked) state.selectedContacts.add(box.dataset.selectContact);
+    else state.selectedContacts.delete(box.dataset.selectContact);
+    paintContacts(data, lists, query, listId);
+  }));
+  document.querySelector("#delete-selected")?.addEventListener("click", async () => {
+    const ids = [...state.selectedContacts];
+    if (!ids.length || !window.confirm(`Delete ${ids.length} contact${ids.length === 1 ? "" : "s"}? This cannot be undone.`)) return;
+    setBusy(document.querySelector("#delete-selected"), true);
+    try {
+      for (const id of ids) await api(`/api/contacts/${id}`, { method: "DELETE" });
+      state.selectedContacts.clear();
+      invalidate("contacts:");
+      toast("Contacts deleted");
+      go("contacts", "", state.route.params, true);
+    } catch (error) {
+      toast(error.message, "error");
+    }
+  });
+  document.querySelectorAll("[data-edit-contact]").forEach((button) => button.addEventListener("click", () => {
+    const contact = contacts.find((row) => row.id === button.dataset.editContact);
+    if (contact) openContactModal(contact, listId);
+  }));
+}
+
+function openListModal() {
+  openModal("Create list", "Audience", "sm", `
+    <form id="list-form" class="stack">
+      <label>List name <span class="req">Required</span><input name="name" required maxlength="120" /></label>
+      <label>Description<textarea name="description" maxlength="500" placeholder="What this audience opted in to receive"></textarea></label>
+      <p class="form-error" role="alert"></p>
+      <div class="form-actions"><button type="button" class="button" data-close-modal>Cancel</button><button class="button primary" type="submit">Create list</button></div>
+    </form>`);
+  document.querySelector("#list-form").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const form = event.currentTarget;
+    const result = await submitForm(form, () => api("/api/lists", { method: "POST", body: Object.fromEntries(new FormData(form)) }), "List created");
+    if (!result) return;
+    state.lists = [];
+    invalidate("contacts:");
+    closeModal();
+    go("contacts", "", null, true);
+  });
+}
+
+function openContactModal(contact = null, preferredListId = "") {
+  const editing = Boolean(contact?.id);
+  openModal(editing ? "Edit contact" : "Add contact", "Audience", "md", `
+    <form id="contact-form" class="stack">
+      <label>Email address <span class="req">Required</span><input name="email" type="email" required value="${escapeHtml(contact?.email || "")}" aria-describedby="contact-email-error" autocomplete="off" /></label>
+      <p id="contact-email-error" class="form-error" role="alert"></p>
+      <div id="contact-list-field"><label>List <span class="req">Required</span><select name="list_id" required disabled><option>Loading lists…</option></select></label></div>
+      ${editing ? `<label>Status<select name="status"><option value="">Keep current</option><option value="active" ${contact?.status === "active" ? "selected" : ""}>Active</option><option value="suppressed" ${contact?.status === "suppressed" ? "selected" : ""}>Suppressed</option></select><span class="help">Suppressed addresses are excluded from campaigns. Use the suppressions page for bounce and complaint blocks.</span></label>` : ""}
+      <p class="form-error" data-form-error role="alert"></p>
+      <div class="form-actions"><button type="button" class="button" data-close-modal>Cancel</button><button class="button primary" type="submit">${editing ? "Save changes" : "Add contact"}</button></div>
+    </form>`);
+  const email = document.querySelector('#contact-form [name="email"]');
+  email?.addEventListener("blur", () => {
+    const ok = validEmail(email.value);
+    email.setAttribute("aria-invalid", ok ? "false" : "true");
+    document.querySelector("#contact-email-error").textContent = ok ? "" : "Enter a valid email address.";
+  });
+  getLists().then((lists) => {
+    const field = document.querySelector("#contact-list-field");
+    if (!field) return;
+    const selected = contact?.list_ids?.[0] || preferredListId || lists[0]?.id || "";
+    field.innerHTML = lists.length
+      ? `<label>List <span class="req">Required</span><select name="list_id" required>${listOptions(lists, selected)}</select></label>`
+      : `<div class="notice"><div><strong>Create a list first.</strong><p>A contact has to belong to a list.</p><button type="button" class="button" id="inline-create-list">Create a list</button></div></div>`;
+    document.querySelector("#inline-create-list")?.addEventListener("click", openListModal);
+  }).catch((error) => toast(error.message, "error"));
+  document.querySelector("#contact-form").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const form = event.currentTarget;
+    if (!validEmail(form.email.value)) {
+      form.email.setAttribute("aria-invalid", "true");
+      document.querySelector("#contact-email-error").textContent = "Enter a valid email address.";
+      return;
+    }
+    if (!form.list_id) return;
+    const data = Object.fromEntries(new FormData(form));
+    if (!editing || !data.status) delete data.status;
+    const result = await submitForm(form, () => api(editing ? `/api/contacts/${contact.id}` : "/api/contacts", { method: editing ? "PATCH" : "POST", body: data }), editing ? "Contact updated" : "Contact added");
+    if (!result) return;
+    invalidate("contacts:");
+    closeModal();
+    go("contacts", "", state.route.params, true);
+  });
+}
+
+async function openContactDetail(contactId) {
+  openDrawer("Contact", "Audience", `<p class="help">Loading contact and send history…</p>`);
+  try {
+    const data = await api(`/api/contacts/${contactId}`);
+    const contact = data.contact;
+    const email = contact.email || "";
+    const messages = Array.isArray(data.messages) ? data.messages : [];
+    openDrawer(email, "Contact", `
+      <dl class="message-meta">
+        <dt>Email</dt><dd class="email">${escapeHtml(email)}</dd>
+        <dt>Status</dt><dd>${statusPill(contact.status)}</dd>
+        <dt>Lists</dt><dd>${escapeHtml(contact.lists || "—")}</dd>
+        <dt>Added</dt><dd>${timeHtml(contact.created_at)}</dd>
+        <dt>Updated</dt><dd>${timeHtml(contact.updated_at)}</dd>
+      </dl>
+      ${data.suppression ? `<div class="notice warning"><div><strong>On the suppression list.</strong><p>${escapeHtml(titleCase(data.suppression.reason))} · ${escapeHtml(titleCase(data.suppression.source))} · ${absoluteTime(data.suppression.created_at)}</p></div></div>` : `<div class="notice"><div><strong>Not suppressed.</strong><p>This address can be included in campaigns.</p></div></div>`}
+      <h3>Send history</h3>
+      ${messages.length ? `<div class="table-wrap"><table class="responsive"><thead><tr><th>Campaign</th><th>Subject</th><th>Status</th><th>When</th></tr></thead><tbody>${messages.map((message) => `<tr><td data-label="Campaign">${escapeHtml(message.campaign_name || "—")}</td><td data-label="Subject">${can("deliveries.view") ? `<a href="#/deliveries/${encodeURIComponent(message.id)}">${escapeHtml(message.subject || "Untitled")}</a>` : escapeHtml(message.subject || "Untitled")}</td><td data-label="Status">${statusPill(message.status)}</td><td data-label="When">${timeHtml(message.created_at, { relative: true })}</td></tr>`).join("")}</tbody></table></div>` : `<p class="help">No sends recorded for this contact yet.</p>`}
+      ${can("contacts.edit") ? `<div class="form-actions"><button type="button" class="button" id="detail-edit">Edit</button><button type="button" class="button danger" id="detail-delete">Delete</button></div>` : ""}`);
+    document.querySelector("#detail-edit")?.addEventListener("click", () => openContactModal(contact));
+    document.querySelector("#detail-delete")?.addEventListener("click", async () => {
+      if (!window.confirm(`Delete ${email}? This cannot be undone.`)) return;
+      await api(`/api/contacts/${contact.id}`, { method: "DELETE" });
+      invalidate("contacts:");
+      toast("Contact deleted");
+      go("contacts", "", state.route.params, true);
+    });
+  } catch (error) {
+    openDrawer("Contact", "Audience", `<p class="form-error">${escapeHtml(error.message)}</p>`);
+  }
+}
+
+function parseCsv(text) {
+  const rows = [];
+  let row = [];
+  let cell = "";
+  let quoted = false;
+  const source = String(text || "").replace(/^\uFEFF/, "");
+  for (let i = 0; i < source.length; i += 1) {
+    const char = source[i];
+    if (char === '"') {
+      if (quoted && source[i + 1] === '"') { cell += '"'; i += 1; }
+      else quoted = !quoted;
+    } else if (char === "," && !quoted) {
+      row.push(cell.trim());
+      cell = "";
+    } else if ((char === "\n" || char === "\r") && !quoted) {
+      if (char === "\r" && source[i + 1] === "\n") i += 1;
+      row.push(cell.trim());
+      if (row.some(Boolean)) rows.push(row);
+      row = [];
+      cell = "";
+    } else cell += char;
+  }
+  row.push(cell.trim());
+  if (row.some(Boolean)) rows.push(row);
+  return rows;
+}
+
+function openImportModal(preferredListId = "") {
+  const draft = { step: 1, rows: [], mapping: { email: "" }, listId: preferredListId };
+  const paint = () => {
+    const body = document.querySelector("#import-host");
+    if (!body) return;
+    if (draft.step === 1) {
+      body.innerHTML = `
+        <p class="steps"><span class="current">1. Upload</span><span>2. Map columns</span><span>3. Confirm</span></p>
+        <div id="import-list"></div>
+        <label class="dropzone" id="csv-drop">Drop a CSV here, or choose a file<input id="csv-file" type="file" accept=".csv,text/csv" /></label>
+        <p class="help">Use the sample if you want the expected column name. <button type="button" class="text-link" id="download-sample-csv">Download sample CSV</button></p>
+        <p class="form-error" data-form-error role="alert"></p>`;
+      getLists().then((lists) => {
+        const host = document.querySelector("#import-list");
+        if (!host) return;
+        host.innerHTML = lists.length
+          ? `<label>Destination list <span class="req">Required</span><select id="import-list-id" required>${listOptions(lists, draft.listId || lists[0]?.id)}</select></label>`
+          : `<div class="notice"><div><strong>Create a list first.</strong><button type="button" class="button" id="import-create-list">Create a list</button></div></div>`;
+        document.querySelector("#import-create-list")?.addEventListener("click", openListModal);
+      });
+    } else if (draft.step === 2) {
+      const headers = draft.rows[0] || [];
+      const select = (name) => `<select data-map="${name}"><option value="">Skip</option>${headers.map((header, index) => `<option value="${index}" ${String(draft.mapping[name]) === String(index) ? "selected" : ""}>${escapeHtml(header || `Column ${index + 1}`)}</option>`).join("")}</select>`;
+      const preview = draft.rows.slice(1, 6).map((cells) => `<tr>${cells.slice(0, 4).map((cell) => `<td>${escapeHtml(cell)}</td>`).join("")}</tr>`).join("");
+      body.innerHTML = `
+        <p class="steps"><span>1. Upload</span><span class="current">2. Map columns</span><span>3. Confirm</span></p>
+        <label>Email <span class="req">Required</span>${select("email")}</label>
+        <div class="table-wrap"><table><tbody>${preview}</tbody></table></div>
+        <p class="help">Showing the first ${Math.min(5, Math.max(0, draft.rows.length - 1))} data rows. Only the email column is imported.</p>
+        <div class="form-actions"><button type="button" class="button" id="import-back">Back</button><button type="button" class="button primary" id="import-next">Continue</button></div>
+        <p class="form-error" data-form-error role="alert"></p>`;
+      body.querySelectorAll("[data-map]").forEach((field) => field.addEventListener("change", () => { draft.mapping[field.dataset.map] = field.value; }));
+      document.querySelector("#import-back")?.addEventListener("click", () => { draft.step = 1; paint(); });
+      document.querySelector("#import-next")?.addEventListener("click", () => {
+        if (draft.mapping.email === "") {
+          body.querySelector("[data-form-error]").textContent = "Choose the email column.";
+          return;
+        }
+        draft.step = 3;
+        paint();
+      });
+    } else {
+      body.innerHTML = `
+        <p class="steps"><span>1. Upload</span><span>2. Map columns</span><span class="current">3. Confirm</span></p>
+        <p class="nums">${Math.max(0, draft.rows.length - 1).toLocaleString()} rows ready to import.</p>
+        <p class="help">Imported addresses become active and can be emailed unless they are already suppressed.</p>
+        <div id="import-result"></div>
+        <p class="form-error" data-form-error role="alert"></p>
+        <div class="form-actions"><button type="button" class="button" id="import-back">Back</button><button type="button" class="button primary" id="import-go">Import contacts</button></div>`;
+      document.querySelector("#import-back")?.addEventListener("click", () => { draft.step = 2; paint(); });
+      document.querySelector("#import-go")?.addEventListener("click", () => runImport(draft));
+    }
+    document.querySelector("#download-sample-csv")?.addEventListener("click", () => downloadText("ctn-contacts-sample.csv", "email\nalex@example.com\n"));
+    const input = document.querySelector("#csv-file");
+    const drop = document.querySelector("#csv-drop");
+    input?.addEventListener("change", () => acceptCsv(input.files?.[0], draft, paint));
+    drop?.addEventListener("dragover", (event) => { event.preventDefault(); drop.classList.add("is-drag"); });
+    drop?.addEventListener("dragleave", () => drop.classList.remove("is-drag"));
+    drop?.addEventListener("drop", (event) => {
+      event.preventDefault();
+      drop.classList.remove("is-drag");
+      acceptCsv(event.dataTransfer.files?.[0], draft, paint);
+    });
+  };
+  openModal("Import contacts", "CSV", "lg", `<div id="import-host"></div>`);
+  paint();
+}
+
+async function acceptCsv(file, draft, paint) {
+  const error = document.querySelector("#import-host [data-form-error]");
+  if (!file) return;
+  draft.listId = document.querySelector("#import-list-id")?.value || draft.listId;
+  if (!draft.listId) {
+    if (error) error.textContent = "Choose a destination list.";
+    return;
+  }
+  draft.rows = parseCsv(await file.text());
+  if (draft.rows.length < 2) {
+    if (error) error.textContent = "The file needs a header row and at least one contact.";
+    return;
+  }
+  const headers = draft.rows[0].map((header) => header.toLowerCase().replace(/\s+/g, "_"));
+  draft.mapping.email = String(Math.max(0, headers.indexOf("email")));
+  if (headers.indexOf("email") < 0) draft.mapping.email = "";
+  draft.step = 2;
+  paint();
+}
+
+async function runImport(draft) {
+  const error = document.querySelector("#import-host [data-form-error]");
+  const button = document.querySelector("#import-go");
+  setBusy(button, true);
+  try {
+    const lines = ["email"];
+    draft.rows.slice(1).forEach((cells) => {
+      const email = cells[Number(draft.mapping.email)] || "";
+      lines.push(`"${String(email).replaceAll('"', '""')}"`);
+    });
+    const result = await api("/api/contacts/import", { method: "POST", body: { csv_text: lines.join("\n"), list_id: draft.listId } });
+    const issues = Array.isArray(result.issues) ? result.issues : [];
+    document.querySelector("#import-result").innerHTML = `
+      <div class="notice success"><div><strong>${Number(result.imported) || 0} imported, ${Number(result.updated) || 0} updated.</strong><p>${Number(result.duplicates) || 0} duplicates and ${Number(result.invalid) || 0} invalid rows were skipped. Addresses already suppressed are still stored as suppressed.</p></div></div>
+      ${issues.length ? `<div class="table-wrap"><table><thead><tr><th>Row</th><th>Email</th><th>Reason</th></tr></thead><tbody>${issues.map((issue) => `<tr><td>${Number(issue.row) || "—"}</td><td>${escapeHtml(issue.email || "—")}</td><td>${escapeHtml(issue.reason === "invalid_email" ? "Invalid email" : issue.reason === "duplicate_in_file" ? "Duplicate in file" : (issue.reason || "Skipped"))}</td></tr>`).join("")}</tbody></table></div><button type="button" class="button" id="download-issues">Download error report</button>` : ""}`;
+    document.querySelector("#download-issues")?.addEventListener("click", () => {
+      const csv = ["row,email,reason", ...issues.map((issue) => `${Number(issue.row) || ""},"${String(issue.email || "").replaceAll('"', '""')}","${String(issue.reason || "").replaceAll('"', '""')}"`)].join("\n");
+      downloadText("ctn-import-errors.csv", csv);
+    });
+    invalidate("contacts:");
+    state.lists = [];
+    toast("Import complete");
+    state.pageKey = "";
+    if (state.route.section === "contacts") onRoute();
+  } catch (requestError) {
+    if (error) error.textContent = requestError.message;
+  } finally {
+    setBusy(button, false);
+  }
+}
+
+function downloadText(filename, text) {
+  const url = URL.createObjectURL(new Blob([text], { type: "text/csv;charset=utf-8" }));
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  document.body.append(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
+}
+
+async function renderCampaigns(token) {
+  if (cache.get("campaigns")) paintCampaigns(cache.get("campaigns"));
+  else setLoading();
+  setRefreshing(Boolean(cache.get("campaigns")));
+  const data = await api("/api/campaigns");
+  if (token !== state.renderToken) return;
+  cache.set("campaigns", data);
+  await getLists().catch(() => []);
+  if (token !== state.renderToken) return;
+  paintCampaigns(data);
+  setRefreshing(false);
+}
+
+function paintCampaigns(data) {
+  const status = state.campaignStatus;
+  const rows = (data.campaigns || []).filter((campaign) => !status || campaign.status === status);
+  const statuses = [...new Set([...(data.campaigns || []).map((campaign) => campaign.status), ...CAMPAIGN_STATUSES])];
+  const body = rows.map((campaign) => {
+    const recipients = Number(campaign.recipients || 0);
+    const queued = Number(campaign.queued || 0);
+    const submitted = Number(campaign.submitted ?? campaign.sent ?? 0);
+    const failed = Number(campaign.failed || 0);
+    const editable = can("campaigns.manage") && (campaign.status === "draft" || (campaign.status === "paused" && can("campaigns.send")));
+    const launchable = can("campaigns.send") && ["draft", "paused"].includes(campaign.status);
+    const ask = can("campaigns.manage") && !can("campaigns.send") && campaign.status === "draft"
+      ? `<button type="button" class="button small" disabled aria-disabled="true" title="An administrator sends tests and launches this campaign">Ask an administrator</button>`
+      : "";
+    return `<tr>
+      <td data-label="Campaign"><strong>${escapeHtml(campaign.name)}</strong><span class="subtext">${escapeHtml(campaign.subject || "")}</span></td>
+      <td data-label="Status">${statusPill(campaign.status)}</td>
+      <td data-label="Audience">${escapeHtml(campaign.list_name || "—")}</td>
+      <td data-label="Progress" class="nums" title="Queued ${queued} · Submitted ${submitted} · Failed ${failed}">${submitted}/${recipients}${failed ? ` · ${failed} failed` : ""}</td>
+      <td data-label="Created">${timeHtml(campaign.created_at, { relative: true })}</td>
+      <td class="table-actions" data-label="Actions">
+        <a class="button small ghost" href="#/campaigns/${encodeURIComponent(campaign.id)}">${editable ? "Edit" : "Open"}</a>
+        ${can("campaigns.send") ? `<button type="button" class="button small ghost" data-test="${escapeHtml(campaign.id)}">Send test</button>` : ""}
+        ${can("campaigns.send") && ["sending", "submission_unknown", "cancel_requested"].includes(campaign.status) ? `<button type="button" class="button small" data-pause="${escapeHtml(campaign.id)}">${isLive() ? "Cancel unsent" : "Pause"}</button>` : ""}
+        ${launchable ? `<button type="button" class="button small primary" data-launch="${escapeHtml(campaign.id)}" data-paused="${campaign.status === "paused" ? "yes" : "no"}">${campaign.status === "paused" ? "Return to draft" : "Launch"}</button>` : ask}
+      </td>
+    </tr>`;
+  }).join("");
+  document.querySelector("#content").innerHTML = `
+    <div class="section-lead"><div><h2 class="nums">${(data.campaigns || []).length.toLocaleString()} ${(data.campaigns || []).length === 1 ? "campaign" : "campaigns"}</h2><p>${can("campaigns.send") ? "Draft, test, then launch to the audience." : can("campaigns.manage") ? "You can draft campaigns. An administrator sends tests and launches them." : "Read-only campaign reporting."}</p></div></div>
+    <div class="toolbar"><label>Status<select id="campaign-status">${optionsHtml([["", "All statuses"], ...statuses.map((value) => [value, statusLabel(value)])], status)}</select></label></div>
+    <section class="panel">${rows.length ? `<div class="table-wrap"><table class="responsive"><thead><tr><th>Campaign</th><th>Status</th><th>Audience</th><th>Submitted</th><th>Created</th><th></th></tr></thead><tbody>${body}</tbody></table></div>` : `<div class="empty-state"><div><h2>No campaigns yet</h2><p>${(data.campaigns || []).length ? "Nothing matches this status." : "Use New campaign after you have a list."}</p></div></div>`}</section>`;
+  document.querySelector("#campaign-status")?.addEventListener("change", (event) => {
+    state.campaignStatus = event.target.value;
+    paintCampaigns(data);
+  });
+  document.querySelectorAll("[data-test]").forEach((button) => button.addEventListener("click", () => openTestSend(button.dataset.test)));
+  document.querySelectorAll("[data-pause]").forEach((button) => button.addEventListener("click", () => campaignPost("pause", button.dataset.pause)));
+  document.querySelectorAll("[data-launch]").forEach((button) => button.addEventListener("click", () => {
+    if (button.dataset.paused === "yes") confirmResume(button.dataset.launch);
+    else openLaunch(button.dataset.launch);
+  }));
+}
+
+function modeEditor(mode, draft) {
+  if (mode === "visual") {
+    const data = { ...emptyVisual, ...(draft || {}) };
+    return `<div class="stack" data-mode-editor="visual">
+      <div class="form-grid"><label>Layout<select data-visual-field="template">${optionsHtml([["announcement", "Announcement"], ["newsletter", "Newsletter"], ["simple", "Simple"]], data.template)}</select></label><label>Accent<input data-visual-field="accent_color" type="color" value="${escapeHtml(data.accent_color)}" /></label></div>
+      <label>Brand name<input data-visual-field="brand_name" maxlength="80" value="${escapeHtml(data.brand_name)}" placeholder="CTN" /></label>
+      <label>Inbox preview<input data-visual-field="preheader" maxlength="160" value="${escapeHtml(data.preheader)}" placeholder="Short line after the subject" /></label>
+      <label>Headline<input data-visual-field="headline" maxlength="180" value="${escapeHtml(data.headline)}" placeholder="Headline" /></label>
+      <label>Body<textarea data-visual-field="body" rows="7" placeholder="Write the update. Leave sample copy out until you mean to send it.">${escapeHtml(data.body)}</textarea></label>
+      <div class="form-grid"><label>Button label<input data-visual-field="cta_label" maxlength="80" value="${escapeHtml(data.cta_label)}" placeholder="Learn more" /></label><label>Button link<input data-visual-field="cta_url" type="url" value="${escapeHtml(data.cta_url)}" placeholder="https://" /></label></div>
+      <label>Closing line<input data-visual-field="footer" maxlength="240" value="${escapeHtml(data.footer)}" placeholder="Why the recipient is receiving this" /></label>
+    </div>`;
+  }
+  if (mode === "rich_text") {
+    return `<div data-mode-editor="rich_text" class="stack">
+      <div class="rich-toolbar" role="toolbar" aria-label="Formatting">
+        <button type="button" data-rich="bold" aria-label="Bold"><strong>B</strong></button>
+        <button type="button" data-rich="italic" aria-label="Italic"><em>I</em></button>
+        <button type="button" data-rich="underline" aria-label="Underline"><span style="text-decoration:underline">U</span></button>
+        <button type="button" data-rich="insertUnorderedList" aria-label="Bulleted list">List</button>
+        <button type="button" id="insert-link">Link</button>
+        <label class="sr-only" for="merge-field">Insert merge field</label>
+        <select id="merge-field" aria-label="Insert merge field"><option value="">Merge field</option><option value="{{first_name}}">First name</option><option value="{{last_name}}">Last name</option><option value="{{email}}">Email</option><option value="{{unsubscribe_url}}">Opt-out link (optional)</option></select>
+      </div>
+      <div id="link-pop" class="stack" hidden><label>Link address<input id="link-url" type="url" placeholder="https://" /></label><button type="button" class="button small" id="apply-link">Insert link</button></div>
+      <div id="rich-editor" class="rich-editor" contenteditable="true" role="textbox" aria-multiline="true" aria-label="Campaign body" data-placeholder="Write the campaign. Sample text is not inserted for you.">${draft?.rich_html || ""}</div>
+    </div>`;
+  }
+  if (mode === "plain_text") {
+    return `<div data-mode-editor="plain_text"><label>Message<textarea id="plain-editor" class="plain-editor" rows="14" placeholder="Share the update here.">${escapeHtml(draft?.plain_text || "")}</textarea></label></div>`;
+  }
+  return `<div data-mode-editor="custom_html" class="stack"><label>HTML<textarea id="html-editor" class="code-area" rows="14" placeholder="Write the HTML body">${escapeHtml(draft?.html_body || "")}</textarea></label><label>Plain-text alternative<textarea id="html-text-fallback" rows="6" placeholder="Plain-text version of the message">${escapeHtml(draft?.text_body || "")}</textarea></label></div>`;
+}
+
+async function renderComposer(campaignId, token) {
+  if (!campaignId && !can("campaigns.manage")) {
+    document.querySelector("#content").innerHTML = `<section class="panel empty-state"><div><h2>Ask an administrator</h2><p>Your role can review campaigns. A marketer or administrator creates them.</p></div></section>`;
+    return;
+  }
+  setChrome("campaigns", campaignId ? "Campaign" : "New campaign");
+  document.querySelector("#content").innerHTML = `
+    <div class="composer-page">
+      <div class="section-lead"><div><h2>${campaignId ? "Campaign" : "New campaign"}</h2><p id="save-state" class="save-state">Loading…</p></div><a class="button ghost" href="#/campaigns">Back to campaigns</a></div>
+      <div class="composer-layout">
+        <form id="campaign-form" class="composer-fields stack">
+          <label>Campaign name<input name="name" maxlength="160" placeholder="Internal name" /></label>
+          <div id="audience-field"><label>To <span class="req">Required</span><select name="list_id" disabled><option>Loading lists…</option></select></label></div>
+          <p id="audience-meta" class="help"></p>
+          <label>Subject <span class="req">Required</span><input name="subject" maxlength="250" required placeholder="Subject line" /></label>
+          <p id="from-line" class="help"></p>
+          <div class="segmented" role="group" aria-label="Format">${contentModes.map((mode) => `<button type="button" data-mode="${mode.id}">${mode.title}</button>`).join("")}</div>
+          <div id="mode-editor-host"></div>
+          <section id="attachment-panel" class="stack">
+            <div id="attachment-list"></div>
+            <label class="button">Add attachment<input id="attachment-input" type="file" accept="${ATTACHMENT_ACCEPT}" multiple /></label>
+            <p class="help">PNG, JPG, GIF, WEBP, or PDF. Up to 3 files, 5 MB each, 10 MB total.</p>
+            <p id="attachment-error" class="form-error" role="alert"></p>
+          </section>
+          <div id="preflight" class="preflight"></div>
+          <p class="form-error" data-form-error role="alert"></p>
+          <div class="form-actions" id="composer-actions"></div>
+        </form>
+        <aside class="preview-pane stack">
+          <div class="preview-toolbar" role="group" aria-label="Preview">
+            <button type="button" data-preview-width="desktop" aria-pressed="true">Desktop</button>
+            <button type="button" data-preview-width="mobile" aria-pressed="false">Mobile</button>
+            <button type="button" data-preview-theme="light" aria-pressed="true">Light</button>
+            <button type="button" data-preview-theme="dark" aria-pressed="false">Dark</button>
+            <button type="button" id="preview-sample" aria-pressed="true">Sample contact</button>
+          </div>
+          <div id="preview-frame" class="preview-frame"><iframe title="Campaign preview" sandbox=""></iframe></div>
+          <p class="help">The frame is the mail client. The message keeps the colours you write. Sample contact uses Alex Rivera.</p>
+        </aside>
+      </div>
+    </div>`;
+  const form = document.querySelector("#campaign-form");
+  let lists = [];
+  let campaign = {};
+  try {
+    const [listData, campaignData] = await Promise.all([
+      getLists(),
+      campaignId ? api(`/api/campaigns/${campaignId}`) : Promise.resolve(null),
+    ]);
+    lists = listData;
+    campaign = campaignData?.campaign || {};
+  } catch (error) {
+    if (token !== state.renderToken) return;
+    form.querySelector("[data-form-error]").textContent = error.message;
+  }
+  if (token !== state.renderToken || !form.isConnected) return;
+  const stored = safeContentObject(campaign.content_json);
+  let selectedMode = contentModes.some((mode) => mode.id === campaign.content_mode) ? campaign.content_mode : "rich_text";
+  const drafts = {
+    visual: selectedMode === "visual" ? { ...emptyVisual, ...stored } : { ...emptyVisual },
+    rich_text: { schema_version: 1, rich_html: selectedMode === "rich_text" ? (stored.rich_html || "") : "" },
+    custom_html: { schema_version: 1, html_body: campaign.html_body || "", text_body: campaign.text_body || "" },
+    plain_text: { schema_version: 1, plain_text: selectedMode === "plain_text" ? (stored.plain_text || campaign.text_body || "") : "" },
+  };
+  let activeId = campaignId;
+  let attachments = Array.isArray(campaign.attachments) ? [...campaign.attachments] : [];
+  let pendingFiles = [];
+  let saveTimer = null;
+  let savedAt = 0;
+  const editable = can("campaigns.manage") && (!activeId || campaign.status === "draft" || (campaign.status === "paused" && can("campaigns.send")));
+  form.elements.name.value = campaign.name || "";
+  form.elements.subject.value = campaign.subject || "";
+  const fromName = campaign.from_name || state.session?.user?.name || "CTN";
+  const fromEmail = campaign.from_email || state.session?.enforced_from_email || "";
+  document.querySelector("#from-line").textContent = fromEmail
+    ? `From ${fromName} <${fromEmail}>${state.session?.reply_to_email ? ` · Reply-To ${state.session.reply_to_email}` : ""}`
+    : "From address is not configured. An administrator sets it in Sending setup.";
+
+  const paintAudience = () => {
+    const host = document.querySelector("#audience-field");
+    if (!lists.length) {
+      host.innerHTML = `<div class="notice"><div><strong>No lists yet.</strong><p>Create a list and add contacts before this campaign can be saved.</p><a class="button" href="#/contacts">Go to contacts</a></div></div>`;
+      return;
+    }
+    host.innerHTML = `<label>To <span class="req">Required</span><select name="list_id" required ${editable ? "" : "disabled"}>${listOptions(lists, campaign.list_id || lists[0].id)}</select></label>`;
+    host.querySelector("select")?.addEventListener("change", () => { markDirty(); paintAudienceMeta(); });
+    paintAudienceMeta();
+  };
+  const paintAudienceMeta = () => {
+    const select = form.querySelector('[name="list_id"]');
+    const list = lists.find((item) => item.id === select?.value);
+    const eligible = Number(campaign.eligible_recipients ?? NaN);
+    const meta = document.querySelector("#audience-meta");
+    if (!list) { meta.textContent = ""; return; }
+    const eligibleText = Number.isFinite(eligible) && activeId ? ` ${eligible.toLocaleString()} eligible to send right now.` : " Suppressed addresses are excluded when you launch.";
+    meta.textContent = `${Number(list.contact_count || 0).toLocaleString()} contacts on ${list.name}.${eligibleText}`;
+  };
+  const capture = () => {
+    if (selectedMode === "visual") {
+      const visual = { schema_version: 1 };
+      form.querySelectorAll("[data-visual-field]").forEach((field) => { visual[field.dataset.visualField] = field.value; });
+      drafts.visual = visual;
+    } else if (selectedMode === "rich_text") drafts.rich_text = { schema_version: 1, rich_html: sanitizeRichHtml(form.querySelector("#rich-editor")?.innerHTML || "") };
+    else if (selectedMode === "plain_text") drafts.plain_text = { schema_version: 1, plain_text: form.querySelector("#plain-editor")?.value || "" };
+    else drafts.custom_html = { schema_version: 1, html_body: form.querySelector("#html-editor")?.value || "", text_body: form.querySelector("#html-text-fallback")?.value || "" };
+  };
+  const currentContent = () => { capture(); return buildCampaignContent(selectedMode, drafts[selectedMode]); };
+  const paintEditor = () => {
+    document.querySelector("#mode-editor-host").innerHTML = modeEditor(selectedMode, drafts[selectedMode]);
+    document.querySelectorAll("[data-mode]").forEach((button) => button.setAttribute("aria-pressed", button.dataset.mode === selectedMode ? "true" : "false"));
+    const editor = form.querySelector("#rich-editor");
+    editor?.addEventListener("paste", (event) => {
+      event.preventDefault();
+      document.execCommand("insertText", false, event.clipboardData.getData("text/plain"));
+    });
+    form.querySelectorAll("[data-rich]").forEach((button) => button.addEventListener("click", () => {
+      editor?.focus();
+      document.execCommand(button.dataset.rich, false);
+      markDirty();
+    }));
+    document.querySelector("#insert-link")?.addEventListener("click", () => { document.querySelector("#link-pop").hidden = false; });
+    document.querySelector("#apply-link")?.addEventListener("click", () => {
+      const url = safeComposerUrl(document.querySelector("#link-url").value);
+      if (!url) return;
+      editor?.focus();
+      document.execCommand("createLink", false, url);
+      document.querySelector("#link-pop").hidden = true;
+      markDirty();
+    });
+    document.querySelector("#merge-field")?.addEventListener("change", (event) => {
+      if (!event.target.value) return;
+      insertAtCursor(editor || form.querySelector("textarea"), event.target.value);
+      event.target.value = "";
+      markDirty();
+    });
+    form.querySelectorAll("input, textarea, select").forEach((field) => field.addEventListener("input", markDirty));
+    editor?.addEventListener("input", markDirty);
+    refreshPreview();
+  };
+  const insertAtCursor = (field, text) => {
+    if (!field) return;
+    if (field.isContentEditable) {
+      field.focus();
+      document.execCommand("insertText", false, text);
+      return;
+    }
+    const start = field.selectionStart ?? field.value.length;
+    field.setRangeText(text, start, field.selectionEnd ?? start, "end");
+  };
+  const refreshPreview = () => {
+    const content = currentContent();
+    const sample = document.querySelector("#preview-sample")?.getAttribute("aria-pressed") === "true";
+    let html = content.html_body;
+    if (sample) {
+      html = html.replaceAll("{{first_name}}", "Alex").replaceAll("{{last_name}}", "Rivera").replaceAll("{{email}}", "alex@example.com").replaceAll("{{unsubscribe_url}}", "#unsubscribe");
+    }
+    const frame = document.querySelector("#preview-frame iframe");
+    if (frame) frame.srcdoc = `<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src data: https:;">${html}`;
+    paintPreflight(content);
+  };
+  const paintPreflight = (content) => {
+    const subject = form.elements.subject.value.trim();
+    const checks = [];
+    checks.push([Boolean(subject), subject ? "Subject is set" : "Add a subject"]);
+    checks.push([!/^(re|fw|fwd)\s*:/i.test(subject), "Subject is not a reply or forward"]);
+    checks.push([Boolean(form.querySelector('[name="list_id"]')?.value), "Audience is selected"]);
+    checks.push([Boolean(content.text_body?.trim()), content.text_body?.trim() ? "Plain-text part is present" : "Add a plain-text part"]);
+    const blob = `${subject}\n${content.html_body}\n${content.text_body}`;
+    const placeholder = PLACEHOLDER_PATTERNS.find(([pattern]) => pattern.test(blob));
+    checks.push([!placeholder, placeholder ? `Replace ${placeholder[1]}` : "No placeholder copy detected"]);
+    const unknown = [...blob.matchAll(/{{\s*([a-zA-Z0-9_]+)\s*}}/g)].map((match) => match[1]).filter((field) => !["first_name", "last_name", "email", "unsubscribe_url"].includes(field));
+    checks.push([unknown.length === 0, unknown.length ? `Unknown merge field: ${unknown[0]}` : "Merge fields are recognised"]);
+    const archive = [...attachments, ...pendingFiles].some((file) => /\.(zip|rar|7z|gz)$/i.test(file.filename || file.name || ""));
+    checks.push([!archive, archive ? "Remove archive attachments" : "No archive attachments"]);
+    document.querySelector("#preflight").innerHTML = `<strong>Before you send</strong><ul class="checklist">${checks.map(([ok, label]) => `<li><span class="${ok ? "done" : ""}">${ok ? "Pass" : "Check"} · ${escapeHtml(label)}</span></li>`).join("")}</ul>`;
+  };
+  const totalCount = () => attachments.length + pendingFiles.length;
+  const totalBytes = () => attachments.reduce((sum, file) => sum + Number(file.byte_size || 0), 0) + pendingFiles.reduce((sum, file) => sum + Number(file.size || 0), 0);
+  const paintFiles = () => {
+    const files = activeId ? attachments.map((file) => ({ id: file.id, name: file.filename, size: file.byte_size, pending: false })) : pendingFiles.map((file, index) => ({ id: index, name: file.name, size: file.size, pending: true }));
+    document.querySelector("#attachment-list").innerHTML = files.length ? `<ul class="chips">${files.map((file) => `<li class="chip"><span>${escapeHtml(file.name)}</span><span class="nums">${escapeHtml(formatByteSize(file.size))}</span>${editable ? `<button type="button" class="icon-button" data-remove-file="${escapeHtml(file.id)}" data-pending="${file.pending}" aria-label="Remove ${escapeHtml(file.name)}">${icon("close")}</button>` : ""}</li>`).join("")}</ul>` : "";
+    const input = document.querySelector("#attachment-input");
+    if (input) input.disabled = !editable || totalCount() >= ATTACHMENT_MAX_COUNT;
+  };
+  const markDirty = () => {
+    if (!editable) return;
+    state.composerDirty = true;
+    document.querySelector("#save-state").textContent = "Unsaved changes";
+    refreshPreview();
+    clearTimeout(saveTimer);
+    saveTimer = setTimeout(() => saveComposer(true), 1500);
+  };
+  const setSaved = () => {
+    savedAt = Date.now();
+    state.composerDirty = false;
+    document.querySelector("#save-state").textContent = "Saved · just now";
+  };
+  const saveComposer = async (auto) => {
+    if (!editable) return false;
+    capture();
+    const content = buildCampaignContent(selectedMode, drafts[selectedMode]);
+    const subject = form.elements.subject.value.trim();
+    const listId = form.querySelector('[name="list_id"]')?.value || "";
+    if (!subject || !listId || !fromName || !fromEmail) {
+      if (!auto) form.querySelector("[data-form-error]").textContent = "Name, subject, sender, and list are required.";
+      return false;
+    }
+    const payload = {
+      name: (form.elements.name.value.trim() || subject).slice(0, 160),
+      subject,
+      list_id: listId,
+      from_name: fromName,
+      from_email: fromEmail,
+      content_mode: selectedMode,
+      content_json: content.content_json,
+      html_body: content.html_body,
+      text_body: content.text_body,
+    };
+    try {
+      const creating = !activeId;
+      const result = await api(creating ? "/api/campaigns" : `/api/campaigns/${activeId}`, { method: creating ? "POST" : "PATCH", body: payload });
+      if (creating && result?.campaign?.id) {
+        activeId = result.campaign.id;
+        history.replaceState(null, "", `#/campaigns/${activeId}`);
+        state.route = readRoute();
+        state.pageKey = pageKey(state.route);
+        const uploaded = await uploadPending();
+        if (!uploaded) return false;
+      }
+      invalidate("campaigns");
+      setSaved();
+      if (!auto) toast(creating ? "Draft saved" : "Campaign updated");
+      form.querySelector("[data-form-error]").textContent = "";
+      paintActions();
+      return true;
+    } catch (error) {
+      form.querySelector("[data-form-error]").textContent = error.message;
+      return false;
+    }
+  };
+  const uploadPending = async () => {
+    const queued = [...pendingFiles];
+    pendingFiles = [];
+    for (let index = 0; index < queued.length; index += 1) {
+      try {
+        const body = new FormData();
+        body.append("file", queued[index]);
+        const result = await api(`/api/campaigns/${activeId}/attachments`, { method: "POST", body });
+        attachments = result.attachments || [];
+      } catch (error) {
+        pendingFiles = queued.slice(index);
+        document.querySelector("#attachment-error").textContent = error.message;
+        paintFiles();
+        return false;
+      }
+    }
+    paintFiles();
+    return true;
+  };
+  const paintActions = () => {
+    const actions = document.querySelector("#composer-actions");
+    const launch = can("campaigns.send") && activeId && ["draft", "paused"].includes(campaign.status || "draft")
+      ? `<button type="button" class="button primary" id="composer-launch">${campaign.status === "paused" ? "Return to draft" : "Launch"}</button>`
+      : "";
+    const ask = can("campaigns.manage") && !can("campaigns.send")
+      ? `<p class="help">Ask an administrator to send a test or launch this campaign. You can keep editing the draft.</p>`
+      : "";
+    actions.innerHTML = `${ask}${editable ? `<button type="button" class="button" id="use-starter">Insert starter</button><button class="button primary" type="submit">Save draft</button>` : ""}${can("campaigns.send") && activeId ? `<button type="button" class="button" id="composer-test">Send test</button>` : ""}${launch}`;
+    document.querySelector("#use-starter")?.addEventListener("click", () => {
+      if (selectedMode === "rich_text") drafts.rich_text.rich_html = starterRich;
+      if (selectedMode === "plain_text") drafts.plain_text.plain_text = starterPlain;
+      if (selectedMode === "custom_html") { drafts.custom_html.html_body = starterHtml; drafts.custom_html.text_body = starterPlain; }
+      if (selectedMode === "visual") drafts.visual = { ...emptyVisual, headline: "An update from CTN", body: "Share the update here.", cta_label: "Learn more", cta_url: "https://ctn-sk.com", footer: "You are receiving this because you opted in." };
+      paintEditor();
+      markDirty();
+    });
+    document.querySelector("#composer-test")?.addEventListener("click", () => openTestSend(activeId));
+    document.querySelector("#composer-launch")?.addEventListener("click", () => {
+      if (campaign.status === "paused") confirmResume(activeId);
+      else openLaunch(activeId);
+    });
+  };
+  paintAudience();
+  paintEditor();
+  form.elements.name?.addEventListener("input", markDirty);
+  form.elements.subject?.addEventListener("input", markDirty);
+  paintFiles();
+  paintActions();
+  document.querySelector("#save-state").textContent = activeId ? "Saved" : "Not saved yet";
+  document.querySelectorAll("[data-mode]").forEach((button) => button.addEventListener("click", () => {
+    if (!editable || button.dataset.mode === selectedMode) return;
+    capture();
+    selectedMode = button.dataset.mode;
+    paintEditor();
+    markDirty();
+  }));
+  document.querySelectorAll("[data-preview-width]").forEach((button) => button.addEventListener("click", () => {
+    document.querySelectorAll("[data-preview-width]").forEach((item) => item.setAttribute("aria-pressed", item === button ? "true" : "false"));
+    document.querySelector("#preview-frame").classList.toggle("mobile", button.dataset.previewWidth === "mobile");
+  }));
+  document.querySelectorAll("[data-preview-theme]").forEach((button) => button.addEventListener("click", () => {
+    document.querySelectorAll("[data-preview-theme]").forEach((item) => item.setAttribute("aria-pressed", item === button ? "true" : "false"));
+    document.querySelector("#preview-frame").classList.toggle("dark", button.dataset.previewTheme === "dark");
+  }));
+  document.querySelector("#preview-sample")?.addEventListener("click", (event) => {
+    const pressed = event.currentTarget.getAttribute("aria-pressed") !== "true";
+    event.currentTarget.setAttribute("aria-pressed", pressed ? "true" : "false");
+    refreshPreview();
+  });
+  document.querySelector("#attachment-input")?.addEventListener("change", async (event) => {
+    const error = document.querySelector("#attachment-error");
+    error.textContent = "";
+    for (const file of [...event.target.files]) {
+      if (file.size > ATTACHMENT_MAX_FILE_BYTES) { error.textContent = `"${file.name}" is larger than 5 MB.`; break; }
+      if (totalCount() >= ATTACHMENT_MAX_COUNT) { error.textContent = "A campaign can have at most 3 attachments."; break; }
+      if (totalBytes() + file.size > ATTACHMENT_MAX_TOTAL_BYTES) { error.textContent = "Attachments cannot exceed 10 MB in total."; break; }
+      if (!activeId) pendingFiles.push(file);
+      else {
+        try {
+          const body = new FormData();
+          body.append("file", file);
+          const result = await api(`/api/campaigns/${activeId}/attachments`, { method: "POST", body });
+          attachments = result.attachments || [];
+          toast("Attachment added");
+        } catch (uploadError) {
+          error.textContent = uploadError.message;
+          break;
+        }
+      }
+    }
+    event.target.value = "";
+    paintFiles();
+    refreshPreview();
+  });
+  document.querySelector("#attachment-list")?.addEventListener("click", async (event) => {
+    const button = event.target.closest("[data-remove-file]");
+    if (!button) return;
+    if (button.dataset.pending === "true") pendingFiles.splice(Number(button.dataset.removeFile), 1);
+    else {
+      try {
+        const result = await api(`/api/campaigns/${activeId}/attachments/${button.dataset.removeFile}`, { method: "DELETE", body: {} });
+        attachments = result.attachments || [];
+        toast("Attachment removed");
+      } catch (error) { toast(error.message, "error"); }
+    }
+    paintFiles();
+  });
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    clearTimeout(saveTimer);
+    await saveComposer(false);
+  });
+  state.composerClock = setInterval(() => {
+    const label = document.querySelector("#save-state");
+    if (!savedAt || state.composerDirty || !label) return;
+    const seconds = Math.max(1, Math.round((Date.now() - savedAt) / 1000));
+    label.textContent = seconds < 60 ? `Saved · ${seconds}s ago` : `Saved · ${relativeTime(savedAt)}`;
+  }, 5000);
+  if (!editable) form.querySelectorAll("input, textarea, select, [contenteditable]").forEach((field) => { field.setAttribute("disabled", "true"); field.setAttribute("contenteditable", "false"); });
+}
+
+function openTestSend(campaignId) {
+  if (!can("campaigns.send")) return;
+  const live = isLive();
+  openModal("Send a test", "Campaign", "md", `<p class="help">Loading campaign…</p>`);
+  api(`/api/campaigns/${campaignId}`).then(({ campaign }) => {
+    openModal("Send a test", "Campaign", "md", `
+      <form id="test-send-form" class="stack">
+        <div class="${live ? "notice warning" : "notice"}"><div><strong>${live ? "This sends a real test through your sending service." : "Preview captures the campaign in Deliveries. Nothing is mailed out."}</strong></div></div>
+        <p>${escapeHtml(campaign.name)} · ${escapeHtml(campaign.subject || "")}</p>
+        <label>Test recipient <span class="req">Required</span><input name="email" type="email" required value="${escapeHtml(state.session?.user?.email || "")}" autocomplete="email" /><span class="help">${live ? "The address must be on the test allowlist. It counts toward today’s limit." : "It counts toward today’s limit. Special-use domains are rejected."}</span></label>
+        ${live ? `<label class="check"><input type="checkbox" name="ack_live" required /><span>I understand this sends a real email.</span></label>` : ""}
+        <p class="form-error" role="alert"></p>
+        <div class="form-actions"><button type="button" class="button" data-close-modal>Cancel</button><button class="button ${live ? "danger" : "primary"}" type="submit">${live ? "Send test" : "Capture test"}</button></div>
+      </form>`);
+    document.querySelector("#test-send-form").addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const form = event.currentTarget;
+      const email = form.elements.email.value.trim();
+      const result = await submitForm(form, () => api(`/api/campaigns/${campaignId}/test-send`, { method: "POST", body: { email } }), live ? `Test sent to ${email}` : `Test captured for ${email}`);
+      if (!result) return;
+      closeModal();
+      go("deliveries", "", new URLSearchParams({ campaign_id: campaignId }));
+    });
+  }).catch((error) => toast(error.message, "error"));
+}
+
+function openLaunch(campaignId) {
+  openModal("Launch campaign", "Confirm", "md", `<p class="help">Loading audience…</p>`);
+  api(`/api/campaigns/${campaignId}`).then(({ campaign }) => {
+    const live = isLive();
+    const eligible = Number(campaign.eligible_recipients || 0);
+    const list = state.lists.find((item) => item.id === campaign.list_id);
+    const daily = Number(state.summary?.daily_limit || state.session?.daily_limit || 0);
+    const sent = Number(state.summary?.counts?.sent_today ?? state.session?.sent_today ?? 0);
+    const remaining = Math.max(0, daily - sent);
+    const covered = Math.min(eligible, remaining);
+    const minutes = Math.ceil((covered / PROVIDER_HOURLY_CAP) * 60);
+    openModal(live ? "Send this campaign?" : "Capture this campaign?", "Confirm", "md", `
+      <div class="stack" id="launch-confirm">
+        <div class="${live ? "notice warning" : "notice"}"><div><strong>${live ? "Eligible recipients will receive a real email." : "Preview stores each delivery in this workspace. Nothing is mailed out."}</strong></div></div>
+        ${eligible === 0 ? `<div class="notice warning"><div>No eligible recipients on this list. The launch will finish with nothing sent.</div></div>` : ""}
+        <dl class="message-meta">
+          <dt>Campaign</dt><dd>${escapeHtml(campaign.name)}</dd>
+          <dt>To</dt><dd>${escapeHtml(campaign.list_name || "")}${list ? ` · ${Number(list.contact_count || 0).toLocaleString()} on the list` : ""}</dd>
+          <dt>Eligible</dt><dd class="nums">${eligible.toLocaleString()} active contacts, suppressions excluded</dd>
+          <dt>From</dt><dd>${escapeHtml(campaign.from_name || "")} &lt;${escapeHtml(campaign.from_email || "")}&gt;</dd>
+          <dt>Reply-To</dt><dd>${escapeHtml(state.session?.reply_to_email || "Not set")}</dd>
+          <dt>Time</dt><dd>${eligible === 0 ? "Nothing to send" : `About ${minutes.toLocaleString()} min at ${PROVIDER_HOURLY_CAP}/hour, if today’s remaining ${remaining.toLocaleString()} covers this send.`}</dd>
+        </dl>
+        ${live ? `<label class="check"><input id="launch-ack" type="checkbox" /><span>I understand this emails real recipients.</span></label><label>Type SEND to confirm<input id="launch-type" autocomplete="off" /></label>` : ""}
+        <p id="launch-error" class="form-error" role="alert"></p>
+        <div class="form-actions"><button type="button" class="button" data-close-modal>Cancel</button><button type="button" class="button ${live ? "danger" : "primary"}" id="confirm-launch" ${live ? "disabled" : ""}>${live ? "Send campaign" : "Capture campaign"}</button></div>
+      </div>`);
+    const confirm = document.querySelector("#confirm-launch");
+    const sync = () => {
+      if (!live) return;
+      confirm.disabled = !(document.querySelector("#launch-ack").checked && document.querySelector("#launch-type").value.trim() === "SEND");
+    };
+    document.querySelector("#launch-ack")?.addEventListener("change", sync);
+    document.querySelector("#launch-type")?.addEventListener("input", sync);
+    confirm.addEventListener("click", async () => {
+      setBusy(confirm, true);
+      try {
+        const result = await api(`/api/campaigns/${campaignId}/launch`, { method: "POST", body: {} });
+        closeModal();
+        invalidate("campaigns");
+        toast(launchOutcome(result));
+        go("campaigns", "", null, true);
+      } catch (error) {
+        document.querySelector("#launch-error").textContent = error.message;
+        setBusy(confirm, false);
+        sync();
+      }
+    });
+  }).catch((error) => toast(error.message, "error"));
+}
+
+function launchOutcome(result) {
+  const queued = Number(result?.queued ?? 0);
+  const sent = Number(result?.sent ?? queued);
+  const failed = Number(result?.failed ?? 0);
+  if (isLive()) return failed ? `Sending: ${queued} queued · ${failed} failed` : `Sending to ${queued} recipient${queued === 1 ? "" : "s"}`;
+  if (failed) return `Preview finished: ${sent} captured · ${failed} failed`;
+  if (!sent) return "Preview finished. No eligible recipients.";
+  return `Preview captured ${sent} ${sent === 1 ? "delivery" : "deliveries"}`;
+}
+
+function confirmResume(id) {
+  openModal("Return to draft?", "Campaign", "sm", `
+    <div class="stack"><p>This puts the campaign back in draft so it can be edited. It does not continue a send that already started.</p>
+    <div class="form-actions"><button type="button" class="button" data-close-modal>Cancel</button><button type="button" class="button primary" id="confirm-resume">Return to draft</button></div></div>`);
+  document.querySelector("#confirm-resume").addEventListener("click", async () => {
+    closeModal();
+    await campaignPost("resume", id);
+  });
+}
+
+async function campaignPost(action, id) {
+  try {
+    const result = await api(`/api/campaigns/${id}/${action}`, { method: "POST", body: {} });
+    invalidate("campaigns");
+    if (action === "launch") toast(launchOutcome(result));
+    else if (action === "pause") toast(isLive() ? "Unsent recipients cancelled" : "Delivery paused");
+    else if (action === "resume") toast("Campaign returned to draft");
+    go("campaigns", "", null, true);
+  } catch (error) {
+    toast(error.message, "error");
+  }
+}
+
+async function renderDeliveries(token) {
+  const params = state.route.params;
+  const key = `deliveries:${params.toString()}`;
+  if (cache.get(key)) paintDeliveries(cache.get(key), params);
+  else setLoading();
+  setRefreshing(Boolean(cache.get(key)));
+  const data = await api(`/api/messages${params.toString() ? `?${params}` : ""}`);
+  if (token !== state.renderToken) return;
+  cache.set(key, data);
+  paintDeliveries(data, params);
+  setRefreshing(false);
+}
+
+function paintDeliveries(data, params) {
+  const messages = data.messages || [];
+  const filtering = ["q", "status", "from", "to", "campaign_id"].some((key) => params.get(key));
+  const rows = messages.map((message) => `<tr>
+    <td data-label="Recipient" class="email">${escapeHtml(message.to_email)}</td>
+    <td data-label="Campaign">${escapeHtml(message.campaign_name || "Test")}<span class="subtext">${escapeHtml(message.subject || "")}</span></td>
+    <td data-label="Status">${statusPill(message.status)}</td>
+    <td data-label="Submitted">${timeHtml(message.created_at)}</td>
+    <td class="table-actions" data-label=""><a class="button small ghost" href="#/deliveries/${encodeURIComponent(message.id)}">View</a></td>
+  </tr>`).join("");
+  const filters = filtering || messages.length ? `<div class="toolbar">
+      ${searchField("delivery-search", "Search deliveries", params.get("q") || "", "Recipient, subject, or campaign")}
+      <label>Status<select id="delivery-status">${optionsHtml([["", "All statuses"], ...FILTER_STATUSES.map((value) => [value, statusLabel(value)])], params.get("status") || "")}</select></label>
+      <div class="date-range"><label>From<input id="delivery-from" type="date" value="${escapeHtml(params.get("from") || "")}" /></label><label>To<input id="delivery-to" type="date" value="${escapeHtml(params.get("to") || "")}" /></label></div>
+    </div>` : "";
+  document.querySelector("#content").innerHTML = `
+    <div class="section-lead"><div><h2 class="nums">${messages.length.toLocaleString()} ${messages.length === 1 ? "delivery" : "deliveries"}</h2><p>Submitted means Spacemail accepted the message over SMTP. It is not proof of inbox placement.</p></div>${filtering ? `<a class="button" href="#/deliveries">Clear filters</a>` : ""}</div>
+    ${messages.length || filtering ? deliveryLegend() : ""}
+    ${filters}
+    <section class="panel">${messages.length ? `<div class="table-wrap"><table class="responsive"><thead><tr><th>Recipient</th><th>Campaign</th><th>Status</th><th>Submitted</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>` : `<div class="empty-state"><div><h2>${filtering ? "No matching deliveries" : "No deliveries yet"}</h2><p>${filtering ? "Clear a filter to see more." : "A test or a launch will record each recipient here."}</p></div></div>`}</section>`;
+  bindFilterInput("delivery-search", "q", "deliveries");
+  document.querySelector("#delivery-status")?.addEventListener("change", (event) => setParam("deliveries", "status", event.target.value));
+  document.querySelector("#delivery-from")?.addEventListener("change", (event) => setParam("deliveries", "from", event.target.value));
+  document.querySelector("#delivery-to")?.addEventListener("change", (event) => setParam("deliveries", "to", event.target.value));
+}
+
+async function renderMailbox(token) {
+  setChrome("mailbox");
+  const params = state.route.params;
+  const folder = params.get("folder") === "sent" ? "sent" : "inbox";
+  document.querySelector("#content").innerHTML = `<div class="section-lead"><div><h2>Mailbox</h2><p>Reading the Spacemail mailbox over IMAP. Deliveries is the local send log.</p></div></div><section class="panel"><p class="help">Loading ${folder}…</p></section>`;
+  let data;
+  try {
+    data = await api(`/api/mailbox?folder=${encodeURIComponent(folder)}`);
+  } catch (error) {
+    if (token !== state.renderToken) return;
+    document.querySelector("#content").innerHTML = `
+      <div class="section-lead"><div><h2>Mailbox</h2><p>Inbox and Sent from the Spacemail mailbox.</p></div></div>
+      <div class="notice warning"><div><strong>Mailbox unavailable.</strong><p>${escapeHtml(error.message)}</p></div></div>`;
+    return;
+  }
+  if (token !== state.renderToken) return;
+  const messages = data.messages || [];
+  const tabs = `
+    <div class="rail" role="tablist" aria-label="Mailbox folders">
+      <a href="#/mailbox?folder=inbox" ${folder === "inbox" ? 'aria-current="true"' : ""}>Inbox</a>
+      <a href="#/mailbox?folder=sent" ${folder === "sent" ? 'aria-current="true"' : ""}>Sent</a>
+    </div>`;
+  const rows = messages.map((message) => `
+    <tr>
+      <td data-label="From">${escapeHtml(message.from || "—")}</td>
+      <td data-label="To">${escapeHtml(message.to || "—")}</td>
+      <td data-label="Subject"><a href="#/mailbox/${encodeURIComponent(message.uid)}?folder=${encodeURIComponent(folder)}">${escapeHtml(message.subject || "(no subject)")}</a></td>
+      <td data-label="When">${timeHtml(message.date, { relative: true })}</td>
+    </tr>`).join("");
+  document.querySelector("#content").innerHTML = `
+    <div class="section-lead"><div><h2>${folder === "sent" ? "Sent" : "Inbox"}</h2><p>Latest ${messages.length} messages from Spacemail.</p></div></div>
+    ${tabs}
+    <section class="panel">${messages.length
+      ? `<div class="table-wrap"><table class="responsive"><thead><tr><th>From</th><th>To</th><th>Subject</th><th>When</th></tr></thead><tbody>${rows}</tbody></table></div>`
+      : `<div class="empty-state"><div><h2>No messages in ${folder}</h2><p>Messages appear here after Spacemail stores them in this folder.</p></div></div>`}</section>`;
+}
+
+async function openMailboxMessage(uid) {
+  const folder = state.route.params.get("folder") === "sent" ? "sent" : "inbox";
+  openDrawer("Message", folder === "sent" ? "Sent" : "Inbox", `<p class="help">Loading message…</p>`);
+  try {
+    const { message } = await api(`/api/mailbox/message?folder=${encodeURIComponent(folder)}&uid=${encodeURIComponent(uid)}`);
+    const body = message.html
+      ? `<iframe class="email-preview" title="Message body" sandbox="" srcdoc="${escapeHtml(`<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src data: https:;">${message.html}`)}"></iframe>`
+      : `<pre class="code-area" style="white-space:pre-wrap">${escapeHtml(message.text || "")}</pre>`;
+    openDrawer(message.subject || "Message", folder === "sent" ? "Sent" : "Inbox", `
+      <dl class="message-meta">
+        <dt>From</dt><dd>${escapeHtml(message.from || "—")}</dd>
+        <dt>To</dt><dd>${escapeHtml(message.to || "—")}</dd>
+        <dt>When</dt><dd>${timeHtml(message.date)}</dd>
+      </dl>
+      <div class="stack">${body}</div>
+      <div class="form-actions"><a class="button" href="#/mailbox?folder=${encodeURIComponent(folder)}">Back to ${folder}</a></div>`);
+  } catch (error) {
+    openDrawer("Message", "Error", `<div class="notice warning"><div>${escapeHtml(error.message)}</div></div>`);
+  }
+}
+
+function setParam(section, key, value) {
+  const params = new URLSearchParams(state.route.params);
+  if (value) params.set(key, value); else params.delete(key);
+  go(section, "", params);
+}
+
+function bindFilterInput(id, key, section) {
+  const input = document.querySelector(`#${id}`);
+  let timer;
+  input?.addEventListener("input", () => {
+    clearTimeout(timer);
+    timer = setTimeout(() => setParam(section, key, input.value.trim()), 280);
+  });
+  if (input?.value) {
+    input.focus();
+    input.setSelectionRange(input.value.length, input.value.length);
+  }
+}
+
+async function openDelivery(messageId) {
+  openDrawer("Delivery", "Outcome", `<p class="help">Loading delivery…</p>`);
+  try {
+    const { message } = await api(`/api/messages/${messageId}`);
+    const events = [
+      ["Recorded", message.created_at],
+      message.error ? ["Error", message.error] : null,
+    ].filter(Boolean);
+    openDrawer(message.subject || "Delivery", "Outcome", `
+      <dl class="message-meta">
+        <dt>Recipient</dt><dd class="email">${escapeHtml(message.to_email)}</dd>
+        <dt>Campaign</dt><dd>${escapeHtml(message.campaign_name || "Test")}</dd>
+        <dt>From</dt><dd>${escapeHtml(message.from_email || "")}</dd>
+        <dt>Status</dt><dd>${statusPill(message.status)}<span class="help">${escapeHtml(statusMeaning(message.status))}</span></dd>
+      </dl>
+      <h3>Timeline</h3>
+      <ul class="timeline">${events.map(([label, value]) => `<li><span class="marker"></span><div><strong>${escapeHtml(label)}</strong><p class="help">${typeof value === "string" && value.includes("T") ? timeHtml(value) : escapeHtml(value)}</p></div></li>`).join("")}</ul>
+      <div class="message-preview"><iframe title="Rendered delivery" sandbox=""></iframe></div>
+      ${message.unsubscribe_token ? `<div class="form-actions"><a class="button" href="/u/${encodeURIComponent(message.unsubscribe_token)}" target="_blank" rel="noopener">Open unsubscribe</a></div>` : ""}`);
+    const frame = document.querySelector(".drawer-body iframe");
+    if (frame) frame.srcdoc = `<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src data:" >${message.html_body || ""}`;
+  } catch (error) {
+    openDrawer("Delivery", "Outcome", `<p class="form-error">${escapeHtml(error.message)}</p>`);
+  }
+}
+
+async function renderSuppressions(token) {
+  if (cache.get("suppressions")) paintSuppressions(cache.get("suppressions").suppressions || []);
+  else setLoading();
+  const data = await api("/api/suppressions");
+  if (token !== state.renderToken) return;
+  cache.set("suppressions", data);
+  paintSuppressions(data.suppressions || []);
+  setRefreshing(false);
+}
+
+function paintSuppressions(entries) {
+  const params = state.route.params;
+  const q = (params.get("q") || "").toLowerCase();
+  const reason = params.get("reason") || "";
+  const rows = entries.filter((entry) => (!q || String(entry.email).toLowerCase().includes(q)) && (!reason || entry.reason === reason));
+  const reasons = [...new Set(entries.map((entry) => entry.reason).filter(Boolean))];
+  document.querySelector("#content").innerHTML = `
+    <div class="section-lead"><div><h2 class="nums">${entries.length.toLocaleString()} suppressed</h2><p>These addresses are excluded from every campaign.</p></div>${can("suppressions.manage") ? `<button type="button" class="button danger" id="add-suppression">Suppress addresses</button>` : ""}</div>
+    <div class="toolbar">
+      ${searchField("suppression-search", "Search suppressions", params.get("q") || "", "Search addresses")}
+      <label>Reason<select id="suppression-reason">${optionsHtml([["", "All reasons"], ...reasons.map((value) => [value, statusLabel(value)])], reason)}</select></label>
+    </div>
+    <section class="panel">${rows.length ? `<div class="table-wrap"><table class="responsive"><thead><tr><th>Address</th><th>Reason</th><th>Source</th><th>Added</th><th></th></tr></thead><tbody>${rows.map((entry) => `<tr>
+      <td data-label="Address" class="email">${escapeHtml(entry.email)}</td>
+      <td data-label="Reason">${statusPill(entry.reason)}</td>
+      <td data-label="Source">${escapeHtml(titleCase(entry.source || ""))}</td>
+      <td data-label="Added">${timeHtml(entry.created_at)}</td>
+      <td class="table-actions" data-label="">${entry.reason === "manual" && can("suppressions.manage") ? `<button type="button" class="button small danger" data-remove-suppression="${escapeHtml(entry.email)}">Remove</button>` : `<span class="help">Kept</span>`}</td>
+    </tr>`).join("")}</tbody></table></div>` : `<div class="empty-state"><div><h2>No suppressions</h2><p>Unsubscribes, bounces, complaints, and manual exclusions appear here.</p></div></div>`}</section>`;
+  bindFilterInput("suppression-search", "q", "suppressions");
+  document.querySelector("#suppression-reason")?.addEventListener("change", (event) => setParam("suppressions", "reason", event.target.value));
+  document.querySelector("#add-suppression")?.addEventListener("click", openSuppressionModal);
+  document.querySelectorAll("[data-remove-suppression]").forEach((button) => button.addEventListener("click", () => openRemoveSuppression(button.dataset.removeSuppression)));
+}
+
+function openSuppressionModal() {
+  openModal("Suppress addresses", "Safety", "md", `
+    <form id="suppression-form" class="stack">
+      <div class="notice warning"><div>This is a global manual exclusion. Unsubscribes come from the recipient link. Existing bounce and complaint rows stay protected.</div></div>
+      <label>Email addresses <span class="req">Required</span><textarea name="emails" rows="5" required placeholder="one@example.com, two@example.com"></textarea><span class="help">Separate addresses with commas, spaces, or new lines.</span></label>
+      <p class="help">A written reason is not stored yet. These records are saved as manual exclusions.</p>
+      <p class="form-error" role="alert"></p>
+      <div class="form-actions"><button type="button" class="button" data-close-modal>Cancel</button><button class="button danger" type="submit">Suppress globally</button></div>
+    </form>`);
+  document.querySelector("#suppression-form").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const form = event.currentTarget;
+    const emails = [...new Set(form.emails.value.split(/[\s,;]+/).map((value) => value.trim().toLowerCase()).filter(Boolean))];
+    const invalid = emails.filter((email) => !validEmail(email));
+    if (!emails.length || invalid.length) {
+      form.querySelector(".form-error").textContent = invalid.length ? `Check ${invalid[0]}` : "Enter at least one email address.";
+      return;
+    }
+    const submit = form.querySelector('[type="submit"]');
+    setBusy(submit, true);
+    const failed = [];
+    for (const email of emails) {
+      try { await api("/api/suppressions", { method: "POST", body: { email, reason: "manual" } }); }
+      catch (error) { failed.push(`${email}: ${error.message}`); }
+    }
+    setBusy(submit, false);
+    if (failed.length === emails.length) {
+      form.querySelector(".form-error").textContent = failed[0];
+      return;
+    }
+    invalidate("suppressions");
+    closeModal();
+    toast(failed.length ? `Suppressed ${emails.length - failed.length}. ${failed.length} failed.` : `Suppressed ${emails.length} ${emails.length === 1 ? "address" : "addresses"}`);
+    go("suppressions", "", null, true);
+  });
+}
+
+function openRemoveSuppression(email) {
+  openModal("Remove suppression", "Safety", "md", `
+    <form id="remove-suppression-form" class="stack">
+      <div class="notice warning"><div><strong>${escapeHtml(email)}</strong> will become active again and can be included in campaigns. Bounce, complaint, and unsubscribe records cannot be cleared here.</div></div>
+      <p class="form-error" role="alert"></p>
+      <div class="form-actions"><button type="button" class="button" data-close-modal>Cancel</button><button class="button danger" type="submit">Remove suppression</button></div>
+    </form>`);
+  document.querySelector("#remove-suppression-form").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const form = event.currentTarget;
+    const result = await submitForm(form, () => api(`/api/suppressions/${encodeURIComponent(email)}`, { method: "DELETE", body: {} }), "Suppression removed");
+    if (!result) return;
+    invalidate("suppressions");
+    closeModal();
+    go("suppressions", "", null, true);
+  });
+}
+
+async function renderSending(token) {
+  setLoading();
+  const [data, summary] = await Promise.all([
+    api("/api/production-readiness"),
+    api("/api/summary").catch(() => state.summary),
+  ]);
+  if (token !== state.renderToken) return;
+  if (summary) { state.summary = summary; updateStatus(summary); }
+  const checks = data.checks || [];
+  const ready = checks.filter((check) => check.status === "ready").length;
+  const titles = {
+    vercel_runtime: "Application host",
+    postgres_database: "Database",
+    launch_job_cron: "Scheduled sending",
+    sender_identity: "Sender address",
+    spacemail_smtp: "Sending service",
+    delivery_health: "Delivery health",
+  };
+  const hint = (check) => {
+    if (check.status === "ready") return "Passing";
+    if (check.id === "launch_job_cron") return "Scheduled sending is not configured.";
+    if (check.id === "spacemail_smtp") return "The sending service is not ready for live email.";
+    if (check.id === "sender_identity") return "Sender address still needs setup.";
+    return "Needs attention.";
+  };
+  const health = data.delivery_health || {};
+  const limit = Number(summary?.daily_limit || state.session?.daily_limit || 0);
+  const sent = Number(summary?.counts?.sent_today || 0);
+  const width = limit ? Math.min(100, Math.round((sent / limit) * 100)) : 0;
+  const liveReady = Boolean(data.ready_for_live_sending);
+  document.querySelector("#content").innerHTML = `
+    <section class="panel" style="margin-bottom:16px"><div class="panel-body">
+      <span class="status ${liveReady ? "completed" : "paused"}">${liveReady ? "Ready to send" : "Not ready to send"}</span>
+      <h2 style="margin-top:8px">${ready} of ${checks.length} checks passing</h2>
+      <p class="help">From ${escapeHtml(data.current?.from_email || "not set")} · Reply-To ${escapeHtml(data.current?.reply_to_email || "not set")}</p>
+    </div></section>
+    <section class="panel" style="margin-bottom:16px">
+      <div class="panel-head"><h2>Readiness</h2></div>
+      <div class="panel-body readiness-list">${checks.map((check) => `<div class="readiness-item"><span class="marker ${check.status === "ready" ? "ready" : ""}">${check.status === "ready" ? "✓" : ""}</span><div><strong>${escapeHtml(titles[check.id] || check.label)}</strong><p class="help">${escapeHtml(hint(check))}</p></div><span class="status ${check.status === "ready" ? "completed" : "paused"}">${escapeHtml(readinessLabel(check.status))}</span></div>`).join("")}</div>
+    </section>
+    <section class="panel" style="margin-bottom:16px">
+      <div class="panel-head"><div><h2>Delivery health</h2><p>Last 7 days, without recipient addresses</p></div><span class="status ${health.healthy ? "completed" : "paused"}">${health.healthy ? "Healthy" : "Needs attention"}</span></div>
+      <div class="panel-body"><div class="stat-grid">
+        ${["submitted", "failed", "suppressed", "unsubscribed"].map((key) => `<article class="stat-card"><span class="stat-label">${statusLabel(key)}</span><strong class="stat-value nums">${Number(health[key] || 0).toLocaleString()}</strong></article>`).join("")}
+      </div>${(health.issues || []).length ? `<div class="notice warning" style="margin-top:12px"><div>${health.issues.map((issue) => `<p>${escapeHtml(issue)}</p>`).join("")}</div></div>` : `<p class="help" style="margin-top:12px">Spacemail records acceptance at SMTP submit. Inbox delivery, bounces, and complaints are not reported back.</p>`}</div>
+    </section>
+    <section class="panel">
+      <div class="panel-head"><h2>Today’s volume</h2></div>
+      <div class="panel-body stack">
+        <p>This workspace can send <strong class="nums">${limit.toLocaleString()}</strong> emails today. <strong class="nums">${sent.toLocaleString()}</strong> are used, so <strong class="nums">${Math.max(0, limit - sent).toLocaleString()}</strong> remain. The sending service accepts about ${PROVIDER_HOURLY_CAP.toLocaleString()} an hour.</p>
+        <div class="meter" aria-hidden="true"><span style="width:${width}%"></span></div>
+        <p class="help">${escapeHtml(data.volume_plan?.launch_policy || "")}</p>
+      </div>
+    </section>
+    <details class="panel tech-details"><summary class="panel-head">Technical details</summary><div class="panel-body stack">
+      <p class="help">These names come from the setup endpoint. They are hidden from the everyday view.</p>
+      ${(data.checks || []).map((check) => `<p><strong>${escapeHtml(check.label)}</strong><br><span class="help">${escapeHtml(check.detail || "")}</span></p>`).join("")}
+      <ol>${(data.delivery_path || []).map((step) => `<li>${escapeHtml(step)}</li>`).join("")}</ol>
+    </div></details>`;
+}
+
+function readinessLabel(status) {
+  return {
+    ready: "Ready", pending: "Pending", migration_required: "Setup required", not_connected: "Not connected",
+    not_verified: "Not verified", configured_locked: "Configured, live off", configured: "Configured", unreachable: "Unreachable",
+  }[status] || titleCase(status);
+}
+
+async function renderUsers(token) {
+  setLoading();
+  const data = await api("/api/users");
+  if (token !== state.renderToken) return;
+  state.users = data.users;
+  state.roles = data.roles;
+  state.permissionDefinitions = data.permissions;
+  const byId = Object.fromEntries(data.permissions.map((permission) => [permission.id, permission]));
+  const grouped = PERMISSION_GROUPS.map(([label, ids]) => ({ label, items: ids.map((id) => byId[id]).filter(Boolean) }));
+  document.querySelector("#content").innerHTML = `
+    <div class="section-lead"><div><h2 class="nums">${data.users.length.toLocaleString()} ${data.users.length === 1 ? "user" : "users"}</h2><p>Use a person’s name so the account menu does not repeat their role.</p></div><button type="button" class="button primary" id="create-user">Create user</button></div>
+    <section class="panel"><div class="table-wrap"><table class="responsive"><thead><tr><th>User</th><th>Role</th><th>Status</th><th>Last sign-in</th><th>Created</th><th></th></tr></thead><tbody>${data.users.map((user) => `<tr>
+      <td data-label="User"><div class="table-user"><span class="avatar">${escapeHtml(initials(user.name))}</span><div><strong>${escapeHtml(user.name)}</strong>${user.is_current_user ? `<span class="status">You</span>` : ""}<span class="subtext email">${escapeHtml(user.email)}</span></div></div></td>
+      <td data-label="Role">${escapeHtml(user.role_label || ROLE_LABELS[user.role] || titleCase(user.role))}</td>
+      <td data-label="Status">${statusPill(user.active ? "active" : "disabled")}</td>
+      <td data-label="Last sign-in">${user.last_login_at ? timeHtml(user.last_login_at, { relative: true }) : "Never"}</td>
+      <td data-label="Created">${timeHtml(user.created_at)}</td>
+      <td class="table-actions" data-label=""><a class="button small" href="#/users/${encodeURIComponent(user.id)}">Manage</a></td>
+    </tr>`).join("")}</tbody></table></div></section>
+    <section class="role-grid">${data.roles.map((role) => `<article class="role-card"><h3>${escapeHtml(role.label)}</h3><p>${escapeHtml(role.description)}</p><p class="help nums">${role.permissions.length} permissions</p></article>`).join("")}</section>
+    <section class="panel"><div class="panel-head"><h2>Permissions</h2></div><div class="table-wrap"><table class="permission-table"><thead><tr><th>Capability</th>${data.roles.map((role) => `<th>${escapeHtml(role.label)}</th>`).join("")}</tr></thead><tbody>${grouped.map((group) => `<tr><th colspan="${data.roles.length + 1}">${escapeHtml(group.label)}</th></tr>${group.items.map((permission) => `<tr><td><strong>${escapeHtml(permission.label)}</strong><span class="subtext">${escapeHtml(permission.description)}</span></td>${data.roles.map((role) => `<td>${role.permissions.includes(permission.id) ? `<span class="status completed">Granted</span>` : `<span class="status">Not granted</span>`}</td>`).join("")}</tr>`).join("")}`).join("")}</tbody></table></div></section>`;
+  document.querySelector("#create-user")?.addEventListener("click", openCreateUser);
+}
+
+function openCreateUser() {
+  openModal("Create user", "Access", "md", `
+    <form id="create-user-form" class="stack" autocomplete="off">
+      <label>Full name <span class="req">Required</span><input name="name" maxlength="120" required /><span class="help">Use the person’s name, not their role.</span></label>
+      <label>Email address <span class="req">Required</span><input name="email" type="email" required /></label>
+      <label>Role<select name="role">${state.roles.map((role) => `<option value="${escapeHtml(role.id)}">${escapeHtml(role.label)}</option>`).join("")}</select></label>
+      <label>Temporary password <span class="req">Required</span><input name="password" type="password" minlength="12" required autocomplete="new-password" /><span class="help">At least 12 characters. Share it in a secure channel.</span></label>
+      <p class="form-error" role="alert"></p>
+      <div class="form-actions"><button type="button" class="button" data-close-modal>Cancel</button><button class="button primary" type="submit">Create user</button></div>
+    </form>`);
+  document.querySelector("#create-user-form").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const form = event.currentTarget;
+    const result = await submitForm(form, () => api("/api/users", { method: "POST", body: Object.fromEntries(new FormData(form)) }), "User created");
+    if (!result) return;
+    closeModal();
+    go("users", "", null, true);
+  });
+}
+
+function openManageUser(userId) {
+  const user = state.users.find((entry) => entry.id === userId);
+  if (!user) return;
+  const selfLocked = user.is_current_user;
+  openDrawer(`Manage ${user.name}`, "Access", `
+    <div class="stack">
+      ${selfLocked ? `<div class="notice"><div>This is your account. Another administrator must change your role or disable access.</div></div>` : `<div class="notice warning"><div>Role or status changes sign this person out. Disabled accounts keep their audit history.</div></div>`}
+      <form id="user-access-form" class="stack">
+        <label>Full name <span class="req">Required</span><input name="name" required value="${escapeHtml(user.name)}" /><span class="help">A real name keeps the account menu clear.</span></label>
+        <label>Email <span class="req">Required</span><input name="email" type="email" required value="${escapeHtml(user.email)}" /></label>
+        <div class="form-grid"><label>Role<select name="role" ${selfLocked ? "disabled" : ""}>${state.roles.map((role) => `<option value="${escapeHtml(role.id)}" ${role.id === user.role ? "selected" : ""}>${escapeHtml(role.label)}</option>`).join("")}</select></label><label>Status<select name="active" ${selfLocked ? "disabled" : ""}><option value="true" ${user.active ? "selected" : ""}>Active</option><option value="false" ${!user.active ? "selected" : ""}>Disabled</option></select></label></div>
+        <p class="form-error" role="alert"></p>
+        <button class="button primary" type="submit">Save access</button>
+      </form>
+      <form id="reset-password-form" class="stack">
+        <h3>Reset password</h3>
+        <label>Temporary password <span class="req">Required</span><input name="password" type="password" minlength="12" required autocomplete="new-password" /></label>
+        <p class="form-error" role="alert"></p>
+        <button class="button" type="submit">Reset password</button>
+      </form>
+      <p class="help">Last sign-in ${user.last_login_at ? absoluteTime(user.last_login_at) : "has not happened"}. ${can("audit.view") ? `<a href="#/audit?q=${encodeURIComponent(user.email)}">Recent activity is in the audit log.</a>` : "Recent activity is in the audit log."}</p>
+    </div>`);
+  document.querySelector("#user-access-form").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const form = event.currentTarget;
+    const result = await submitForm(form, () => api(`/api/users/${encodeURIComponent(user.id)}`, {
+      method: "PATCH",
+      body: {
+        name: form.elements.name.value,
+        email: form.elements.email.value,
+        role: selfLocked ? user.role : form.elements.role.value,
+        active: selfLocked ? user.active : form.elements.active.value === "true",
+      },
+    }), "User access updated");
+    if (!result) return;
+    go("users", "", null, true);
+  });
+  document.querySelector("#reset-password-form").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const form = event.currentTarget;
+    const result = await submitForm(form, () => api(`/api/users/${encodeURIComponent(user.id)}/reset-password`, { method: "POST", body: { password: form.elements.password.value } }), "Password reset. Active sessions were signed out.");
+    if (!result) return;
+    if (user.is_current_user) showLogin();
+    else go("users", "", null, true);
+  });
+}
+
+async function renderAudit(token) {
+  const params = state.route.params;
+  const key = `audit:${params.toString()}`;
+  if (cache.get(key)) paintAudit(cache.get(key).events || [], params);
+  else setLoading();
+  setRefreshing(Boolean(cache.get(key)));
+  const data = await api(`/api/audit${params.toString() ? `?${params}` : ""}`);
+  if (token !== state.renderToken) return;
+  cache.set(key, data);
+  paintAudit(data.events || [], params);
+  setRefreshing(false);
+}
+
+function paintAudit(events, params) {
+  const filtering = ["q", "action", "entity_type", "from", "to"].some((key) => params.get(key));
+  let lastDay = "";
+  const rows = events.map((event) => {
+    const detail = formatAuditDetail(event.detail);
+    const day = dayKey(event.created_at);
+    const ip = formatIp(detail.ip);
+    const head = day === lastDay ? "" : `<tr class="day-row"><th colspan="5">${escapeHtml(day)}</th></tr>`;
+    lastDay = day;
+    const ipHtml = !ip ? "" : ip === "Local / server" ? "Local / server" : `<span class="ip">${escapeHtml(ip)}</span>`;
+    return `${head}<tr>
+      <td data-label="When">${timeHtml(event.created_at, { relative: true })}</td>
+      <td data-label="Actor">${escapeHtml(event.actor_name || "System")}</td>
+      <td data-label="Action"><strong>${escapeHtml(auditActionLabel(event.action))}</strong></td>
+      <td data-label="Record">${escapeHtml(titleCase(event.entity_type))}${event.entity_label ? `<span class="subtext">${escapeHtml(event.entity_label)}</span>` : ""}</td>
+      <td data-label="Detail"><details><summary>${escapeHtml(detail.primary)}</summary><p>${escapeHtml(detail.primary)}</p>${ipHtml ? `<p>${ipHtml}</p>` : ""}</details></td>
+    </tr>`;
+  }).join("");
+  document.querySelector("#content").innerHTML = `
+    <div class="section-lead"><div><h2>${filtering ? `${events.length.toLocaleString()} matching events` : "Recent activity"}</h2><p>Sign-ins, imports, campaigns, and access changes.</p></div><div class="section-actions">${events.length ? `<button type="button" class="button" id="export-audit">Export CSV</button>` : ""}${filtering ? `<a class="button" href="#/audit">Clear filters</a>` : ""}</div></div>
+    <div class="toolbar">
+      ${searchField("audit-search", "Search audit log", params.get("q") || "", "Search actor, action, or detail")}
+      <label>Action<select id="audit-action">${optionsHtml(AUDIT_ACTION_OPTIONS, params.get("action") || "")}</select></label>
+      <label>Record<select id="audit-entity">${optionsHtml(AUDIT_ENTITY_OPTIONS, params.get("entity_type") || "")}</select></label>
+      <div class="date-range"><label>From<input id="audit-from" type="date" value="${escapeHtml(params.get("from") || "")}" /></label><label>To<input id="audit-to" type="date" value="${escapeHtml(params.get("to") || "")}" /></label></div>
+    </div>
+    <section class="panel">${events.length ? `<div class="table-wrap"><table class="responsive"><thead><tr><th>When</th><th>Actor</th><th>Action</th><th>Record</th><th>Detail</th></tr></thead><tbody>${rows}</tbody></table></div>` : `<div class="empty-state"><div><h2>${filtering ? "No matching events" : "No audit events yet"}</h2></div></div>`}</section>`;
+  bindFilterInput("audit-search", "q", "audit");
+  document.querySelector("#audit-action")?.addEventListener("change", (event) => setParam("audit", "action", event.target.value));
+  document.querySelector("#audit-entity")?.addEventListener("change", (event) => setParam("audit", "entity_type", event.target.value));
+  document.querySelector("#audit-from")?.addEventListener("change", (event) => setParam("audit", "from", event.target.value));
+  document.querySelector("#audit-to")?.addEventListener("change", (event) => setParam("audit", "to", event.target.value));
+  document.querySelector("#export-audit")?.addEventListener("click", () => exportAudit(events));
 }
 
 function csvEscape(value) {
   const text = String(value ?? "");
-  if (/[",\n\r]/.test(text)) return `"${text.replaceAll('"', '""')}"`;
-  return text;
+  return /[",\n\r]/.test(text) ? `"${text.replaceAll('"', '""')}"` : text;
 }
 
-function exportAuditCsv(events) {
+function exportAudit(events) {
   const headers = ["created_at", "actor", "action", "entity_type", "entity_label", "entity_id", "detail", "ip"];
   const rows = events.map((event) => {
     const detail = formatAuditDetail(event.detail);
-    return [
-      event.created_at,
-      event.actor_name || "System / recipient",
-      event.action,
-      event.entity_type,
-      event.entity_label || "",
-      event.entity_id || "",
-      detail.primary === "—" ? "" : detail.primary,
-      detail.ip || "",
-    ].map(csvEscape).join(",");
+    return [event.created_at, event.actor_name || "System", event.action, event.entity_type, event.entity_label || "", event.entity_id || "", detail.primary === "—" ? "" : detail.primary, detail.ip || ""].map(csvEscape).join(",");
   });
-  const csv = [headers.join(","), ...rows].join("\n");
-  const stamp = new Date().toISOString().slice(0, 10);
-  const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
-  const url = URL.createObjectURL(blob);
-  const link = document.createElement("a");
-  link.href = url;
-  link.download = `audit-${stamp}.csv`;
-  document.body.appendChild(link);
-  link.click();
-  link.remove();
-  URL.revokeObjectURL(url);
-  toast(`Exported ${events.length.toLocaleString()} audit event${events.length === 1 ? "" : "s"}`);
+  downloadText(`audit-${new Date().toISOString().slice(0, 10)}.csv`, [headers.join(","), ...rows].join("\n"));
+  toast(`Exported ${events.length.toLocaleString()} events matching the current filters`);
 }
 
-function openModal(title, kicker, content, compact = false) {
-  els.modalTitle.textContent = title;
-  els.modalKicker.textContent = kicker;
-  els.modalBody.innerHTML = content;
-  els.modalBody.classList.toggle("compact", compact);
-  els.modal.querySelectorAll("[data-close-modal]").forEach((button) => button.addEventListener("click", closeModal));
-  if (!els.modal.open) els.modal.showModal();
-  requestAnimationFrame(() => els.modalBody.querySelector("input, select, textarea, button")?.focus());
+function renderKit() {
+  setChrome("_ui", "Components");
+  document.querySelector("#content").innerHTML = `
+    <div class="kit-grid">
+      <section><h2>Buttons</h2><div class="kit-row"><button class="button primary">Primary</button><button class="button">Secondary</button><button class="button ghost">Ghost</button><button class="button danger">Danger</button><button class="button icon-button" aria-label="Close">${icon("close")}</button><button class="button primary is-loading" aria-busy="true">Loading</button></div></section>
+      <section><h2>Fields</h2><div class="stack"><label>Text <span class="req">Required</span><input placeholder="Name" /></label>${searchField("kit-search", "Search", "", "Search")}<label>Select<select><option>Administrator</option></select></label><label class="dropzone">Drop a file<input type="file" /></label><div class="date-range"><label>From<input type="date" /></label><label>To<input type="date" /></label></div><label class="check"><input type="checkbox" /> Checkbox</label><label class="switch"><input type="checkbox" role="switch" /> Switch</label></div></section>
+      <section><h2>Status</h2><div class="kit-row">${DELIVERY_STATUSES.map(([status]) => statusPill(status)).join("")}</div></section>
+      <section><h2>Stat, table, empty</h2><article class="stat-card"><span class="stat-label">Sent today</span><strong class="stat-value">1,000</strong><span class="stat-detail">12 remaining</span></article><div class="empty-state panel"><div><h2>Nothing here</h2><p>Empty states explain the next step once.</p></div></div><div class="skeleton" style="width:180px"></div></section>
+      <section><h2>Feedback</h2><div class="kit-row"><button type="button" class="button" id="kit-toast">Show toast</button><button type="button" class="button" id="kit-modal">Open modal</button><button type="button" class="button" id="kit-drawer">Open drawer</button></div><div class="notice" style="margin-top:12px"><div>Inline callout for a quiet explanation.</div></div></section>
+      <section class="tabs" role="tablist"><button class="tab" aria-selected="true">Lists</button><button class="tab">Imports</button></section>
+      <p class="help">Token contrast is recorded in docs/ui/DESIGN-TOKENS.md. This page is local only.</p>
+    </div>`;
+  document.querySelector("#kit-toast")?.addEventListener("click", () => toast("Saved"));
+  document.querySelector("#kit-modal")?.addEventListener("click", () => openModal("Modal", "Example", "md", `<form class="stack"><label>Name <span class="req">Required</span><input required /></label><div class="form-actions"><button type="button" class="button" data-close-modal>Close</button></div></form>`));
+  document.querySelector("#kit-drawer")?.addEventListener("click", () => openDrawer("Drawer", "Example", `<p>Side panel for a contact, delivery, or user.</p>`));
+}
+
+function openModal(title, kicker, size, html) {
+  state.lastFocus = document.activeElement;
+  const dialog = document.querySelector("#modal");
+  dialog.dataset.size = size || "md";
+  document.querySelector("#modal-title").textContent = title;
+  document.querySelector("#modal-kicker").textContent = kicker || "";
+  document.querySelector("#modal-body").innerHTML = html;
+  document.querySelector("#modal-close").disabled = false;
+  if (!dialog.open) dialog.showModal();
+  dialog.querySelector("input, select, textarea, button")?.focus();
 }
 
 function closeModal() {
-  if (els.modal.open) els.modal.close();
-  els.modalBody.innerHTML = "";
+  const dialog = document.querySelector("#modal");
+  if (dialog.open) dialog.close();
+  document.querySelector("#modal-body").innerHTML = "";
+  if (state.lastFocus?.focus) state.lastFocus.focus();
 }
 
-async function submitForm(form, request, successMessage) {
-  const error = form.querySelector("[data-form-error]") || form.querySelector(".form-error");
-  const submit = form.querySelector('[type="submit"]');
-  if (error) error.textContent = "";
-  if (submit) submit.disabled = true;
-  try {
-    const result = await request();
-    toast(successMessage);
-    return result;
-  } catch (requestError) {
-    if (error) error.textContent = requestError.message;
-    return null;
-  } finally {
-    if (submit) submit.disabled = false;
-  }
+function openDrawer(title, kicker, html) {
+  state.drawerFocus = state.drawerFocus || document.activeElement;
+  document.querySelector("#drawer-title").textContent = title;
+  document.querySelector("#drawer-kicker").textContent = kicker || "";
+  document.querySelector("#drawer-body").innerHTML = html;
+  document.querySelector("#drawer").hidden = false;
+  document.querySelector("#drawer-close").focus();
 }
 
-els.loginForm.addEventListener("submit", async (event) => {
-  event.preventDefault();
-  els.loginError.textContent = "";
-  const submit = els.loginForm.querySelector("button");
-  submit.disabled = true;
-  try {
-    const session = await api("/api/auth/login", {
-      method: "POST",
-      body: {
-        email: document.querySelector("#login-email").value,
-        password: document.querySelector("#login-password").value,
-      },
-    });
-    showApp(session);
-  } catch (error) {
-    els.loginError.textContent = error.message;
-  } finally {
-    submit.disabled = false;
-  }
-});
+function closeDrawer({ skipHash = false } = {}) {
+  const drawer = document.querySelector("#drawer");
+  if (!drawer || drawer.hidden) return;
+  drawer.hidden = true;
+  document.querySelector("#drawer-body").innerHTML = "";
+  const focus = state.drawerFocus;
+  state.drawerFocus = null;
+  focus?.focus?.();
+  if (!skipHash && state.route?.id && state.route.section !== "campaigns") go(state.route.section, "", state.route.params);
+}
 
-els.nav.addEventListener("click", (event) => {
-  const button = event.target.closest("[data-view]");
-  if (button) navigate(button.dataset.view);
-});
+function openChangePassword(required = false) {
+  openModal("Change password", required ? "Security" : "Account", "sm", `
+    <form id="change-password-form" class="stack">
+      <p class="help">${required ? "Set a new password before using the workspace." : "Use at least 12 characters."}</p>
+      <label>Current password <span class="req">Required</span><input name="current_password" type="password" autocomplete="current-password" required /></label>
+      <label>New password <span class="req">Required</span><input name="new_password" type="password" autocomplete="new-password" minlength="12" required /></label>
+      <p class="form-error" role="alert"></p>
+      <button class="button primary" type="submit">Save password</button>
+    </form>`);
+  if (required) document.querySelector("#modal-close").disabled = true;
+  document.querySelector("#change-password-form").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const form = event.currentTarget;
+    const result = await submitForm(form, () => api("/api/auth/change-password", { method: "POST", body: { current_password: form.current_password.value, new_password: form.new_password.value } }), "Password updated");
+    if (!result) return;
+    document.querySelector("#modal-close").disabled = false;
+    closeModal();
+    showApp(result);
+  });
+}
 
-document.querySelector("#global-new-campaign").addEventListener("click", () => {
-  if (can("campaigns.manage")) openCampaignComposer();
-});
-document.querySelector("#modal-close").addEventListener("click", closeModal);
-document.querySelector("#mobile-nav-button").addEventListener("click", () => document.body.classList.toggle("nav-open"));
-document.querySelector("#logout-button").addEventListener("click", async () => {
-  try { await api("/api/auth/logout", { method: "POST", body: {} }); } catch (_) { /* local logout still proceeds */ }
-  showLogin();
-});
+function setNav(open) {
+  document.body.classList.toggle("nav-open", open);
+  document.querySelector("#nav-backdrop").hidden = !open;
+  document.querySelector("#mobile-nav-button")?.setAttribute("aria-expanded", open ? "true" : "false");
+  if (open) document.querySelector("#nav-close")?.focus();
+}
 
-els.modal.addEventListener("click", (event) => {
-  if (event.target === els.modal) closeModal();
-});
+function setMenu(open) {
+  const menu = document.querySelector("#account-menu");
+  const button = document.querySelector("#account-button");
+  menu.hidden = !open;
+  button.setAttribute("aria-expanded", open ? "true" : "false");
+}
 
-els.modal.addEventListener("cancel", (event) => {
-  event.preventDefault();
-  closeModal();
-});
+function setStatusOpen(open) {
+  document.querySelector("#status-popover").hidden = !open;
+  document.querySelector("#status-button").setAttribute("aria-expanded", open ? "true" : "false");
+}
 
-els.content.addEventListener("click", (event) => {
-  const go = event.target.closest("[data-go]");
-  if (go) return navigate(go.dataset.go);
-  if (event.target.closest("[data-new-campaign]") && can("campaigns.manage")) return openCampaignComposer();
-  const campaignButton = event.target.closest("[data-action][data-id]");
-  if (campaignButton) return campaignAction(campaignButton.dataset.action, campaignButton.dataset.id);
-  const messageButton = event.target.closest("[data-message-id]");
-  if (messageButton) return openMessage(messageButton.dataset.messageId);
-  const userButton = event.target.closest("[data-user-id]");
-  if (userButton) return openManageUserModal(userButton.dataset.userId);
-});
+function applyTheme(choice) {
+  localStorage.setItem("ctn-theme", choice);
+  if (choice === "system") document.documentElement.removeAttribute("data-theme");
+  else document.documentElement.dataset.theme = choice;
+  document.querySelectorAll("[data-theme-choice]").forEach((button) => {
+    button.setAttribute("aria-checked", button.dataset.themeChoice === choice ? "true" : "false");
+  });
+}
+
+function focusables(root) {
+  return [...root.querySelectorAll("a, button, input, select, textarea, [tabindex]")].filter((node) => !node.disabled && node.tabIndex !== -1 && !node.closest("[hidden]"));
+}
+
+function trap(root, event) {
+  if (event.key !== "Tab") return;
+  const nodes = focusables(root);
+  if (!nodes.length) return;
+  const first = nodes[0];
+  const last = nodes[nodes.length - 1];
+  if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
+  else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
+}
+
+function mountIcons() {
+  document.querySelectorAll("[data-icon]").forEach((node) => { node.innerHTML = icon(node.dataset.icon); });
+  document.querySelector("#mobile-nav-button").innerHTML = icon("menu");
+  document.querySelector("#nav-close").innerHTML = icon("close");
+  document.querySelector("#modal-close").innerHTML = icon("close");
+  document.querySelector("#drawer-close").innerHTML = icon("close");
+  document.querySelector("#toggle-password").innerHTML = icon("eye");
+}
+
+function loginErrorMessage(error) {
+  if (/invalid email or password|email or password/i.test(error.message || "")) return "Email or password is incorrect.";
+  return error.message;
+}
+
+function bindShell() {
+  mountIcons();
+  applyTheme(localStorage.getItem("ctn-theme") || "system");
+  document.querySelector("#login-form").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const error = document.querySelector("#login-error");
+    const submit = event.currentTarget.querySelector('[type="submit"]');
+    error.textContent = "";
+    setBusy(submit, true);
+    submit.textContent = "Signing in";
+    try {
+      const session = await api("/api/auth/login", { method: "POST", body: { email: document.querySelector("#login-email").value, password: document.querySelector("#login-password").value } });
+      showApp(session);
+    } catch (requestError) {
+      error.textContent = loginErrorMessage(requestError);
+    } finally {
+      setBusy(submit, false);
+      submit.textContent = "Sign in";
+    }
+  });
+  const password = document.querySelector("#login-password");
+  password.addEventListener("keyup", (event) => {
+    document.querySelector("#caps-lock-hint").hidden = !event.getModifierState?.("CapsLock");
+  });
+  document.querySelector("#toggle-password").addEventListener("click", () => {
+    const button = document.querySelector("#toggle-password");
+    const showing = password.type === "text";
+    password.type = showing ? "password" : "text";
+    button.setAttribute("aria-pressed", showing ? "false" : "true");
+    button.setAttribute("aria-label", showing ? "Show password" : "Hide password");
+    button.innerHTML = icon(showing ? "eye" : "eyeOff");
+  });
+  document.querySelector("#mobile-nav-button").addEventListener("click", () => setNav(true));
+  document.querySelector("#nav-close").addEventListener("click", () => setNav(false));
+  document.querySelector("#nav-backdrop").addEventListener("click", () => setNav(false));
+  document.querySelector("#account-button").addEventListener("click", () => setMenu(document.querySelector("#account-menu").hidden));
+  document.querySelectorAll("[data-theme-choice]").forEach((button) => button.addEventListener("click", () => applyTheme(button.dataset.themeChoice)));
+  document.querySelector("#menu-password").addEventListener("click", () => { setMenu(false); openChangePassword(false); });
+  document.querySelector("#logout-button").addEventListener("click", async () => {
+    try { await api("/api/auth/logout", { method: "POST", body: {} }); } catch (_) { /* still sign out locally */ }
+    setMenu(false);
+    showLogin();
+  });
+  document.querySelector("#status-button").addEventListener("click", () => setStatusOpen(document.querySelector("#status-popover").hidden));
+  document.querySelector("#global-new-campaign").addEventListener("click", () => { if (can("campaigns.manage")) go("campaigns", "new"); });
+  document.querySelector("#modal-close").addEventListener("click", closeModal);
+  document.querySelector("#modal").addEventListener("click", (event) => { if (event.target.id === "modal") closeModal(); });
+  document.querySelector("#modal").addEventListener("cancel", (event) => {
+    if (document.querySelector("#modal-close").disabled) { event.preventDefault(); return; }
+    event.preventDefault();
+    closeModal();
+  });
+  document.querySelector("#modal").addEventListener("click", (event) => {
+    if (event.target.closest("[data-close-modal]")) closeModal();
+  });
+  document.querySelector("#drawer-close").addEventListener("click", () => closeDrawer());
+  document.querySelector("#drawer").addEventListener("click", (event) => {
+    if (event.target.closest("[data-close-drawer]")) closeDrawer();
+  });
+  document.addEventListener("click", (event) => {
+    if (!event.target.closest("#account-button") && !event.target.closest("#account-menu")) setMenu(false);
+    if (!event.target.closest(".status-wrap")) setStatusOpen(false);
+  });
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") {
+      if (document.body.classList.contains("nav-open")) { setNav(false); return; }
+      if (!document.querySelector("#account-menu").hidden) { setMenu(false); return; }
+      if (!document.querySelector("#status-popover").hidden) { setStatusOpen(false); return; }
+      if (!document.querySelector("#drawer").hidden) { closeDrawer(); return; }
+    }
+    if (document.body.classList.contains("nav-open")) trap(document.querySelector("#sidebar"), event);
+    if (!document.querySelector("#drawer").hidden) trap(document.querySelector(".drawer-panel"), event);
+  });
+  window.addEventListener("hashchange", onRoute);
+  document.addEventListener("visibilitychange", () => {
+    if (document.hidden) clearTimeout(state.pollTimer);
+    else schedulePoll(0);
+  });
+  window.addEventListener("beforeunload", (event) => {
+    if (!state.composerDirty) return;
+    event.preventDefault();
+    event.returnValue = "";
+  });
+}
 
 async function initialize() {
+  bindShell();
   try {
     const session = await api("/api/session");
     showApp(session);
   } catch (_) {
     showLogin();
+    if (isLocalHost() && location.hash.startsWith("#/_ui")) onRoute();
   }
 }
 

@@ -295,7 +295,7 @@ export async function seedList(name?: string): Promise<string> {
   return id;
 }
 
-/** Active contact with full consent evidence so contacts_active_requires_consent_check passes. */
+/** Active contact ready for campaign sends. */
 export async function seedActiveContact(input: {
   listId: string;
   email: string;
@@ -306,16 +306,13 @@ export async function seedActiveContact(input: {
   const id = makeId("con");
   await query(
     `INSERT INTO contacts
-       (id, email, first_name, last_name, status, consent_source, consent_at, created_at, updated_at,
-        consent_evidence, consent_attested_by, consent_verified_at)
-     VALUES ($1, $2, $3, $4, 'active', 'admin_activation', NOW(), NOW(), NOW(), $5, $6, NOW())`,
+       (id, email, first_name, last_name, status, consent_source, consent_at, created_at, updated_at)
+     VALUES ($1, $2, $3, $4, 'active', 'manual', NOW(), NOW(), NOW())`,
     [
       id,
       input.email.toLowerCase(),
       input.firstName ?? "Pat",
       input.lastName ?? "Lee",
-      CONSENT_EVIDENCE,
-      input.actorUserId,
     ],
   );
   await query(`INSERT INTO list_contacts (list_id, contact_id, added_at) VALUES ($1, $2, NOW())`, [
@@ -385,27 +382,23 @@ export async function seedActiveContactsBulk(input: {
      ),
      inserted AS (
        INSERT INTO contacts
-         (id, email, first_name, last_name, status, consent_source, consent_at, created_at, updated_at,
-          consent_evidence, consent_attested_by, consent_verified_at)
+         (id, email, first_name, last_name, status, consent_source, consent_at, created_at, updated_at)
        SELECT 'con_' || replace(gen_random_uuid()::text, '-', ''),
               $2 || n::text || '@example.com',
               'User',
               n::text,
               'active',
-              'admin_activation',
+              'manual',
               NOW(),
               NOW(),
-              NOW(),
-              $3,
-              $4,
               NOW()
          FROM generated
        RETURNING id
      )
      INSERT INTO list_contacts (list_id, contact_id, added_at)
-     SELECT $5, id, NOW() FROM inserted
+     SELECT $3, id, NOW() FROM inserted
      RETURNING contact_id`,
-    [input.count, prefix, CONSENT_EVIDENCE, input.actorUserId, input.listId],
+    [input.count, prefix, input.listId],
   );
   return result.rowCount ?? 0;
 }

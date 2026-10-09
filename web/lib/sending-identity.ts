@@ -33,6 +33,10 @@ export type IdentityGap = {
   detail: string;
 };
 
+export function spacemailMailbox(): string {
+  return normalizeEmail(envTrim("SENDSTACK_SMTP_USERNAME"));
+}
+
 export function identityComplianceGaps(identity = loadSendingIdentity()): IdentityGap[] {
   const gaps: IdentityGap[] = [];
   if (!identity.fromEmail || !validEmail(identity.fromEmail)) {
@@ -42,20 +46,16 @@ export function identityComplianceGaps(identity = loadSendingIdentity()): Identi
       detail: "Set SENDSTACK_FROM_EMAIL to a verified, monitored mailbox. Do not use noreply defaults.",
     });
   }
-  if (!identity.replyToEmail || !validEmail(identity.replyToEmail)) {
+  const mailbox = spacemailMailbox();
+  if (mailbox && identity.fromEmail && identity.fromEmail !== mailbox) {
     gaps.push({
-      id: "reply_to",
-      label: "Reply-To address",
-      detail: "Set SENDSTACK_REPLY_TO_EMAIL to a monitored inbox that can receive replies.",
+      id: "mailbox_from",
+      label: "Spacemail mailbox From",
+      detail:
+        "SENDSTACK_FROM_EMAIL must match SENDSTACK_SMTP_USERNAME so messages send as the Spacemail mailbox.",
     });
   }
-  if (!identity.allowedLinkDomains.length) {
-    gaps.push({
-      id: "allowed_link_domains",
-      label: "Allowed link domains",
-      detail: "Set SENDSTACK_ALLOWED_LINK_DOMAINS to a comma-separated allowlist of HTTP(S) link hosts.",
-    });
-  }
+  // Reply-To and link-domain allowlist are optional (Spacemail webmail parity).
   return gaps;
 }
 
@@ -67,6 +67,10 @@ export function enforcedFromEmail(campaignFromEmail: string, identity = loadSend
   if (!identity.fromEmail) {
     throw new Error("SENDSTACK_FROM_EMAIL is required before live sending.");
   }
+  const mailbox = spacemailMailbox();
+  if (mailbox && identity.fromEmail !== mailbox) {
+    throw new Error(`From address must be the Spacemail mailbox (${mailbox}).`);
+  }
   const requested = normalizeEmail(campaignFromEmail);
   if (requested && requested !== identity.fromEmail) {
     throw new Error(`From address must be ${identity.fromEmail}.`);
@@ -74,11 +78,9 @@ export function enforcedFromEmail(campaignFromEmail: string, identity = loadSend
   return identity.fromEmail;
 }
 
+/** Optional Reply-To from env. Empty string when unset — Spacemail omits Reply-To by default. */
 export function enforcedReplyTo(identity = loadSendingIdentity()): string {
-  if (!identity.replyToEmail) {
-    throw new Error("SENDSTACK_REPLY_TO_EMAIL is required before live sending.");
-  }
-  return identity.replyToEmail;
+  return identity.replyToEmail || "";
 }
 
 export function isTestRecipientAllowed(email: string, identity = loadSendingIdentity()): boolean {

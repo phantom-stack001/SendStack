@@ -16,10 +16,10 @@ The Python test build under `app/` remains a local sandbox environment (SQLite, 
 
 ## Production delivery contract
 
-1. SendStack creates an immutable recipient snapshot from active, consented, unsuppressed contacts.
+1. SendStack creates an immutable recipient snapshot from active, unsuppressed contacts.
 2. A durable launch job advances over that snapshot in small chunks.
-3. Each tick renders personalization and submits one ordinary MIME message per recipient through Spacemail SMTP.
-4. SMTP acceptance is **submitted**. There is no Spacemail delivery webhook; the UI does not claim inbox delivery from provider events.
+3. Each tick renders personalization and submits one ordinary MIME message per list address through Spacemail SMTP (mailbox From and envelope, single To, Spacemail Message-ID).
+4. SMTP acceptance is **submitted**; a copy is appended to Sent when IMAP works. Deliveries is the local log; Mailbox shows Inbox and Sent from Spacemail.
 5. Cancel stops unsent recipients only. Messages Spacemail already accepted cannot be recalled.
 
 ## Fastest safe implementation sequence
@@ -38,19 +38,21 @@ The Python test build under `app/` remains a local sandbox environment (SQLite, 
 - Move login throttling, sessions, launch locks, and all queue state out of process memory.
 - Add repeatable migrations and a one-time SQLite-to-PostgreSQL import with reconciliation.
 
-### 3. Add the Spacemail SMTP boundary
+### 3. Spacemail SMTP client boundary
 
-- Keep the sandbox provider for previews and automated tests.
+- Keep sandbox for local, preview, and automated tests.
 - Authenticate to `mail.spacemail.com` on port 465 with the mailbox username and password.
-- Send one recipient per message; store Message-ID as `provider_id` on acceptance.
+- Send one recipient per message from that mailbox (From and envelope match `SENDSTACK_SMTP_USERNAME`); store Spacemail’s Message-ID as `provider_id` on acceptance.
+- Require `SENDSTACK_FROM_EMAIL` to match the Spacemail mailbox. Reply-To is optional on the campaign.
+- Append accepted messages to the IMAP Sent folder; expose Inbox and Sent under Mailbox.
 - Enforce daily and hourly volume caps (`SENDSTACK_DAILY_LIMIT`, `SENDSTACK_SMTP_HOURLY_LIMIT`).
-- Render SendStack personalization and unsubscribe tokens locally before SMTP submit.
+- Render personalization tokens locally before SMTP submit.
 
 ### 4. Feedback and suppression
 
-- Administrator-simulated bounce/complaint feedback remains available for testing.
-- Global unsubscribe links continue to write local suppressions.
-- Automatic bounce ingestion from the Spacemail mailbox (IMAP) is out of scope for this handover.
+- Spacemail does not report bounces or complaints. Live outcomes are submitted or failed.
+- Global unsubscribe links and manual suppressions continue to write local exclusions.
+- Automatic bounce classification from IMAP is out of scope for this handover.
 
 ### 5. Unlock live delivery only after verification
 
@@ -58,7 +60,7 @@ The Python test build under `app/` remains a local sandbox environment (SQLite, 
 - Complete backup and restore testing.
 - Remove the default administrator password and require secure cookies over HTTPS.
 - Configure an external scheduler to hit `GET /api/cron/launch-jobs` every minute with `CRON_SECRET`.
-- Run a small internal or explicitly consented canary before increasing volume.
+- Run a small internal canary before increasing volume.
 
 ## Server-only production configuration
 
@@ -70,13 +72,15 @@ The production implementation should consume these Vercel environment variables.
 | `SENDSTACK_SMTP_HOST` | SMTP host (`mail.spacemail.com`) |
 | `SENDSTACK_SMTP_PORT` | SMTP port (`465` for implicit TLS) |
 | `SENDSTACK_SMTP_USERNAME` | Full Spacemail mailbox address |
-| `SENDSTACK_SMTP_PASSWORD` | Mailbox password |
+| `SENDSTACK_SMTP_PASSWORD` | Mailbox password (also used for IMAP) |
+| `SENDSTACK_IMAP_HOST` | IMAP host (default `mail.spacemail.com`) |
+| `SENDSTACK_IMAP_PORT` | IMAP port (default `993`) |
 | `SENDSTACK_SMTP_HOURLY_LIMIT` | Hourly outbound cap (default 500) |
 | `SENDSTACK_PUBLIC_URL` | HTTPS production origin used in links and callbacks |
 | `SENDSTACK_SESSION_SECRET` | Production session signing/encryption secret |
-| `SENDSTACK_FROM_EMAIL` | Enforced verified/monitored From address (not a readiness hint only) |
-| `SENDSTACK_REPLY_TO_EMAIL` | Enforced monitored Reply-To address |
-| `SENDSTACK_ALLOWED_LINK_DOMAINS` | Comma-separated HTTP(S) link host allowlist for campaign content |
+| `SENDSTACK_FROM_EMAIL` | Must match `SENDSTACK_SMTP_USERNAME` (the Spacemail mailbox) |
+| `SENDSTACK_REPLY_TO_EMAIL` | Optional default Reply-To preference (not forced onto every message) |
+| `SENDSTACK_ALLOWED_LINK_DOMAINS` | Optional HTTP(S) link host allowlist; empty allows any https host |
 | `SENDSTACK_TEST_RECIPIENT_ALLOWLIST` | Exact addresses permitted for administrator live test sends |
 | `SENDSTACK_DAILY_LIMIT` | Daily volume cap across direct, test, and campaign recipient paths |
 | `SENDSTACK_LIVE_SEND_ENABLED` | Explicit kill switch; default must be `false` |
@@ -92,7 +96,7 @@ Live sending stays locked until every item below passes:
 - Concurrent launch requests create at most one active launch job per campaign.
 - A dry run against a fake SMTP sender produces no missing or duplicate recipients.
 - Production and preview secrets are isolated; no SMTP password appears in responses, browser bundles, logs, or audit details.
-- The verified From address is enforced server-side.
+- The From address is enforced server-side and must be the Spacemail mailbox.
 - A tested emergency stop prevents new SMTP submits.
 - A controlled canary confirms SMTP acceptance and unsubscribe.
 
@@ -100,7 +104,7 @@ Live sending stays locked until every item below passes:
 
 Steady-state volume is bounded by the Spacemail mailbox plan (**500 messages/hour** on paid plans) and `SENDSTACK_DAILY_LIMIT`. Treat higher marketing targets as requiring a different delivery product.
 
-Start with a small, engaged, consented segment. Increase volume only when authentication is valid and bounce/complaint signals remain healthy. Stop automatically when a safety threshold is exceeded.
+Start with a small, engaged segment. Increase volume only when authentication is valid and SMTP acceptance failures and manual suppressions remain healthy. Stop automatically when a safety threshold is exceeded.
 
 ## Product behavior that changes in production
 

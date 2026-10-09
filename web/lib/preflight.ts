@@ -1,19 +1,7 @@
 import { parse as parsePublicSuffix } from "tldts";
+import { normalizeEmail } from "./ids";
 import { loadSendingIdentity, type SendingIdentity } from "./sending-identity";
 import { validateEmailContent } from "./templates";
-
-const PLACEHOLDER_PATTERNS: Array<{ pattern: RegExp; label: string }> = [
-  { pattern: /replace this (text|copy|section)/i, label: "placeholder copy" },
-  { pattern: /write your message/i, label: "placeholder message prompt" },
-  { pattern: /placeholder text for legal review/i, label: "legal placeholder text" },
-  { pattern: /\[street\],\s*\[city\],\s*\[country\]/i, label: "placeholder postal address" },
-  { pattern: /\[your (company|address|name)\]/i, label: "bracketed placeholder" },
-  { pattern: /lorem ipsum/i, label: "lorem ipsum seed content" },
-  { pattern: /todo:\s*replace/i, label: "todo placeholder" },
-  { pattern: /sample (subject|message|campaign)/i, label: "sample seed content" },
-];
-
-const FAKE_THREAD_SUBJECT = /^(re|fw|fwd)\s*:/i;
 
 /** Only these merge tokens are permitted inside href / URL fields. */
 const SAFE_URL_MERGE_TOKENS = new Set(["{{unsubscribe_url}}"]);
@@ -173,6 +161,9 @@ export function validateCampaignLink(raw: string, allowedDomains: string[]): Lin
   const host = parsed.hostname.toLowerCase();
   if (!host) return { ok: false, error: `Link is missing a hostname: ${raw}` };
 
+  // Empty allowlist = Spacemail-style: any http(s) host is fine.
+  if (!allowedDomains.length) return { ok: true, host };
+
   const allowed = allowedDomains.map((domain) => domain.toLowerCase());
   const permitted = allowed.some((domain) => host === domain || host.endsWith(`.${domain}`));
   if (!permitted) {
@@ -181,7 +172,7 @@ export function validateCampaignLink(raw: string, allowedDomains: string[]): Lin
   return { ok: true, host };
 }
 
-/** Require unsubscribe token in visible body content (not only HTML comments). */
+/** True when an author included a visible {{unsubscribe_url}} (optional for Spacemail-style sends). */
 export function hasVisibleUnsubscribe(html: string, text: string): boolean {
   const withoutComments = html.replace(/<!--[\s\S]*?-->/g, "");
   const hiddenStripped = withoutComments
@@ -209,26 +200,22 @@ export type PreflightInput = {
 
 export type PreflightResult = { ok: true } | { ok: false; errors: string[] };
 
+/**
+ * Launch checks aligned with Spacemail webmail: subject, from name, mailbox From,
+ * and unsafe HTML. Reply-To, link allowlists, fake-thread subjects, placeholders,
+ * plain-text requirement, unsubscribe, and archive attachments do not block launch.
+ */
 export function runCampaignPreflight(input: PreflightInput): PreflightResult {
   const identity = input.identity ?? loadSendingIdentity();
   const errors: string[] = [];
   const subject = input.subject.trim();
   const htmlBody = input.htmlBody ?? "";
   const textBody = input.textBody ?? "";
-  const haystack = `${subject}\n${htmlBody}\n${textBody}`;
 
   if (!subject) errors.push("Subject is required.");
   if (!input.fromName.trim()) errors.push("From name is required.");
-  if (!textBody.trim()) errors.push("A plain-text part is required.");
-
-  if (FAKE_THREAD_SUBJECT.test(subject)) {
-    errors.push('Subjects cannot begin with "RE:" or "FW:" — SendStack is not a reply-thread system.');
-  }
-
-  for (const { pattern, label } of PLACEHOLDER_PATTERNS) {
-    if (pattern.test(haystack)) {
-      errors.push(`Campaign content still contains ${label}. Replace seed/placeholder copy before launch.`);
-    }
+  if (!htmlBody.trim() && !textBody.trim()) {
+    errors.push("Message body is required (HTML or plain text).");
   }
 
   try {
@@ -237,20 +224,14 @@ export function runCampaignPreflight(input: PreflightInput): PreflightResult {
     errors.push(error instanceof Error ? error.message : "Campaign content is invalid.");
   }
 
-  if (!hasVisibleUnsubscribe(htmlBody, textBody)) {
-    errors.push("A visible unsubscribe link is required in HTML and plain text (not hidden or commented).");
-  }
-
   if (!identity.fromEmail) {
     errors.push("SENDSTACK_FROM_EMAIL must be configured before launch.");
   } else if (input.fromEmail && input.fromEmail !== identity.fromEmail) {
     errors.push(`From address must be the enforced sender (${identity.fromEmail}).`);
   }
-  if (!identity.replyToEmail) errors.push("SENDSTACK_REPLY_TO_EMAIL must be configured before launch.");
-  if (!identity.allowedLinkDomains.length) {
-    errors.push("SENDSTACK_ALLOWED_LINK_DOMAINS must be configured before launch.");
-  } else {
-    errors.push(...validateAllowedLinkDomains(identity.allowedLinkDomains));
+  const mailbox = normalizeEmail((process.env.SENDSTACK_SMTP_USERNAME ?? "").trim());
+  if (mailbox && identity.fromEmail && identity.fromEmail !== mailbox) {
+    errors.push(`SENDSTACK_FROM_EMAIL must match the Spacemail mailbox (${mailbox}).`);
   }
 
   if (input.requirePublicHttps) {
@@ -265,15 +246,10 @@ export function runCampaignPreflight(input: PreflightInput): PreflightResult {
     }
   }
 
+  // Reject unsafe URL schemes. Host allowlist is optional (empty = any https host).
   for (const link of extractLinks(htmlBody, textBody)) {
     const result = validateCampaignLink(link.raw, identity.allowedLinkDomains);
     if (!result.ok) errors.push(result.error);
-  }
-
-  for (const extension of input.attachmentExtensions ?? []) {
-    if (["zip", "rar", "7z", "gz", "tgz", "tar"].includes(extension)) {
-      errors.push("Archive attachments are not allowed. Remove ZIP/archive files before launch.");
-    }
   }
 
   return errors.length ? { ok: false, errors: [...new Set(errors)] } : { ok: true };

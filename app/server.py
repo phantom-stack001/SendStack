@@ -254,6 +254,47 @@ def valid_email(value: str) -> bool:
     return bool(EMAIL_RE.match(normalize_email(value)))
 
 
+def build_smtp_mail_contract(
+    *,
+    mailbox: str,
+    to_email: str,
+    from_name: str,
+    from_email: str,
+    reply_to: str = "",
+    html_body: str = "",
+    text_body: str = "",
+) -> dict[str, str]:
+    """Pure Spacemail-client headers/envelope (no socket). Message-ID left for Spacemail."""
+    mailbox_norm = normalize_email(mailbox)
+    if not mailbox_norm or not valid_email(mailbox_norm):
+        raise RuntimeError("SMTP mailbox username must be a valid email address")
+    requested = normalize_email(from_email)
+    if requested and requested != mailbox_norm:
+        raise RuntimeError(f"From address must be the Spacemail mailbox ({mailbox_norm})")
+    to_norm = to_email.strip()
+    if not to_norm or not valid_email(to_norm):
+        raise RuntimeError("Recipient must be a valid email address")
+    display = (from_name or "").strip() or mailbox_norm
+    html = (html_body or "").strip()
+    text = (text_body or "").strip()
+    if not html and not text:
+        raise RuntimeError("Message body is required (HTML or plain text)")
+    reply = (reply_to or "").strip()
+    if any("\r" in value or "\n" in value for value in (to_norm, mailbox_norm, display, reply)):
+        raise RuntimeError("Email headers cannot contain line breaks")
+    if reply and not valid_email(reply):
+        raise RuntimeError("Reply-To must be a valid email address")
+    return {
+        "mailbox": mailbox_norm,
+        "from_header": f"{display} <{mailbox_norm}>",
+        "envelope_from": mailbox_norm,
+        "to": to_norm,
+        "reply_to": reply,
+        "html": html,
+        "text": text,
+    }
+
+
 def make_id(prefix: str) -> str:
     return f"{prefix}_{uuid.uuid4().hex}"
 
@@ -319,6 +360,12 @@ class Config:
                 raise ValueError(f"SMTP mode requires: {', '.join(missing)}")
             if not valid_email(self.smtp_from_email):
                 raise ValueError("SENDSTACK_SMTP_FROM_EMAIL must be a valid address")
+            if not valid_email(self.smtp_username):
+                raise ValueError("SENDSTACK_SMTP_USERNAME must be a valid mailbox address")
+            if normalize_email(self.smtp_from_email) != normalize_email(self.smtp_username):
+                raise ValueError(
+                    "SENDSTACK_SMTP_FROM_EMAIL must match SENDSTACK_SMTP_USERNAME (the Spacemail mailbox)"
+                )
             if self.smtp_port != 465:
                 raise ValueError("SMTP mode uses implicit TLS on port 465 (SENDSTACK_SMTP_PORT=465)")
         if self.per_second_limit <= 0 or self.daily_limit <= 0 or self.smtp_hourly_limit <= 0:
@@ -612,26 +659,40 @@ class DeliveryAdapter:
         if self.config.delivery_mode == "sandbox":
             return f"sandbox:{message_id}"
 
+        contract = build_smtp_mail_contract(
+            mailbox=self.config.smtp_username,
+            to_email=to_email,
+            from_name=from_name,
+            from_email=from_email,
+            html_body=html_body,
+            text_body=text_body,
+        )
+
         message = EmailMessage()
-        message["To"] = to_email
-        if normalize_email(from_email) != normalize_email(self.config.smtp_from_email):
-            raise RuntimeError("Campaign sender must match SENDSTACK_SMTP_FROM_EMAIL in SMTP mode")
-        message["From"] = f"{from_name} <{from_email}>"
+        message["To"] = contract["to"]
+        message["From"] = contract["from_header"]
         message["Subject"] = subject
-        message["Message-ID"] = f"<{message_id}@sendstack.local>"
-        message["List-Unsubscribe"] = f"<{unsubscribe_url}>"
-        message["List-Unsubscribe-Post"] = "List-Unsubscribe=One-Click"
-        message.set_content(text_body or "This message contains an HTML version.")
-        message.add_alternative(html_body, subtype="html")
+        # Spacemail assigns Message-ID (same as the webmail client).
+        if contract["text"] and contract["html"]:
+            message.set_content(contract["text"])
+            message.add_alternative(contract["html"], subtype="html")
+        elif contract["html"]:
+            message.set_content(contract["html"], subtype="html")
+        else:
+            message.set_content(contract["text"])
 
         context = ssl.create_default_context()
         with smtplib.SMTP_SSL(
-            self.config.smtp_host, self.config.smtp_port, timeout=20, context=context
+            self.config.smtp_host, self.config.smtp_port, timeout=30, context=context
         ) as smtp:
             smtp.ehlo()
             if self.config.smtp_username:
                 smtp.login(self.config.smtp_username, self.config.smtp_password)
-            smtp.send_message(message)
+            smtp.send_message(
+                message,
+                from_addr=contract["envelope_from"],
+                to_addrs=[contract["to"]],
+            )
         return f"smtp:{message_id}"
 
 
@@ -886,10 +947,6 @@ def validate_email_content(html_body: str, text_body: str) -> None:
     unknown = sorted(merge_fields - ALLOWED_MERGE_FIELDS)
     if unknown:
         raise ValueError(f"Unknown personalization field: {unknown[0]}")
-    if "{{unsubscribe_url}}" not in html_body:
-        raise ValueError("Every message must include a visible unsubscribe link")
-    if "{{unsubscribe_url}}" not in text_body:
-        raise ValueError("The plain-text version must include the unsubscribe link")
 
 
 class Application:

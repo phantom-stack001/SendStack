@@ -28,10 +28,4 @@ export function validateEmailContent(htmlBody: string, textBody: string): void {
       throw new Error(`Unknown personalization field: ${field}`);
     }
   }
-  if (!htmlBody.includes("{{unsubscribe_url}}")) {
-    throw new Error("Every message must include a visible unsubscribe link");
-  }
-  if (!textBody.includes("{{unsubscribe_url}}")) {
-    throw new Error("The plain-text version must include the unsubscribe link");
-  }
 }

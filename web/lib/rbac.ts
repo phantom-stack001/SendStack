@@ -101,6 +101,8 @@ export function requiredPermission(method: string, path: string): string | null 
     "GET /api/campaigns": "campaigns.view",
     "POST /api/campaigns": "campaigns.manage",
     "GET /api/messages": "deliveries.view",
+    "GET /api/mailbox": "deliveries.view",
+    "GET /api/mailbox/message": "deliveries.view",
     "GET /api/audit": "audit.view",
     "GET /api/users": "users.view",
     "POST /api/users": "users.manage",

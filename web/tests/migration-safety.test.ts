@@ -101,7 +101,6 @@ const COMPLETE_FACTS = {
   ],
   constraints: [
     "contacts_status_check",
-    "contacts_active_requires_consent_check",
     "campaigns_status_check",
     "campaign_recipients_status_check",
     "suppressions_reason_check",
@@ -162,6 +161,7 @@ describe("schema contract evaluation", () => {
       "0005_deliverability_hardening.sql",
       "0006_consent_volume_launch_hardening.sql",
       "0007_submission_state_machine.sql",
+      "0008_drop_consent_gate.sql",
     ]);
     expect(summarizeSchemaEvaluation(evaluation)).toMatch(/migration required/i);
   });
@@ -177,26 +177,22 @@ describe("schema contract evaluation", () => {
     expect(evaluation.missing_indexes).toEqual(["launch_jobs_one_active_per_campaign"]);
   });
 
-  it("detects a missing consent constraint", () => {
+  it("detects a missing contacts status constraint", () => {
     const evaluation = evaluateSchema({
       ...COMPLETE_FACTS,
-      constraints: COMPLETE_FACTS.constraints.filter(
-        (name) => name !== "contacts_active_requires_consent_check",
-      ),
+      constraints: COMPLETE_FACTS.constraints.filter((name) => name !== "contacts_status_check"),
     });
     expect(evaluation.ok).toBe(false);
-    expect(evaluation.missing_constraints).toEqual([
-      "contacts_active_requires_consent_check",
-    ]);
+    expect(evaluation.missing_constraints).toEqual(["contacts_status_check"]);
   });
 
   it("flags ledger entries this release does not know about", () => {
     const evaluation = evaluateSchema({
       ...COMPLETE_FACTS,
-      appliedMigrations: [...REQUIRED_MIGRATIONS, "0008_future_release.sql"],
+      appliedMigrations: [...REQUIRED_MIGRATIONS, "0009_future_release.sql"],
     });
     expect(evaluation.ok).toBe(false);
-    expect(evaluation.unknown_migrations).toEqual(["0008_future_release.sql"]);
+    expect(evaluation.unknown_migrations).toEqual(["0009_future_release.sql"]);
   });
 
   it("fails readiness when a recorded checksum does not match this release", () => {
@@ -250,8 +246,8 @@ describe("database error sanitization", () => {
   });
 
   it("passes application validation text through but replaces driver text", () => {
-    expect(safeClientMessage(new Error("Re-consent is required."), "fallback")).toBe(
-      "Re-consent is required.",
+    expect(safeClientMessage(new Error("Could not remove suppression."), "fallback")).toBe(
+      "Could not remove suppression.",
     );
     const dbMessage = safeClientMessage(
       pgError("42P01", 'relation "launch_jobs" does not exist'),

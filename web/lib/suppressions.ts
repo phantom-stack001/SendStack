@@ -132,15 +132,16 @@ export async function isEmailSuppressed(email: string): Promise<boolean> {
 }
 
 /**
- * Remove a suppression only when it is not protected.
- * Refuses protected=true records (hard bounce / complaint / provider).
+ * Remove a non-protected suppression and restore matching contacts to active.
+ * Refuses protected suppressions (bounce/complaint/provider). Caller must not
+ * write a second audit row when actorUserId is provided.
  */
-export async function removeSuppression(email: string): Promise<{
-  removed: boolean;
-  previousReason?: string;
-  previousSource?: string;
-}> {
-  const normalized = normalizeEmail(email);
+export async function removeSuppression(input: {
+  email: string;
+  actorUserId: string;
+}): Promise<{ removed: boolean; previousReason?: string; previousSource?: string }> {
+  const email = normalizeEmail(input.email);
+
   const pool = getPool();
   const client = await pool.connect();
   try {
@@ -150,7 +151,7 @@ export async function removeSuppression(email: string): Promise<{
       hasProtected
         ? `SELECT email, reason, source, protected FROM suppressions WHERE email = $1 FOR UPDATE`
         : `SELECT email, reason, source FROM suppressions WHERE email = $1 FOR UPDATE`,
-      [normalized],
+      [email],
     );
     const row = existing.rows[0];
     if (!row) {
@@ -164,83 +165,29 @@ export async function removeSuppression(email: string): Promise<{
       await client.query("ROLLBACK");
       throw new Error("Protected suppressions (bounce/complaint/provider) cannot be removed.");
     }
-    await client.query(`DELETE FROM suppressions WHERE email = $1`, [normalized]);
-    await client.query("COMMIT");
-    return { removed: true, previousReason: row.reason, previousSource: row.source };
-  } catch (error) {
-    await client.query("ROLLBACK").catch(() => undefined);
-    throw error;
-  } finally {
-    client.release();
-  }
-}
-
-/**
- * Explicit re-consent removal in one transaction.
- * Does not call the provider to re-subscribe contacts.
- * Refuses protected suppressions. Caller must not write a second audit row.
- */
-export async function removeSuppressionWithReconsent(input: {
-  email: string;
-  actorUserId: string;
-  consentNote: string;
-}): Promise<{ removed: boolean; previousReason?: string; previousSource?: string }> {
-  const email = normalizeEmail(input.email);
-  const note = input.consentNote.trim();
-  if (note.length < 12) {
-    throw new Error("Re-consent note must explain the explicit permission (at least 12 characters).");
-  }
-
-  const pool = getPool();
-  const client = await pool.connect();
-  try {
-    await client.query("BEGIN");
-    const hasProtected = await suppressionsHaveProtectedColumn(client);
-    const existing = await client.query<{ email: string; reason: string; source: string; protected?: boolean }>(
-      hasProtected
-        ? `SELECT email, reason, source, protected FROM suppressions WHERE email = $1 FOR UPDATE`
-        : `SELECT email, reason, source FROM suppressions WHERE email = $1 FOR UPDATE`,
-      [email],
-    );
-    if (!existing.rows[0]) {
-      await client.query("ROLLBACK");
-      return { removed: false };
-    }
-    if (
-      (hasProtected && existing.rows[0].protected) ||
-      PROTECTED_REASONS.has(existing.rows[0].reason as SuppressionReason)
-    ) {
-      await client.query("ROLLBACK");
-      throw new Error("Protected suppressions cannot be cleared via generic re-consent.");
-    }
 
     const deleted = await client.query<{ email: string; reason: string; source: string }>(
       `DELETE FROM suppressions WHERE email = $1 RETURNING email, reason, source`,
       [email],
     );
-    // Reactivated contacts become pending_consent until admin activation with evidence.
     await client.query(
       `UPDATE contacts
-          SET status = 'pending_consent',
-              consent_evidence = $2,
-              consent_attested_by = $3,
-              consent_source = 'suppression_reconsent',
+          SET status = 'active',
               updated_at = NOW()
         WHERE email = $1`,
-      [email, note, input.actorUserId],
+      [email],
     );
     await client.query(
       `INSERT INTO audit_events (actor_user_id, action, entity_type, entity_id, detail_json, created_at)
-       VALUES ($1, 'suppression_reconsent_removed', 'suppression', $2, $3, NOW())`,
+       VALUES ($1, 'suppression_removed', 'suppression', $2, $3, NOW())`,
       [
         input.actorUserId,
         email,
         JSON.stringify({
           previous_reason: deleted.rows[0].reason,
           previous_source: deleted.rows[0].source,
-          consent_note: note,
           provider_reactivation: false,
-          resulting_status: "pending_consent",
+          resulting_status: "active",
         }),
       ],
     );
@@ -257,3 +204,8 @@ export async function removeSuppressionWithReconsent(input: {
     client.release();
   }
 }
+
+/** @deprecated Prefer removeSuppression. */
+export const removeSuppressionWithReconsent = (
+  input: { email: string; actorUserId: string; consentNote?: string },
+) => removeSuppression({ email: input.email, actorUserId: input.actorUserId });

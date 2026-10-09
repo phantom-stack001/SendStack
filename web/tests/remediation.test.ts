@@ -1,5 +1,4 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { importContactStatus, isSendableContactStatus } from "../lib/consent";
 import { applyComplianceFooter } from "../lib/compliance-footer";
 import { assertProductionSessionCookie } from "../lib/env";
 import {
@@ -143,31 +142,37 @@ describe("compliance footer pass-through", () => {
 });
 
 describe("universal preflight including live tests", () => {
-  it("rejects fake forwards, placeholders, archives, and bad links after footer", () => {
+  it("still rejects javascript: links while allowing Spacemail-style subjects", () => {
     setIdentityEnv();
-    const footered = applyComplianceFooter(
-      '<p>Replace this text <a href="https://evil.example">x</a></p>',
-      "Replace this text",
-      loadSendingIdentity(),
-    );
-    const result = runCampaignPreflight({
+    delete process.env.SENDSTACK_ALLOWED_LINK_DOMAINS;
+    const ok = runCampaignPreflight({
       subject: "FW: invoice",
       fromName: "Ops",
       fromEmail: "news@contoso.com",
-      htmlBody: footered.html,
-      textBody: footered.text,
+      htmlBody: '<p>Replace this text <a href="https://evil.example">x</a></p>',
+      textBody: "Replace this text",
       attachmentExtensions: ["zip"],
       identity: loadSendingIdentity(),
       requirePublicHttps: true,
     });
-    expect(result.ok).toBe(false);
+    expect(ok.ok).toBe(true);
+
+    const bad = runCampaignPreflight({
+      subject: "Hello",
+      fromName: "Ops",
+      fromEmail: "news@contoso.com",
+      htmlBody: '<p><a href="javascript:alert(1)">x</a></p>',
+      textBody: "x",
+      identity: loadSendingIdentity(),
+    });
+    expect(bad.ok).toBe(false);
   });
 
   it("allows SMTP campaign launches with non-archive attachments", () => {
     setIdentityEnv();
     const footered = applyComplianceFooter(
-      '<p>Update <a href="https://www.contoso.com">site</a></p><p><a href="{{unsubscribe_url}}">Unsubscribe</a></p>',
-      "Update https://www.contoso.com\nUnsubscribe: {{unsubscribe_url}}",
+      '<p>Update <a href="https://www.contoso.com">site</a></p>',
+      "Update https://www.contoso.com",
       loadSendingIdentity(),
     );
     const result = runCampaignPreflight({

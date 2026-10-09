@@ -10,7 +10,15 @@ import unittest
 from http.cookies import SimpleCookie
 from pathlib import Path
 
-from app.server import Application, Config, DeliveryAdapter, hash_password, verify_password
+from app.server import (
+    Application,
+    Config,
+    DeliveryAdapter,
+    build_smtp_mail_contract,
+    hash_password,
+    validate_email_content,
+    verify_password,
+)
 
 
 os.environ["SENDSTACK_QUIET"] = "1"
@@ -494,6 +502,48 @@ class SecurityPrimitiveTests(unittest.TestCase):
         )
         with self.assertRaises(ValueError):
             config.validate()
+
+    def test_smtp_from_must_match_mailbox_username(self) -> None:
+        config = Config(
+            delivery_mode="smtp",
+            smtp_host="mail.spacemail.com",
+            smtp_port=465,
+            smtp_username="user@example.com",
+            smtp_password="secret",
+            smtp_from_email="other@example.com",
+        )
+        with self.assertRaises(ValueError):
+            config.validate()
+
+    def test_smtp_mail_contract_uses_mailbox_without_message_id(self) -> None:
+        contract = build_smtp_mail_contract(
+            mailbox="News@Example.COM",
+            to_email="person@customer.com",
+            from_name="SendStack News",
+            from_email="news@example.com",
+            text_body="Hello",
+        )
+        self.assertEqual(contract["mailbox"], "news@example.com")
+        self.assertEqual(contract["envelope_from"], "news@example.com")
+        self.assertEqual(contract["from_header"], "SendStack News <news@example.com>")
+        self.assertEqual(contract["to"], "person@customer.com")
+        self.assertEqual(contract["text"], "Hello")
+        self.assertNotIn("message_id", contract)
+
+    def test_smtp_mail_contract_rejects_mismatched_from(self) -> None:
+        with self.assertRaises(RuntimeError):
+            build_smtp_mail_contract(
+                mailbox="news@example.com",
+                to_email="person@customer.com",
+                from_name="News",
+                from_email="other@example.com",
+                text_body="Hello",
+            )
+
+    def test_email_content_allows_plain_body_without_unsubscribe(self) -> None:
+        validate_email_content("<p>Hello {{first_name}}</p>", "Hello {{first_name}}")
+        with self.assertRaises(ValueError):
+            validate_email_content("<script>x</script>", "Hello")
 
     def test_smtp_test_allowlist_requires_exact_addresses(self) -> None:
         config = Config(

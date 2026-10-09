@@ -15,12 +15,18 @@ import { isSpecialUseRecipientDomain, validateLiveRecipient } from "../lib/recip
 import { requiredPermission } from "../lib/rbac";
 import { liveSendBootIssues, validateProductionEnv } from "../lib/env";
 import { buildIdempotencyKey } from "../lib/live-send";
-import { smtpAcceptanceAmbiguous } from "../lib/providers/smtp";
+import { buildSmtpMailContract, smtpAcceptanceAmbiguous } from "../lib/providers/smtp";
+import {
+  buildSentAppendSource,
+  pickSentFolderPath,
+  setMailboxClientFactoryForTests,
+} from "../lib/mailbox";
 
 const originalEnv = { ...process.env };
 
 afterEach(() => {
   process.env = { ...originalEnv };
+  setMailboxClientFactoryForTests(null);
   vi.restoreAllMocks();
 });
 
@@ -73,7 +79,9 @@ describe("fixed from and reply-to identity", () => {
     delete process.env.SENDSTACK_ALLOWED_LINK_DOMAINS;
     const gaps = identityComplianceGaps();
     const gapIds = gaps.map((gap) => gap.id);
-    expect(gapIds).toEqual(expect.arrayContaining(["from_email", "reply_to", "allowed_link_domains"]));
+    expect(gapIds).toEqual(expect.arrayContaining(["from_email"]));
+    expect(gapIds).not.toContain("reply_to");
+    expect(gapIds).not.toContain("allowed_link_domains");
     expect(gapIds).not.toContain("company_name");
     expect(gapIds).not.toContain("postal_address");
   });
@@ -88,35 +96,38 @@ describe("fixed from and reply-to identity", () => {
 });
 
 describe("campaign preflight", () => {
-  it("rejects placeholders, fake forwards, disallowed links, and archives", () => {
+  it("allows Spacemail-style content and rejects only unsafe HTML", () => {
     setIdentityEnv();
-    const bad = runCampaignPreflight({
+    delete process.env.SENDSTACK_ALLOWED_LINK_DOMAINS;
+    delete process.env.SENDSTACK_REPLY_TO_EMAIL;
+
+    const withExternalLink = runCampaignPreflight({
       subject: "RE: Payment advice",
       fromName: "Billing",
       fromEmail: "news@example.com",
-      htmlBody: '<p>Replace this text <a href="https://evil.example.net">x</a> <a href="{{unsubscribe_url}}">u</a></p>',
-      textBody: "Replace this text {{unsubscribe_url}}",
+      htmlBody: '<p>Replace this text <a href="https://evil.example.net">x</a></p>',
+      textBody: "Replace this text",
       attachmentExtensions: ["zip"],
     });
-    expect(bad.ok).toBe(false);
-    if (!bad.ok) {
-      expect(bad.errors.join(" ")).toMatch(/RE:|FW:|placeholder|not in SENDSTACK_ALLOWED_LINK_DOMAINS|archive/i);
-    }
+    expect(withExternalLink.ok).toBe(true);
 
-    const footered = applyComplianceFooter(
-      '<p>Hello {{first_name}}</p><p><a href="https://www.example.com/updates">Read more</a></p><p><a href="{{unsubscribe_url}}">Unsubscribe</a></p>',
-      "Hello {{first_name}}\nRead more: https://www.example.com/updates\nUnsubscribe: {{unsubscribe_url}}",
-      loadSendingIdentity(),
-    );
-    const good = runCampaignPreflight({
+    const unsafe = runCampaignPreflight({
       subject: "March product update",
       fromName: "Example Operator",
       fromEmail: "news@example.com",
-      htmlBody: footered.html,
-      textBody: footered.text,
-      attachmentExtensions: ["pdf"],
+      htmlBody: '<p>Hi</p><script>alert(1)</script>',
+      textBody: "Hi",
     });
-    expect(good.ok).toBe(true);
+    expect(unsafe.ok).toBe(false);
+
+    const plainOnly = runCampaignPreflight({
+      subject: "March product update",
+      fromName: "Example Operator",
+      fromEmail: "news@example.com",
+      htmlBody: "",
+      textBody: "Hello {{first_name}}\nRead more: https://www.example.com/updates",
+    });
+    expect(plainOnly.ok).toBe(true);
   });
 });
 
@@ -169,6 +180,62 @@ describe("SMTP acceptance ambiguity", () => {
   it("treats connection drops as ambiguous and ordinary errors as definite", () => {
     expect(smtpAcceptanceAmbiguous(Object.assign(new Error("reset"), { code: "ECONNRESET" }))).toBe(true);
     expect(smtpAcceptanceAmbiguous(new Error("SMTP 550 rejected"))).toBe(false);
+  });
+});
+
+describe("Spacemail SMTP mail contract", () => {
+  it("uses the mailbox as From and envelope without a client Message-ID", () => {
+    const contract = buildSmtpMailContract({
+      mailbox: "News@Example.COM",
+      to: "person@customer.com",
+      fromName: "SendStack News",
+      fromEmail: "news@example.com",
+      text: "Hello",
+    });
+    expect(contract.mailbox).toBe("news@example.com");
+    expect(contract.envelopeFrom).toBe("news@example.com");
+    expect(contract.fromHeader).toBe("SendStack News <news@example.com>");
+    expect(contract.to).toBe("person@customer.com");
+    expect(contract.text).toBe("Hello");
+    expect(contract.replyTo).toBeUndefined();
+    expect(contract).not.toHaveProperty("messageId");
+  });
+
+  it("rejects a From address that is not the Spacemail mailbox", () => {
+    expect(() =>
+      buildSmtpMailContract({
+        mailbox: "news@example.com",
+        to: "person@customer.com",
+        fromName: "News",
+        fromEmail: "other@example.com",
+        text: "Hello",
+      }),
+    ).toThrow(/Spacemail mailbox/);
+  });
+
+  it("addresses exactly one recipient and keeps text-only bodies", () => {
+    const contract = buildSmtpMailContract({
+      mailbox: "news@example.com",
+      to: "only@customer.com",
+      fromName: "News",
+      fromEmail: "news@example.com",
+      text: "Plain only",
+    });
+    expect(contract.to).toBe("only@customer.com");
+    expect(contract.to.includes(",")).toBe(false);
+    expect(contract.html).toBeUndefined();
+    expect(contract.text).toBe("Plain only");
+  });
+});
+
+describe("mailbox From launch gate", () => {
+  it("reports a gap when FROM_EMAIL does not match the Spacemail mailbox", () => {
+    setIdentityEnv({
+      SENDSTACK_FROM_EMAIL: "other@example.com",
+      SENDSTACK_SMTP_USERNAME: "news@example.com",
+    });
+    const gaps = identityComplianceGaps();
+    expect(gaps.some((gap) => gap.id === "mailbox_from")).toBe(true);
   });
 });
 
@@ -228,15 +295,44 @@ describe("production readiness identity gate", () => {
   });
 });
 
-describe("list-unsubscribe headers", () => {
-  it("documents one-click header pair in SMTP send payload builder", async () => {
+describe("plain Spacemail SMTP payload", () => {
+  it("does not inject List-Unsubscribe headers and leaves Message-ID to Spacemail", async () => {
     const source = await import("node:fs").then((fs) =>
       fs.readFileSync(new URL("../lib/providers/smtp.ts", import.meta.url), "utf8"),
     );
-    expect(source).toContain("List-Unsubscribe");
-    expect(source).toContain("List-Unsubscribe-Post");
-    expect(source).toContain("List-Unsubscribe=One-Click");
+    expect(source).not.toContain("List-Unsubscribe");
+    expect(source).not.toContain("List-Unsubscribe-Post");
+    expect(source).not.toContain("unsubscribeUrl");
+    expect(source).toContain("messageId: false");
     expect(source).toContain("secure: true");
+    expect(source).toContain("buildSmtpMailContract");
+  });
+});
+
+describe("mailbox Sent folder helpers", () => {
+  it("picks \\Sent special-use then common Sent names", () => {
+    expect(
+      pickSentFolderPath([
+        { path: "INBOX" },
+        { path: "Archive" },
+        { path: "Sent Messages", specialUse: "\\Sent" },
+      ]),
+    ).toBe("Sent Messages");
+    expect(pickSentFolderPath([{ path: "INBOX" }, { path: "Sent Items" }])).toBe("Sent Items");
+  });
+
+  it("builds an RFC822 append source without opening IMAP", () => {
+    const raw = buildSentAppendSource({
+      from: "News <news@example.com>",
+      to: "person@customer.com",
+      subject: "Hello",
+      text: "Body",
+    });
+    expect(raw).toContain("From: News <news@example.com>");
+    expect(raw).toContain("To: person@customer.com");
+    expect(raw).toContain("Subject: Hello");
+    expect(raw).toContain("Body");
+    expect(raw).not.toContain("List-Unsubscribe");
   });
 });
 

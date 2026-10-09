@@ -7,10 +7,11 @@ import {
 } from "./daily-volume";
 import { getPool, query } from "./db";
 import { withSubmitBarrier } from "./submit-barrier";
-import { assertDeliveryHealthAllowsSubmit, ensureDeliveryHealthBlock } from "./delivery-health";
+import { ensureDeliveryHealthBlock } from "./delivery-health";
 import { makeId } from "./ids";
 import { buildIdempotencyKey, liveSendAllowed, smtpHourlyLimit } from "./live-send";
 import { sendSmtpEmail, smtpAcceptanceAmbiguous, type SmtpEmailInput } from "./providers/smtp";
+import { appendToSentFolder, buildSentAppendSource } from "./mailbox";
 import { loadSendingIdentity } from "./sending-identity";
 import { isSpecialUseRecipientDomain, validateLiveRecipient } from "./recipients";
 import { renderTemplate } from "./templates";
@@ -266,7 +267,7 @@ export async function claimAndPrepareCampaignLaunch(input: {
   const identity = loadSendingIdentity();
   const liveMode = input.liveMode ?? liveSendAllowed();
   const fromEmail = input.fromEmail ?? campaign.from_email;
-  const replyTo = input.replyToEmail ?? campaign.reply_to_email ?? identity.replyToEmail ?? null;
+  const replyTo = input.replyToEmail ?? campaign.reply_to_email ?? null;
   const footered = applyComplianceFooter(
     input.htmlBody ?? campaign.html_body,
     input.textBody ?? campaign.text_body,
@@ -402,7 +403,7 @@ export async function claimAndPrepareCampaignLaunch(input: {
         footered.html,
         footered.text,
         "broadcast",
-        JSON.stringify({ intent: "broadcast", campaign_id: input.campaignId }),
+        JSON.stringify({ intent: "smtp", campaign_id: input.campaignId }),
       ],
     );
 
@@ -887,24 +888,7 @@ async function preflightIrreversibleOp(
       ),
     };
   }
-  if (job.live_mode) {
-    try {
-      await assertDeliveryHealthAllowsSubmit({
-        jobId: job.id,
-        campaignId: job.campaign_id,
-        requireThresholds: true,
-      });
-    } catch (error) {
-      return {
-        ok: false,
-        result: await failJob(
-          job,
-          error instanceof Error ? error.message : "Delivery health blocked provider submission.",
-          { manualReview: true },
-        ),
-      };
-    }
-  }
+  // Delivery-health rates are reporting-only; Spacemail does not feed them.
   const audience = await enforcePreparedAudience(job);
   if (!audience.ok) return audience;
   return { ok: true };
@@ -1082,27 +1066,30 @@ export async function processLaunchJobChunk(
     }
 
     const unsubscribeUrl = `${config.publicUrl}/u/${row.unsubscribe_token}`;
+    const templateHtml = footered.html || row.html_body;
+    const templateText = footered.text || row.text_body;
+    const templateSubject = snapshot?.subject ?? row.subject;
     const mergeValues = {
       first_name: row.first_name,
       last_name: row.last_name,
       email: row.to_email,
       unsubscribe_url: unsubscribeUrl,
     };
-    const htmlBody = renderTemplate(footered.html || row.html_body, mergeValues);
-    const textBody = renderTemplate(footered.text || row.text_body, mergeValues);
-    const subject = renderTemplate(snapshot?.subject ?? row.subject, mergeValues);
+    const htmlBody = renderTemplate(templateHtml, mergeValues);
+    const textBody = renderTemplate(templateText, mergeValues);
+    const subject = renderTemplate(templateSubject, mergeValues);
+    const usesOptOut =
+      templateHtml.includes("{{unsubscribe_url}}") ||
+      templateText.includes("{{unsubscribe_url}}") ||
+      templateSubject.includes("{{unsubscribe_url}}");
+    const diagnostic: Record<string, unknown> = { intent: "smtp" };
+    if (usesOptOut) diagnostic.opt_out_url = unsubscribeUrl;
 
     await query(
       `UPDATE messages
           SET html_body = $1, text_body = $2, subject = $3, diagnostic_json = $4
         WHERE id = $5 AND status IN ('captured', 'failed')`,
-      [
-        htmlBody,
-        textBody,
-        subject,
-        JSON.stringify({ intent: "smtp", list_unsubscribe: unsubscribeUrl }),
-        row.id,
-      ],
+      [htmlBody, textBody, subject, JSON.stringify(diagnostic), row.id],
     );
 
     let providerAttempted = false;
@@ -1133,19 +1120,32 @@ export async function processLaunchJobChunk(
         }
         providerAttempted = true;
         await fenceUpdate(job, `status = 'running'`, []);
+        const fromEmail = snapshot?.from_email || row.from_email;
         const accepted = await sendFn({
           to: row.to_email,
           subject,
-          html: htmlBody,
-          text: textBody,
+          html: htmlBody || undefined,
+          text: textBody || undefined,
           fromName,
-          fromEmail: snapshot?.from_email || row.from_email,
-          replyTo,
-          unsubscribeUrl,
+          fromEmail,
+          replyTo: replyTo || undefined,
           attachments,
-          messageId: row.id,
         });
         if (options?.afterProviderAccepted) await options.afterProviderAccepted();
+        const submittedDiagnostic: Record<string, unknown> = { provider_id: accepted.id };
+        if (usesOptOut) submittedDiagnostic.opt_out_url = unsubscribeUrl;
+        const raw =
+          accepted.raw ||
+          buildSentAppendSource({
+            from: `${fromName} <${fromEmail}>`,
+            to: row.to_email,
+            subject,
+            text: textBody || undefined,
+            html: htmlBody || undefined,
+            replyTo: replyTo || undefined,
+          });
+        const sentAppend = await appendToSentFolder(raw);
+        if (!sentAppend.ok) submittedDiagnostic.sent_append_error = sentAppend.error;
         await query(
           `UPDATE messages
               SET status = 'submitted',
@@ -1153,11 +1153,7 @@ export async function processLaunchJobChunk(
                   error = NULL,
                   diagnostic_json = $2
             WHERE id = $3`,
-          [
-            accepted.id,
-            JSON.stringify({ provider_id: accepted.id, list_unsubscribe: unsubscribeUrl }),
-            row.id,
-          ],
+          [accepted.id, JSON.stringify(submittedDiagnostic), row.id],
         );
         if (row.recipient_id) {
           await query(

@@ -11,7 +11,7 @@ The application code does **not** perform these steps. Agents and automation mus
 4. Set Spacemail SMTP env vars (`SENDSTACK_SMTP_HOST=mail.spacemail.com`, port `465`, username, password).
 5. Confirm Spacemail DNS (MX/SPF/DKIM/DMARC) for the sending domain.
 6. Set `CRON_SECRET` and point an external scheduler at `GET /api/cron/launch-jobs` every minute.
-7. Keep `SENDSTACK_LIVE_SEND_ENABLED=false` until a consented canary is ready.
+7. Keep `SENDSTACK_LIVE_SEND_ENABLED=false` until a small internal canary is ready.
 8. Unlock live send, send a small canary, confirm SMTP acceptance in Deliveries, then ramp within the 500/hour mailbox limit.
 
 Preview deployments must never receive production SMTP credentials.

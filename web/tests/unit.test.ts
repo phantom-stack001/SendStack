@@ -1,4 +1,6 @@
 import { createHmac } from "crypto";
+import { readFileSync } from "fs";
+import { join } from "path";
 import { describe, expect, it } from "vitest";
 import { requireCsrf, passwordChangeAllowedPath, type SessionUser } from "../lib/auth";
 import { hashPassword, verifyPassword, normalizeEmail, validEmail, makeId } from "../lib/ids";
@@ -75,7 +77,7 @@ describe("rbac", () => {
     expect(requiredPermission("POST", "/api/auth/login")).toBeNull();
   });
 
-  it("lets marketers view delivery message details but not simulate feedback", () => {
+  it("lets marketers view delivery message details without feedback permission", () => {
     expect(permissionsForRole("marketer").has("deliveries.view")).toBe(true);
     expect(permissionsForRole("marketer").has("deliveries.feedback")).toBe(false);
     expect(requiredPermission("GET", "/api/messages")).toBe("deliveries.view");
@@ -113,10 +115,8 @@ describe("email helpers", () => {
     expect(validEmail("nope")).toBe(false);
   });
 
-  it("requires unsubscribe merge fields and rejects unsafe HTML", () => {
-    expect(() => validateEmailContent("<p>Hi {{first_name}}</p>", "Hi {{first_name}}")).toThrow(
-      /unsubscribe/,
-    );
+  it("allows plain bodies without unsubscribe and rejects unsafe HTML", () => {
+    expect(() => validateEmailContent("<p>Hi {{first_name}}</p>", "Hi {{first_name}}")).not.toThrow();
     expect(() =>
       validateEmailContent(
         '<p><a href="{{unsubscribe_url}}">unsub</a><script>x</script></p>',
@@ -179,5 +179,29 @@ describe("webhook signature and replay guards", () => {
 describe("production env validation", () => {
   it("is a no-op outside production-like environments", () => {
     expect(() => validateProductionEnv()).not.toThrow();
+  });
+});
+
+describe("Spacemail-style UI contract", () => {
+  const appJs = readFileSync(join(__dirname, "../public/app.js"), "utf8");
+
+  it("uses email-first contact copy and email-only import", () => {
+    expect(appJs).not.toMatch(/Unnamed contact/);
+    expect(appJs).not.toMatch(/pending_consent/);
+    expect(appJs).not.toMatch(/firstNameColumn|lastNameColumn|first-name-column|last-name-column/);
+  });
+
+  it("keeps campaign starters free of first-name greetings and forced unsubscribe", () => {
+    expect(appJs).not.toMatch(/Hello \{\{first_name\}\}/);
+    expect(appJs).toMatch(/Share the update here/);
+    expect(appJs).not.toMatch(/Unsubscribe: \{\{unsubscribe_url\}\}/);
+    expect(appJs).not.toMatch(/Unsubscribe link is in the HTML and plain text/);
+  });
+
+  it("limits live delivery filters and drops simulated bounce/complaint actions", () => {
+    expect(appJs).toMatch(/FILTER_STATUSES = \["captured", "submitted", "failed", "unsubscribed", "suppressed"\]/);
+    expect(appJs).not.toMatch(/data-feedback/);
+    expect(appJs).not.toMatch(/Record hard bounce|Record complaint/);
+    expect(appJs).not.toMatch(/\/api\/messages\/\$\{[^}]+\}\/event/);
   });
 });

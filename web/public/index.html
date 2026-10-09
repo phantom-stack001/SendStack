@@ -10,84 +10,128 @@
     <script src="/app.js?v=dev" defer></script>
   </head>
   <body>
+    <a class="skip-link" href="#content">Skip to content</a>
+
     <div id="login-screen" class="login-screen" hidden>
-      <div class="login-visual" aria-hidden="true">
-        <div class="signal signal-a"></div>
-        <div class="signal signal-b"></div>
-        <div class="signal signal-c"></div>
-        <div class="mail-route">
-          <span class="route-node">C</span>
-          <span class="route-line"></span>
-          <span class="route-node route-node-small"></span>
-          <span class="route-line route-line-short"></span>
-          <span class="route-node route-node-small"></span>
-        </div>
+      <div class="login-visual">
+        <div class="brand"><span class="brand-mark" aria-hidden="true">C</span><span class="brand-name">CTN</span></div>
+        <p>Communication &amp; Technology Network. Consent, delivery, and a record of what was sent.</p>
       </div>
       <main class="login-panel">
         <div class="login-card">
-          <div class="brand brand-login"><span class="brand-mark">C</span><span>CTN</span></div>
-          <p class="eyebrow">CAMPAIGN WORKSPACE</p>
-          <h1>Plan, deliver, and learn<br />from every campaign.</h1>
+          <div class="brand"><span class="brand-mark" aria-hidden="true">C</span><span class="brand-name">CTN</span></div>
+          <p class="eyebrow">Campaign workspace</p>
+          <h1>Plan, deliver, and learn from every campaign.</h1>
           <p class="login-copy">Sign in to manage audiences, create campaigns, review delivery, and protect subscriber preferences.</p>
           <form id="login-form" class="stack" autocomplete="on">
-            <label>Email address<input id="login-email" name="email" type="email" autocomplete="username" placeholder="you@example.com" required /></label>
-            <label>Password<input id="login-password" name="password" type="password" autocomplete="current-password" required /></label>
+            <label for="login-email">Email address <span class="req">Required</span>
+              <input id="login-email" name="email" type="email" autocomplete="username" placeholder="you@example.com" required />
+            </label>
+            <div class="password-field">
+              <label for="login-password">Password <span class="req">Required</span>
+                <input id="login-password" name="password" type="password" autocomplete="current-password" required aria-describedby="caps-lock-hint login-error" />
+              </label>
+              <button type="button" id="toggle-password" class="icon-button" aria-label="Show password" aria-pressed="false"></button>
+            </div>
+            <p id="caps-lock-hint" class="help" hidden>Caps Lock is on.</p>
             <p id="login-error" class="form-error" role="alert"></p>
             <button class="button primary full" type="submit">Sign in</button>
           </form>
-          <p class="login-hint">Use the account provided by your workspace administrator.</p>
+          <p class="login-hint">Use the account provided by your workspace administrator. <a href="/#contact">Contact CTN</a> if you need help signing in.</p>
         </div>
       </main>
     </div>
 
     <div id="app-shell" class="app-shell" hidden>
-      <aside class="sidebar">
-        <div class="brand"><span class="brand-mark">C</span><span>CTN</span></div>
-        <div id="mode-pill" class="mode-pill"><span></span> Preview</div>
-        <nav id="main-nav" aria-label="Primary navigation">
-          <button data-view="dashboard" class="nav-item active"><span class="nav-icon">⌂</span>Overview</button>
-          <button data-view="contacts" data-permission="contacts.view" class="nav-item"><span class="nav-icon">◎</span>Contacts</button>
-          <button data-view="campaigns" data-permission="campaigns.view" class="nav-item"><span class="nav-icon">✦</span>Campaigns</button>
-          <button data-view="sending" data-permission="sending.view" class="nav-item"><span class="nav-icon">◇</span>Sending setup</button>
-          <button data-view="deliveries" data-permission="deliveries.view" class="nav-item"><span class="nav-icon">↗</span>Deliveries</button>
-          <button data-view="suppressions" data-permission="suppressions.view" class="nav-item"><span class="nav-icon">⊘</span>Suppressions</button>
-          <button data-view="users" data-permission="users.view" class="nav-item"><span class="nav-icon">◉</span>Users &amp; roles</button>
-          <button data-view="audit" data-permission="audit.view" class="nav-item"><span class="nav-icon">≡</span>Audit log</button>
+      <div id="nav-backdrop" class="nav-backdrop" hidden></div>
+      <aside id="sidebar" class="sidebar">
+        <div class="sidebar-head">
+          <a class="brand" href="#/overview">
+            <span class="brand-mark" aria-hidden="true">C</span>
+            <span class="brand-name">CTN</span>
+          </a>
+          <button type="button" id="nav-close" class="icon-button mobile-only" aria-label="Close navigation"></button>
+        </div>
+        <nav id="main-nav" aria-label="Primary">
+          <a class="nav-item" href="#/overview" data-view="overview"><span class="nav-icon" data-icon="home"></span>Overview</a>
+          <a class="nav-item" href="#/contacts" data-view="contacts" data-permission="contacts.view"><span class="nav-icon" data-icon="contacts"></span>Contacts</a>
+          <a class="nav-item" href="#/campaigns" data-view="campaigns" data-permission="campaigns.view"><span class="nav-icon" data-icon="campaigns"></span>Campaigns</a>
+          <a class="nav-item" href="#/sending" data-view="sending" data-permission="sending.view"><span class="nav-icon" data-icon="sending"></span>Sending setup</a>
+          <a class="nav-item" href="#/deliveries" data-view="deliveries" data-permission="deliveries.view"><span class="nav-icon" data-icon="deliveries"></span>Deliveries</a>
+          <a class="nav-item" href="#/mailbox" data-view="mailbox" data-permission="deliveries.view"><span class="nav-icon" data-icon="mailbox"></span>Mailbox</a>
+          <a class="nav-item" href="#/suppressions" data-view="suppressions" data-permission="suppressions.view"><span class="nav-icon" data-icon="suppressions"></span>Suppressions</a>
+          <a class="nav-item" href="#/users" data-view="users" data-permission="users.view"><span class="nav-icon" data-icon="users"></span>Users &amp; roles</a>
+          <a class="nav-item" href="#/audit" data-view="audit" data-permission="audit.view"><span class="nav-icon" data-icon="audit"></span>Audit log</a>
         </nav>
         <div class="sidebar-foot">
-          <div class="user-chip">
-            <span id="user-initials" class="avatar">TA</span>
-            <div><strong id="user-name">Administrator</strong><span id="user-role">Administrator</span></div>
+          <button type="button" id="account-button" class="account-button" aria-haspopup="menu" aria-expanded="false" aria-controls="account-menu">
+            <span id="user-initials" class="avatar" aria-hidden="true">CT</span>
+            <span>
+              <strong id="user-name">Signed in</strong>
+              <span id="user-role" class="role">Role</span>
+            </span>
+          </button>
+          <div id="account-menu" class="menu" role="menu" hidden>
+            <div class="menu-label">Theme</div>
+            <button type="button" role="menuitemradio" data-theme-choice="system" aria-checked="true">Match system</button>
+            <button type="button" role="menuitemradio" data-theme-choice="light" aria-checked="false">Light</button>
+            <button type="button" role="menuitemradio" data-theme-choice="dark" aria-checked="false">Dark</button>
+            <button type="button" role="menuitem" id="menu-password">Change password</button>
+            <button type="button" role="menuitem" id="logout-button">Sign out</button>
           </div>
-          <button id="logout-button" class="text-button">Sign out</button>
         </div>
       </aside>
 
       <div class="workspace">
         <header class="topbar">
-          <button id="mobile-nav-button" class="icon-button mobile-only" aria-label="Open navigation">☰</button>
+          <button type="button" id="mobile-nav-button" class="icon-button mobile-only" aria-label="Open navigation" aria-expanded="false" aria-controls="sidebar"></button>
           <div>
-            <p id="page-kicker" class="eyebrow">OPERATIONS</p>
+            <p id="page-kicker" class="eyebrow">Operations</p>
             <h1 id="page-title">Overview</h1>
           </div>
           <div class="topbar-actions">
-            <div id="queue-status" class="queue-status"><span></span><strong>Queue clear</strong></div>
-            <button id="global-new-campaign" data-permission="campaigns.manage" class="button primary">New message</button>
+            <span id="refresh-indicator" class="refresh-indicator" hidden>Updating</span>
+            <div class="status-wrap">
+              <button type="button" id="status-button" class="status-button" data-state="preview" aria-expanded="false" aria-controls="status-popover">
+                <span class="status-dot" aria-hidden="true"></span>
+                <span id="status-label">Preview</span>
+              </button>
+              <div id="status-popover" class="popover" role="dialog" aria-label="Sending status" hidden></div>
+            </div>
+            <button type="button" id="global-new-campaign" class="button primary">New campaign</button>
           </div>
         </header>
         <main id="content" class="content" tabindex="-1">
-          <div class="loading-grid" aria-label="Loading"><div></div><div></div><div></div></div>
+          <div class="loading-grid" aria-label="Loading"><div class="skeleton"></div><div class="skeleton"></div><div class="skeleton"></div></div>
         </main>
+      </div>
+    </div>
+
+    <div id="drawer" class="drawer" hidden>
+      <div class="drawer-backdrop" data-close-drawer></div>
+      <div class="drawer-panel" role="dialog" aria-modal="true" aria-labelledby="drawer-title">
+        <header>
+          <div>
+            <p id="drawer-kicker" class="eyebrow"></p>
+            <h2 id="drawer-title"></h2>
+          </div>
+          <button type="button" id="drawer-close" class="icon-button" aria-label="Close panel"></button>
+        </header>
+        <div id="drawer-body" class="drawer-body"></div>
       </div>
     </div>
 
     <div id="toast-region" class="toast-region" aria-live="polite"></div>
 
-    <dialog id="modal" class="modal">
-      <div class="modal-frame">
-        <div class="modal-head"><div><p id="modal-kicker" class="eyebrow"></p><h2 id="modal-title"></h2></div><button id="modal-close" class="icon-button" aria-label="Close dialog">×</button></div>
-        <div id="modal-body" class="modal-body"></div>
+    <dialog id="modal" class="modal" aria-labelledby="modal-title">
+      <div class="modal-head">
+        <div>
+          <p id="modal-kicker" class="eyebrow"></p>
+          <h2 id="modal-title"></h2>
+        </div>
+        <button type="button" id="modal-close" class="icon-button" aria-label="Close dialog"></button>
       </div>
+      <div id="modal-body" class="modal-body"></div>
     </dialog>
   </body>
 </html>

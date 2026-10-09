@@ -46,14 +46,15 @@ describe.skipIf(!dbAvailable)("migration runner safety (disposable PostgreSQL)",
     expect(stdout).toMatch(/Applied 0001_init\.sql/);
     expect(stdout).toMatch(/Applied 0006_consent_volume_launch_hardening\.sql/);
     expect(stdout).toMatch(/Applied 0007_submission_state_machine\.sql/);
+    expect(stdout).toMatch(/Applied 0008_drop_consent_gate\.sql/);
     expect(stdout).toMatch(/Schema assertions passed/);
     expect(stdout).toMatch(/Migrations complete/);
 
     const ledger = await query<{ id: string; checksum: string; checksum_source: string }>(
       `SELECT id, checksum, checksum_source FROM schema_migrations ORDER BY id`,
     );
-    expect(ledger.rows).toHaveLength(7);
-    expect(ledger.rows.map((row) => row.id)).toContain("0007_submission_state_machine.sql");
+    expect(ledger.rows).toHaveLength(8);
+    expect(ledger.rows.map((row) => row.id)).toContain("0008_drop_consent_gate.sql");
     for (const row of ledger.rows) {
       expect(row.checksum).toMatch(/^[0-9a-f]{64}$/);
       expect(row.checksum_source).toBe("applied");
@@ -158,13 +159,13 @@ describe.skipIf(!dbAvailable)("migration runner safety (disposable PostgreSQL)",
   });
 
   it("dry run reports pending work without executing it", async () => {
-    await query(`DELETE FROM schema_migrations WHERE id = '0007_submission_state_machine.sql'`);
+    await query(`DELETE FROM schema_migrations WHERE id = '0008_drop_consent_gate.sql'`);
     const before = await query<{ id: string; checksum: string | null }>(
       `SELECT id, checksum FROM schema_migrations ORDER BY id`,
     );
     try {
       const { stdout } = await migrate(["--dry-run"]);
-      expect(stdout).toMatch(/Pending: 0007_submission_state_machine\.sql/);
+      expect(stdout).toMatch(/Pending: 0008_drop_consent_gate\.sql/);
       expect(stdout).toMatch(/Dry run: no statements were executed/);
       const ledger = await query<{ id: string; checksum: string | null }>(
         `SELECT id, checksum FROM schema_migrations ORDER BY id`,
@@ -182,7 +183,7 @@ describe.skipIf(!dbAvailable)("migration runner safety (disposable PostgreSQL)",
     const before = await query<{ id: string }>(`SELECT id FROM schema_migrations ORDER BY id`);
     try {
       const { stdout } = await migrate(["--dry-run"]);
-      expect(stdout).toMatch(/Would baseline checksums for 7 previously applied migration/);
+      expect(stdout).toMatch(/Would baseline checksums for 8 previously applied migration/);
       expect(stdout).toMatch(/Pending: none/);
       expect(stdout).toMatch(/Dry run: no statements were executed/);
       expect(stdout).not.toMatch(/Applied /);
