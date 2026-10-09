@@ -344,9 +344,98 @@ Import: `POST /api/contacts/import/preview`, `POST /api/contacts/import` (uses `
 
 Suppressions: `GET/POST /api/suppressions`.
 
-### Phase 6+ (planned)
+## Campaign management (Phase 6)
 
-Campaign workflows, queue workers, and server-side delivery infrastructure.
+Phase 6 covers **campaign preparation only** — no SMTP, queues, workers, or automatic sending.
+
+### Routes
+
+| Path | Purpose |
+| --- | --- |
+| `/app/campaigns/` | Campaign list, stats, filters |
+| `/app/campaigns/new/` | Multi-step create wizard |
+| `/app/campaigns/:campaignId/` | Details, preview, events |
+| `/app/campaigns/:campaignId/edit/` | Edit draft campaigns |
+
+### Database tables
+
+`campaigns`, `campaign_recipient_sources`, `campaign_recipients`, `campaign_events` (migration `drizzle/migrations/0003_campaign_management.sql`).
+
+- Campaign content is **snapshotted** from `email_drafts` (`source_draft_id` is traceability only).
+- Recipient **sources** reference contacts and/or lists; **snapshots** in `campaign_recipients` store normalized email + eligibility at prepare/ready time.
+- Status lifecycle (Phase 6 active): `draft`, `ready`, `scheduled`, `cancelled`. Reserved for delivery phases: `queued`, `sending`, `completed`, `failed`.
+- `scheduled_at` + `schedule_timezone` record **intended** delivery only (no job execution).
+
+### Eligibility rules
+
+Server-side evaluation (`server/services/campaign-eligibility.ts`):
+
+- Deduplicate by normalized email (deterministic contact ID tie-break).
+- **Eligible:** `subscription_status = subscribed` and not on `email_suppressions`.
+- **Excluded:** unsubscribed, unknown/pending consent, suppressed, invalid email.
+- Recalculated on validate/prepare and before marking ready.
+
+### Campaign APIs (session required)
+
+| Method | Path | Description |
+| --- | --- | --- |
+| `GET` | `/api/campaigns` | Paginated list (`q`, `status`) |
+| `POST` | `/api/campaigns` | Create draft campaign |
+| `GET` | `/api/campaigns/stats` | Aggregate counts |
+| `GET` | `/api/campaigns/:id` | Detail + sources + recent events |
+| `PATCH` | `/api/campaigns/:id` | Update (`expectedRevision` for optimistic locking) |
+| `DELETE` | `/api/campaigns/:id` | Delete **draft** only |
+| `POST` | `/api/campaigns/:id/duplicate` | Duplicate as new draft |
+| `POST` | `/api/campaigns/:id/validate` | Content + eligibility preview |
+| `POST` | `/api/campaigns/:id/prepare` | Recipient snapshot (`markReady` optional) |
+| `POST` | `/api/campaigns/:id/cancel` | Cancel pre-processing campaigns |
+| `GET` | `/api/campaigns/:id/events` | Audit history |
+
+Ownership is enforced on campaigns, drafts, contacts, and lists. Cross-user IDs are rejected.
+
+### Known limitations (Phase 6)
+
+- No email delivery, open/click tracking, or bounce handling.
+- Scheduled times are stored but **not executed**.
+- Eligibility snapshots are point-in-time; future delivery must re-check consent and suppressions.
+- Sender addresses are syntactically validated only (not verified sending identities).
+
+## Queue infrastructure (Phase 7)
+
+Phase 7 adds **Redis + BullMQ** workers for **simulation-only** processing. **No SMTP, no outbound email, no delivery providers.**
+
+### Processes
+
+| Script | Role |
+| --- | --- |
+| `npm run dev:server` | Hono API |
+| `npm run dev:dispatcher` | Publishes pending `delivery_jobs` to BullMQ |
+| `npm run dev:worker` | Simulates per-recipient jobs |
+| `npm run queue:reconcile` | Republish orphaned pending jobs |
+
+### Environment (server only)
+
+`QUEUE_ENABLED`, `QUEUE_SIMULATION_ONLY=true` (required), `REDIS_URL`, `QUEUE_WORKER_CONCURRENCY`, `QUEUE_MAX_JOBS_PER_SECOND`, `QUEUE_MAX_ATTEMPTS`, `QUEUE_JOB_RETENTION_DAYS`, `QUEUE_SIMULATION_DELAY_MS`.
+
+The API starts without Redis when `QUEUE_ENABLED=false`.
+
+### Database tables
+
+`delivery_jobs`, `delivery_job_attempts`, `queue_events` (migration `0004_queue_infrastructure.sql`).
+
+Durable jobs are created in PostgreSQL first; the dispatcher publishes to BullMQ (`sendstack:campaign-dispatch`, `sendstack:email-processing`).
+
+### Queue APIs
+
+`GET /api/queue/overview`, `GET /api/queue/jobs`, `GET /api/queue/jobs/:id`, `GET /api/queue/events`, `POST /api/queue/jobs/:id/retry`, `POST /api/queue/reconcile`, `POST /api/campaigns/:id/enqueue`, `POST /api/campaigns/:id/pause`, `POST /api/campaigns/:id/resume` (cancel uses extended `/api/campaigns/:id/cancel`).
+
+### Job statuses
+
+`pending`, `queued`, `processing`, `retry_wait`, `simulation_completed`, `simulation_failed`, `skipped`, `cancelled` — never `sent` or `delivered`.
+
+### UI
+
+`/app/queue/` — live stats and job table (polls every 5s). Campaign details include **Activate simulation queue** controls.
 
 ### Production deployment
 

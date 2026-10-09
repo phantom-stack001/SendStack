@@ -65,7 +65,7 @@ export function fetchContacts(params: {
   page?: number;
   limit?: number;
   q?: string;
-  status?: SubscriptionStatus;
+  status?: "subscribed" | "unsubscribed";
   listId?: string;
   sort?: string;
 }) {

@@ -18,7 +18,7 @@ export function DashboardPage() {
         <PageHeader
           title="Dashboard"
           description="Manage your email campaigns and sending activity."
-          notice="Workspace data is not connected yet — campaign and queue features arrive in later phases."
+          notice="Email delivery is not enabled — queue jobs run in simulation-only mode when Redis workers are active."
         />
         <DashboardStats />
         <QuickActions />

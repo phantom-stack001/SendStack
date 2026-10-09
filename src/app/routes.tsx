@@ -5,11 +5,15 @@ import { ProtectedRoute } from "@/components/auth/ProtectedRoute";
 import { AuthLayout } from "@/components/layout/AuthLayout";
 import { DashboardLayout } from "@/components/layout/DashboardLayout";
 import { PublicLayout } from "@/components/layout/PublicLayout";
+import { CampaignDetailsPage } from "@/pages/app/CampaignDetailsPage";
 import { CampaignsPage } from "@/pages/app/CampaignsPage";
+import { CreateCampaignPage } from "@/pages/app/CreateCampaignPage";
+import { EditCampaignPage } from "@/pages/app/EditCampaignPage";
 import { ComposePage } from "@/pages/app/ComposePage";
 import { DraftsPage } from "@/pages/app/DraftsPage";
 import { DashboardPage } from "@/pages/app/DashboardPage";
 import { HistoryPage } from "@/pages/app/HistoryPage";
+import { QueueJobDetailsPage } from "@/pages/app/QueueJobDetailsPage";
 import { QueuePage } from "@/pages/app/QueuePage";
 import { ContactListDetailsPage } from "@/pages/app/ContactListDetailsPage";
 import { ContactListsPage } from "@/pages/app/ContactListsPage";
@@ -109,6 +113,9 @@ export const appRoutes = [
       { path: "compose/:draftId/", element: <ComposePage /> },
       { path: "drafts/", element: <DraftsPage /> },
       { path: "campaigns/", element: <CampaignsPage /> },
+      { path: "campaigns/new/", element: <CreateCampaignPage /> },
+      { path: "campaigns/:campaignId/", element: <CampaignDetailsPage /> },
+      { path: "campaigns/:campaignId/edit/", element: <EditCampaignPage /> },
       { path: "recipients/", element: <RecipientsPage /> },
       { path: "recipients/lists/", element: <ContactListsPage /> },
       { path: "recipients/lists/:listId/", element: <ContactListDetailsPage /> },
@@ -116,6 +123,7 @@ export const appRoutes = [
       { path: "recipients/suppressions/", element: <SuppressionsPage /> },
       { path: "templates/", element: <TemplatesPage /> },
       { path: "queue/", element: <QueuePage /> },
+      { path: "queue/jobs/:jobId/", element: <QueueJobDetailsPage /> },
       { path: "history/", element: <HistoryPage /> },
       { path: "settings/", element: <SettingsPage /> },
     ],

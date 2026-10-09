@@ -69,9 +69,6 @@ export function registerContactRoutes(app: Hono) {
         if (error.message === "DUPLICATE_EMAIL") {
           return c.json({ error: "A contact with this email already exists" }, 409);
         }
-        if (error.message === "CONSENT_REQUIRED") {
-          return c.json({ error: "Consent evidence is required for subscribed contacts" }, 400);
-        }
       }
       throw error;
     }
@@ -108,9 +105,6 @@ export function registerContactRoutes(app: Hono) {
       if (error instanceof Error) {
         if (error.message === "DUPLICATE_EMAIL") {
           return c.json({ error: "A contact with this email already exists" }, 409);
-        }
-        if (error.message === "CONSENT_REQUIRED") {
-          return c.json({ error: "Consent evidence is required for subscribed contacts" }, 400);
         }
       }
       throw error;

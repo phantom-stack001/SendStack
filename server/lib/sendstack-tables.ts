@@ -31,6 +31,13 @@ export const SENDSTACK_APP_TABLES = [
   "contact_list_members",
   "contact_consent_events",
   "email_suppressions",
+  "campaigns",
+  "campaign_recipient_sources",
+  "campaign_recipients",
+  "campaign_events",
+  "delivery_jobs",
+  "delivery_job_attempts",
+  "queue_events",
 ] as const;
 
 export const DRIZZLE_META_TABLES = ["__drizzle_migrations"] as const;

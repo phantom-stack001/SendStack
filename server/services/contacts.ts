@@ -1,4 +1,4 @@
-import { and, asc, desc, eq, ilike, inArray, or, sql } from "drizzle-orm";
+import { and, asc, desc, eq, ilike, inArray, ne, or, sql } from "drizzle-orm";
 
 import type { Database } from "../db/index.js";
 import {
@@ -12,6 +12,24 @@ import { isValidEmail, normalizeEmail } from "../lib/email-normalization.js";
 import type { SubscriptionStatus } from "../validation/contacts.js";
 
 export type ContactRow = typeof contacts.$inferSelect;
+
+/** Default consent when a contact is marked subscribed without explicit evidence (manual add / dashboard). */
+export const DEFAULT_SUBSCRIBED_CONSENT = {
+  source: "SendStack manual add",
+  method: "dashboard",
+} as const;
+
+function resolveSubscribedConsent(input: {
+  consentSource?: string;
+  consentMethod?: string;
+  consentOccurredAt?: string;
+}) {
+  return {
+    consentSource: input.consentSource?.trim() || DEFAULT_SUBSCRIBED_CONSENT.source,
+    consentMethod: input.consentMethod?.trim() || DEFAULT_SUBSCRIBED_CONSENT.method,
+    consentOccurredAt: input.consentOccurredAt ?? new Date().toISOString(),
+  };
+}
 
 export function serializeContact(
   row: ContactRow,
@@ -98,7 +116,7 @@ export async function listContacts(
     page: number;
     limit: number;
     q?: string;
-    status?: SubscriptionStatus;
+    status?: "subscribed" | "unsubscribed";
     listId?: string;
     sort: "created_at_desc" | "created_at_asc" | "email_asc";
   },
@@ -106,8 +124,10 @@ export async function listContacts(
   const offset = (options.page - 1) * options.limit;
   const conditions = [eq(contacts.userId, userId)];
 
-  if (options.status) {
-    conditions.push(eq(contacts.subscriptionStatus, options.status));
+  if (options.status === "subscribed") {
+    conditions.push(eq(contacts.subscriptionStatus, "subscribed"));
+  } else if (options.status === "unsubscribed") {
+    conditions.push(ne(contacts.subscriptionStatus, "subscribed"));
   }
 
   if (options.q?.trim()) {
@@ -238,12 +258,13 @@ export async function createContact(
   }
 
   const suppressed = await isEmailSuppressed(db, userId, email);
-  let status: SubscriptionStatus = input.subscriptionStatus ?? "unknown";
+  let status: SubscriptionStatus = input.subscriptionStatus ?? "subscribed";
   if (suppressed) {
     status = "unsubscribed";
-  } else if (status === "subscribed" && !input.consentSource) {
-    throw new Error("CONSENT_REQUIRED");
   }
+
+  const consent =
+    status === "subscribed" ? resolveSubscribedConsent(input) : null;
 
   const id = crypto.randomUUID();
   try {
@@ -263,14 +284,14 @@ export async function createContact(
 
     if (!row) throw new Error("CREATE_FAILED");
 
-    if (status === "subscribed" && input.consentSource && input.consentOccurredAt) {
+    if (status === "subscribed" && consent) {
       await recordConsentEvent(db, {
         userId,
         contactId: row.id,
         eventType: "consent_granted",
-        source: input.consentSource,
-        occurredAt: new Date(input.consentOccurredAt),
-        metadata: input.consentMethod ? { method: input.consentMethod } : undefined,
+        source: consent.consentSource,
+        occurredAt: new Date(consent.consentOccurredAt),
+        metadata: { method: consent.consentMethod },
       });
     }
 
@@ -317,13 +338,12 @@ export async function updateContact(
   const suppressed = await isEmailSuppressed(db, userId, nextEmail);
   if (suppressed) {
     nextStatus = "unsubscribed";
-  } else if (nextStatus === "subscribed") {
-    if (emailChanged || existing.subscriptionStatus !== "subscribed") {
-      if (!input.consentSource || !input.consentOccurredAt) {
-        throw new Error("CONSENT_REQUIRED");
-      }
-    }
   }
+
+  const subscribing =
+    nextStatus === "subscribed" &&
+    (emailChanged || existing.subscriptionStatus !== "subscribed");
+  const consent = subscribing ? resolveSubscribedConsent(input) : null;
 
   try {
     const [row] = await db
@@ -342,19 +362,14 @@ export async function updateContact(
 
     if (!row) return null;
 
-    if (
-      nextStatus === "subscribed" &&
-      input.consentSource &&
-      input.consentOccurredAt &&
-      (emailChanged || existing.subscriptionStatus !== "subscribed")
-    ) {
+    if (subscribing && consent) {
       await recordConsentEvent(db, {
         userId,
         contactId: row.id,
         eventType: emailChanged ? "consent_updated" : "consent_granted",
-        source: input.consentSource,
-        occurredAt: new Date(input.consentOccurredAt),
-        metadata: input.consentMethod ? { method: input.consentMethod } : undefined,
+        source: consent.consentSource,
+        occurredAt: new Date(consent.consentOccurredAt),
+        metadata: { method: consent.consentMethod },
       });
     }
 

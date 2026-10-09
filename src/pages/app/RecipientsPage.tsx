@@ -25,6 +25,7 @@ import { Card, CardContent } from "@/components/ui/card";
 import {
   Dialog,
   DialogContent,
+  DialogDescription,
   DialogFooter,
   DialogHeader,
   DialogTitle,
@@ -46,7 +47,6 @@ import {
   type Contact,
   type ContactInput,
   type ContactList,
-  type SubscriptionStatus,
   unsubscribeContact,
   updateContact,
 } from "@/lib/recipients-api";
@@ -61,7 +61,7 @@ export function RecipientsPage() {
   const [page, setPage] = useState(1);
   const [totalPages, setTotalPages] = useState(1);
   const [q, setQ] = useState("");
-  const [status, setStatus] = useState<SubscriptionStatus | "">("");
+  const [status, setStatus] = useState<"subscribed" | "unsubscribed" | "">("");
   const [listId, setListId] = useState("");
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [dialogOpen, setDialogOpen] = useState(false);
@@ -71,6 +71,8 @@ export function RecipientsPage() {
   const [newListName, setNewListName] = useState("");
   const [addToListOpen, setAddToListOpen] = useState(false);
   const [targetListId, setTargetListId] = useState("");
+  const [addToListContactIds, setAddToListContactIds] = useState<string[]>([]);
+  const [addToListError, setAddToListError] = useState<string | null>(null);
 
   const fetchData = useCallback(() => {
     return Promise.all([
@@ -146,12 +148,26 @@ export function RecipientsPage() {
     reload();
   };
 
+  const openAddToListDialog = (contactIds: string[]) => {
+    if (contactIds.length === 0) return;
+    setAddToListContactIds(contactIds);
+    setTargetListId("");
+    setAddToListError(null);
+    setAddToListOpen(true);
+  };
+
   const handleBulkAddToList = async () => {
-    if (!targetListId || selectedIds.size === 0) return;
-    await addContactsToList(targetListId, Array.from(selectedIds));
-    setAddToListOpen(false);
-    setSelectedIds(new Set());
-    reload();
+    if (!targetListId || addToListContactIds.length === 0) return;
+    setAddToListError(null);
+    try {
+      await addContactsToList(targetListId, addToListContactIds);
+      setAddToListOpen(false);
+      setAddToListContactIds([]);
+      setSelectedIds(new Set());
+      reload();
+    } catch (err) {
+      setAddToListError(err instanceof RecipientsApiError ? err.message : "Could not add to list");
+    }
   };
 
   return (
@@ -194,13 +210,15 @@ export function RecipientsPage() {
                   id="status-filter"
                   className="flex h-9 w-full min-w-[10rem] rounded-md border border-input bg-transparent px-3 text-sm"
                   value={status}
-                  onChange={(e) => { setPage(1); setLoading(true); setStatus(e.target.value as SubscriptionStatus | ""); }}
+                  onChange={(e) => {
+                    setPage(1);
+                    setLoading(true);
+                    setStatus(e.target.value as "subscribed" | "unsubscribed" | "");
+                  }}
                 >
-                  <option value="">All statuses</option>
+                  <option value="">All</option>
                   <option value="subscribed">Subscribed</option>
                   <option value="unsubscribed">Unsubscribed</option>
-                  <option value="pending">Pending</option>
-                  <option value="unknown">Unknown</option>
                 </select>
               </div>
               <div className="space-y-1.5">
@@ -222,7 +240,9 @@ export function RecipientsPage() {
             {selectedIds.size > 0 ? (
               <div className="flex flex-wrap items-center gap-2 rounded-md border border-border bg-muted/30 px-3 py-2 text-sm">
                 <span>{selectedIds.size} selected</span>
-                <Button size="sm" variant="outline" onClick={() => setAddToListOpen(true)}>Add to list</Button>
+                <Button size="sm" variant="outline" onClick={() => openAddToListDialog(Array.from(selectedIds))}>
+                  Add to list
+                </Button>
                 <Button size="sm" variant="outline" onClick={() => void bulkUnsubscribeContacts(Array.from(selectedIds)).then(reload)}>
                   Unsubscribe
                 </Button>
@@ -258,7 +278,7 @@ export function RecipientsPage() {
                 onEdit={(contact) => { setEditing(contact); setDialogOpen(true); }}
                 onDelete={setPendingDelete}
                 onUnsubscribe={(contact) => void unsubscribeContact(contact.id).then(reload)}
-                onAddToList={() => setAddToListOpen(true)}
+                onAddToList={(contact) => openAddToListDialog([contact.id])}
               />
             )}
 
@@ -303,21 +323,44 @@ export function RecipientsPage() {
         </DialogContent>
       </Dialog>
 
-      <Dialog open={addToListOpen} onOpenChange={setAddToListOpen}>
+      <Dialog
+        open={addToListOpen}
+        onOpenChange={(open) => {
+          setAddToListOpen(open);
+          if (!open) {
+            setAddToListContactIds([]);
+            setAddToListError(null);
+          }
+        }}
+      >
         <DialogContent>
-          <DialogHeader><DialogTitle>Add to list</DialogTitle></DialogHeader>
+          <DialogHeader>
+            <DialogTitle>Add to list</DialogTitle>
+            <DialogDescription>
+              {addToListContactIds.length === 1
+                ? "Choose a list for this contact."
+                : `Choose a list for ${addToListContactIds.length} contacts.`}
+            </DialogDescription>
+          </DialogHeader>
           <select
             className="flex h-9 w-full rounded-md border border-input bg-transparent px-3 text-sm"
             value={targetListId}
             onChange={(e) => setTargetListId(e.target.value)}
+            aria-label="Select list"
           >
             <option value="">Select a list</option>
             {lists.map((list) => (
               <option key={list.id} value={list.id}>{list.name}</option>
             ))}
           </select>
+          {addToListError ? <p className="text-sm text-destructive">{addToListError}</p> : null}
           <DialogFooter>
-            <Button onClick={() => void handleBulkAddToList()} disabled={!targetListId}>Add contacts</Button>
+            <Button
+              onClick={() => void handleBulkAddToList()}
+              disabled={!targetListId || addToListContactIds.length === 0}
+            >
+              Add to list
+            </Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>

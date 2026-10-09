@@ -16,14 +16,9 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import type { Contact, SubscriptionStatus } from "@/lib/recipients-api";
+import { contactStatusBadgeVariant, contactStatusLabel } from "@/lib/contact-status";
+import type { Contact } from "@/lib/recipients-api";
 import { contactDisplayName } from "@/lib/recipients-api";
-
-function statusVariant(status: SubscriptionStatus) {
-  if (status === "subscribed") return "default" as const;
-  if (status === "unsubscribed") return "destructive" as const;
-  return "secondary" as const;
-}
 
 function formatDate(iso: string) {
   try {
@@ -92,8 +87,8 @@ export function ContactsTable({
             <TableCell className="font-medium">{contactDisplayName(contact)}</TableCell>
             <TableCell>{contact.email}</TableCell>
             <TableCell>
-              <Badge variant={statusVariant(contact.subscriptionStatus)}>
-                {contact.subscriptionStatus}
+              <Badge variant={contactStatusBadgeVariant(contact.subscriptionStatus)}>
+                {contactStatusLabel(contact.subscriptionStatus)}
               </Badge>
             </TableCell>
             <TableCell className="hidden max-w-[180px] truncate md:table-cell">

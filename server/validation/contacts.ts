@@ -40,67 +40,29 @@ const emailSchema = z
 
 export const subscriptionStatusSchema = z.enum(SUBSCRIPTION_STATUSES);
 
-export const createContactSchema = z
-  .object({
-    email: emailSchema,
-    firstName: z.string().max(CONTACT_LIMITS.firstNameMax).optional(),
-    lastName: z.string().max(CONTACT_LIMITS.lastNameMax).optional(),
-    company: z.string().max(CONTACT_LIMITS.companyMax).optional(),
-    phone: z.string().max(CONTACT_LIMITS.phoneMax).optional(),
-    subscriptionStatus: subscriptionStatusSchema.optional(),
-    consentSource: z.string().max(CONTACT_LIMITS.consentSourceMax).optional(),
-    consentMethod: z.string().max(120).optional(),
-    consentOccurredAt: z.string().datetime().optional(),
-  })
-  .superRefine((data, ctx) => {
-    if (data.subscriptionStatus === "subscribed") {
-      if (!data.consentSource?.trim()) {
-        ctx.addIssue({
-          code: "custom",
-          message: "Consent source is required when marking a contact as subscribed",
-          path: ["consentSource"],
-        });
-      }
-      if (!data.consentOccurredAt) {
-        ctx.addIssue({
-          code: "custom",
-          message: "Consent timestamp is required when marking a contact as subscribed",
-          path: ["consentOccurredAt"],
-        });
-      }
-    }
-  });
+export const createContactSchema = z.object({
+  email: emailSchema,
+  firstName: z.string().max(CONTACT_LIMITS.firstNameMax).optional(),
+  lastName: z.string().max(CONTACT_LIMITS.lastNameMax).optional(),
+  company: z.string().max(CONTACT_LIMITS.companyMax).optional(),
+  phone: z.string().max(CONTACT_LIMITS.phoneMax).optional(),
+  subscriptionStatus: subscriptionStatusSchema.optional(),
+  consentSource: z.string().max(CONTACT_LIMITS.consentSourceMax).optional(),
+  consentMethod: z.string().max(120).optional(),
+  consentOccurredAt: z.string().datetime().optional(),
+});
 
-export const updateContactSchema = z
-  .object({
-    email: emailSchema.optional(),
-    firstName: z.string().max(CONTACT_LIMITS.firstNameMax).optional(),
-    lastName: z.string().max(CONTACT_LIMITS.lastNameMax).optional(),
-    company: z.string().max(CONTACT_LIMITS.companyMax).optional(),
-    phone: z.string().max(CONTACT_LIMITS.phoneMax).optional(),
-    subscriptionStatus: subscriptionStatusSchema.optional(),
-    consentSource: z.string().max(CONTACT_LIMITS.consentSourceMax).optional(),
-    consentMethod: z.string().max(120).optional(),
-    consentOccurredAt: z.string().datetime().optional(),
-  })
-  .superRefine((data, ctx) => {
-    if (data.subscriptionStatus === "subscribed") {
-      if (!data.consentSource?.trim()) {
-        ctx.addIssue({
-          code: "custom",
-          message: "Consent source is required when marking a contact as subscribed",
-          path: ["consentSource"],
-        });
-      }
-      if (!data.consentOccurredAt) {
-        ctx.addIssue({
-          code: "custom",
-          message: "Consent timestamp is required when marking a contact as subscribed",
-          path: ["consentOccurredAt"],
-        });
-      }
-    }
-  });
+export const updateContactSchema = z.object({
+  email: emailSchema.optional(),
+  firstName: z.string().max(CONTACT_LIMITS.firstNameMax).optional(),
+  lastName: z.string().max(CONTACT_LIMITS.lastNameMax).optional(),
+  company: z.string().max(CONTACT_LIMITS.companyMax).optional(),
+  phone: z.string().max(CONTACT_LIMITS.phoneMax).optional(),
+  subscriptionStatus: z.enum(["subscribed", "unsubscribed"]).optional(),
+  consentSource: z.string().max(CONTACT_LIMITS.consentSourceMax).optional(),
+  consentMethod: z.string().max(120).optional(),
+  consentOccurredAt: z.string().datetime().optional(),
+});
 
 export const listContactsQuerySchema = z.object({
   page: z.coerce.number().int().min(1).default(1),
@@ -111,7 +73,8 @@ export const listContactsQuerySchema = z.object({
     .max(CONTACT_LIMITS.listMaxLimit)
     .default(CONTACT_LIMITS.listDefaultLimit),
   q: z.string().max(200).optional(),
-  status: subscriptionStatusSchema.optional(),
+  /** Filter: `unsubscribed` includes unknown and pending contacts. */
+  status: z.enum(["subscribed", "unsubscribed"]).optional(),
   listId: z.string().uuid().optional(),
   sort: z.enum(["created_at_desc", "created_at_asc", "email_asc"]).default("created_at_desc"),
 });
