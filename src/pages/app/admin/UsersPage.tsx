@@ -24,6 +24,7 @@ type UserRow = {
   email: string;
   roles: string[];
   status: string;
+  emailVerified: boolean;
   createdAt: string;
   lastSessionAt: string | null;
 };
@@ -45,7 +46,9 @@ export function UsersPage() {
   const [role, setRole] = useState("");
   const [status, setStatus] = useState("");
   const [email, setEmail] = useState("");
-  const [inviteRole, setInviteRole] = useState("viewer");
+  const [inviteRole, setInviteRole] = useState("");
+  const [roleOptions, setRoleOptions] = useState<{ id: string; key: string; name: string }[]>([]);
+  const [showInvite, setShowInvite] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -84,6 +87,16 @@ export function UsersPage() {
       .catch(() => {
         if (!cancelled) setError("Could not load users.");
       });
+    fetch("/api/admin/roles", { credentials: "include" })
+      .then(async (response) => {
+        if (!response.ok || cancelled) return;
+        const payload = await response.json();
+        const options = (payload.roles ?? []) as { id: string; key: string; name: string }[];
+        if (cancelled) return;
+        setRoleOptions(options);
+        setInviteRole((current) => current || options.find((item) => item.key === "viewer")?.key || options[0]?.key || "");
+      })
+      .catch(() => undefined);
     fetch("/api/admin/invitations", { credentials: "include" })
       .then(async (response) => {
         if (!response.ok || cancelled) return;
@@ -125,7 +138,13 @@ export function UsersPage() {
     <>
       <PageMeta title="Users | SendStack" description="Manage accounts, access, and permissions." canonicalPath="/app/admin/users/" />
       <AppPageContainer className="max-w-none">
-        <PageHeader title="Users" description="Manage accounts, access, and permissions." />
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+          <PageHeader title="Users" description="Manage accounts, access, and permissions." />
+          <div className="flex flex-wrap gap-2">
+            <Button asChild><Link to="/app/admin/users/new/">Create user</Link></Button>
+            <Button type="button" variant="outline" onClick={() => setShowInvite((current) => !current)}>Invite user</Button>
+          </div>
+        </div>
         <div className="grid gap-3 sm:grid-cols-4">
           {[
             ["Total", stats.total],
@@ -180,7 +199,7 @@ export function UsersPage() {
                         {account.roles.map((item) => <Badge key={item} variant="outline">{item}</Badge>)}
                       </div>
                     </TableCell>
-                    <TableCell className="capitalize">{account.status}</TableCell>
+                    <TableCell className="capitalize">{account.emailVerified ? account.status : `${account.status} · pending verification`}</TableCell>
                     <TableCell>{account.lastSessionAt ? new Date(account.lastSessionAt).toLocaleString() : "—"}</TableCell>
                     <TableCell>{new Date(account.createdAt).toLocaleDateString()}</TableCell>
                   </TableRow>
@@ -189,7 +208,7 @@ export function UsersPage() {
             </Table>
           </CardContent>
         </Card>
-        <Card>
+        {showInvite ? <Card>
           <CardContent className="space-y-4">
             <h2 className="text-lg font-medium">Invite user</h2>
             <form className="grid gap-3 md:grid-cols-[1fr_12rem_auto] md:items-end" onSubmit={(event) => void invite(event)}>
@@ -200,7 +219,7 @@ export function UsersPage() {
               <div className="space-y-2">
                 <Label htmlFor="invite-role">Role</Label>
                 <select id="invite-role" className="h-9 w-full rounded-md border px-3 text-sm" value={inviteRole} onChange={(event) => setInviteRole(event.target.value)}>
-                  {["viewer", "editor", "campaign-manager", "admin"].map((key) => <option key={key} value={key}>{key}</option>)}
+                  {roleOptions.map((item) => <option key={item.id} value={item.key}>{item.name}</option>)}
                 </select>
               </div>
               <Button type="submit">Send invitation</Button>
@@ -215,7 +234,7 @@ export function UsersPage() {
               ))}
             </ul>
           </CardContent>
-        </Card>
+        </Card> : null}
       </AppPageContainer>
     </>
   );

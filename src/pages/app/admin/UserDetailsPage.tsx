@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Link, useParams } from "react-router-dom";
+import { Link, useLocation, useParams } from "react-router-dom";
 
 import { PageMeta } from "@/components/layout/PageMeta";
 import { AppPageContainer } from "@/components/shared/AppPageContainer";
@@ -25,6 +25,8 @@ const ASSIGNABLE = ["viewer", "editor", "campaign-manager", "admin", "user"];
 
 export function UserDetailsPage() {
   const { userId = "" } = useParams();
+  const location = useLocation();
+  const created = Boolean((location.state as { created?: boolean } | null)?.created);
   const [account, setAccount] = useState<UserDetail | null>(null);
   const [name, setName] = useState("");
   const [roles, setRoles] = useState<string[]>([]);
@@ -123,6 +125,7 @@ export function UserDetailsPage() {
           <PageHeader title={account.name} description={account.email} />
           <Button variant="outline" asChild><Link to="/app/admin/users/">Back</Link></Button>
         </div>
+        {created ? <p className="text-sm" role="status">User created successfully.</p> : null}
         {error ? <p className="text-sm text-destructive">{error}</p> : null}
         {message ? <p className="text-sm">{message}</p> : null}
         <div className="grid gap-4 lg:grid-cols-2">

@@ -1,6 +1,6 @@
 import { createHash, randomBytes } from "node:crypto";
 
-import { and, count, desc, eq, gte, ilike, or } from "drizzle-orm";
+import { and, count, desc, eq, gte, ilike, inArray, or } from "drizzle-orm";
 
 import { loadEnv } from "../env.js";
 import { auth } from "../auth/auth.js";
@@ -10,7 +10,7 @@ import {
   ROLE_TEMPLATES,
   type SystemRoleKey,
 } from "../auth/permissions.js";
-import { customRoleKeyError, invalidPermissionKeys, roleGrantError } from "../auth/policy.js";
+import { canDirectlyCreatePasswordAccount, customRoleKeyError, invalidPermissionKeys, roleGrantError, userCreatedAuditMetadata } from "../auth/policy.js";
 import type { Database } from "../db/index.js";
 import {
   adminAuditEvents,
@@ -24,6 +24,7 @@ import {
   userInvitations,
 } from "../db/schema.js";
 import { sendTransactionalEmail } from "../lib/email.js";
+import { validatePassword } from "../lib/password-policy.js";
 import { withPgAdvisoryLock } from "../mail/lock.js";
 import { permissionsForUser } from "./access-control.js";
 
@@ -138,6 +139,7 @@ export async function listAdminUsers(
       roles,
       status,
       emailVerified: row.emailVerified,
+      verificationStatus: row.emailVerified ? "verified" : "pending",
       createdAt: row.createdAt.toISOString(),
       lastSessionAt: lastSession.get(row.id)?.toISOString() ?? null,
     };
@@ -225,7 +227,8 @@ export async function getAdminUser(db: Database, userId: string) {
 async function syncUserRoles(db: Database, userId: string, roleKeys: string[], actorId: string) {
   const registered = new Set<string>(Object.keys(ROLE_TEMPLATES));
   const authRoles = roleKeys.filter((key) => registered.has(key));
-  await db.update(user).set({ role: authRoles.join(",") || "user", updatedAt: new Date() }).where(eq(user.id, userId));
+  const nextAuthRole = authRoles.length > 0 ? authRoles.join(",") : "";
+  await db.update(user).set({ role: nextAuthRole, updatedAt: new Date() }).where(eq(user.id, userId));
   await db.delete(appUserRoles).where(eq(appUserRoles.userId, userId));
   if (roleKeys.length) {
     await db.insert(appUserRoles).values(
@@ -594,6 +597,114 @@ export async function listAudit(db: Database, page: number, limit: number) {
     })),
     pagination: { page, limit, total: Number(totalRow?.total ?? 0), totalPages: Math.max(1, Math.ceil(Number(totalRow?.total ?? 0) / limit)) },
   };
+}
+
+const DIRECT_CREATE_HOURLY_LIMIT = 10;
+
+export async function createDirectUser(
+  db: Database,
+  actor: { id: string; role?: string | null },
+  input: { name: string; email: string; password: string; confirmPassword: string; roleIds: string[]; status: "active" | "suspended" },
+  headers: Headers,
+) {
+  if (!canDirectlyCreatePasswordAccount(actor.role)) {
+    return { error: "Only a super admin can create password accounts.", status: 403 as const };
+  }
+  const passwordError = validatePassword(input.password);
+  if (passwordError) return { error: passwordError, status: 400 as const };
+  if (input.password !== input.confirmPassword) return { error: "Passwords do not match.", status: 400 as const };
+
+  const recent = await db
+    .select({ id: adminAuditEvents.id })
+    .from(adminAuditEvents)
+    .where(and(eq(adminAuditEvents.action, "user.created"), gte(adminAuditEvents.createdAt, new Date(Date.now() - 60 * 60 * 1000))));
+  if (recent.length >= DIRECT_CREATE_HOURLY_LIMIT) {
+    return { error: "Account creation is temporarily limited.", status: 429 as const };
+  }
+
+  const email = input.email.trim().toLowerCase();
+  const [existing] = await db.select({ id: user.id }).from(user).where(eq(user.email, email)).limit(1);
+  if (existing) return { error: "An account with that email already exists.", status: 409 as const };
+
+  const selected = await db.select().from(appRoles).where(inArray(appRoles.id, input.roleIds));
+  if (selected.length !== input.roleIds.length) return { error: "One or more roles do not exist.", status: 400 as const };
+  const roleKeys = selected.map((role) => role.key);
+  const actorPermissions = await permissionsForUser(db, actor);
+  const grantError = roleGrantError({
+    actorIsSuperAdmin: true,
+    actorPermissions,
+    nextRoleKeys: roleKeys,
+    rolePermissions: await rolePermissionMap(db),
+    actorId: actor.id,
+    targetId: "new-user",
+    activeSuperAdmins: await countActiveSuperAdmins(db),
+    targetIsActiveSuperAdmin: false,
+  });
+  if (grantError) return { error: grantError, status: 403 as const };
+
+  const authRoleKeys = ["user", "viewer", "editor", "campaign-manager", "admin", "super-admin"] as const;
+  const registeredKeys = roleKeys.filter((key): key is (typeof authRoleKeys)[number] =>
+    (authRoleKeys as readonly string[]).includes(key),
+  );
+  const createRole = registeredKeys.length === 0 ? "user" : registeredKeys.length === 1 ? registeredKeys[0] : registeredKeys;
+  let createdId: string | null = null;
+  try {
+    const created = await auth.api.createUser({
+      body: {
+        email,
+        name: input.name.trim(),
+        password: input.password,
+        role: createRole,
+        data: { banned: true, banReason: "provisioning" },
+      },
+      headers,
+    });
+    createdId = created.user.id;
+    await syncUserRoles(db, createdId, roleKeys, actor.id);
+    await db
+      .insert(appUserAccess)
+      .values({ userId: createdId, status: input.status, updatedAt: new Date() })
+      .onConflictDoUpdate({ target: appUserAccess.userId, set: { status: input.status, updatedAt: new Date() } });
+    if (input.status === "suspended") {
+      await db.update(user).set({ banned: true, banReason: "suspended", banExpires: null, updatedAt: new Date() }).where(eq(user.id, createdId));
+      await db.delete(session).where(eq(session.userId, createdId));
+    } else {
+      await db.update(user).set({ banned: false, banReason: null, banExpires: null, updatedAt: new Date() }).where(eq(user.id, createdId));
+    }
+    let verificationEmail: "sent" | "not_sent" = "not_sent";
+    try {
+      const env = loadEnv();
+      await auth.api.sendVerificationEmail({
+        body: { email, callbackURL: `${env.FRONTEND_URL}/verify-email/` },
+        headers,
+      });
+      verificationEmail = "sent";
+    } catch (error) {
+      console.error("[admin] verification email", error instanceof Error ? error.name : "Error");
+    }
+    await recordAudit(db, {
+      actorUserId: actor.id,
+      targetUserId: createdId,
+      action: "user.created",
+      metadata: userCreatedAuditMetadata({ roles: roleKeys, status: input.status, verificationEmail }),
+    });
+    return { user: await getAdminUser(db, createdId), verificationEmail };
+  } catch (error) {
+    if (createdId) {
+      try {
+        await auth.api.removeUser({ body: { userId: createdId }, headers });
+      } catch (cleanupError) {
+        console.error("[admin] create user cleanup", cleanupError instanceof Error ? cleanupError.name : "Error");
+        await db.update(user).set({ banned: true, banReason: "provisioning", updatedAt: new Date() }).where(eq(user.id, createdId));
+      }
+    }
+    const message = error instanceof Error ? error.message : "";
+    if (/already exists/i.test(message)) {
+      return { error: "An account with that email already exists.", status: 409 as const };
+    }
+    console.error("[admin] create user", error instanceof Error ? error.name : "Error");
+    return { error: "The account could not be created.", status: 500 as const };
+  }
 }
 
 export function listPermissionCatalog() {

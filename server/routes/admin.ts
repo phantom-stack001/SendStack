@@ -4,12 +4,14 @@ import { z } from "zod";
 import { createDb } from "../db/index.js";
 import { loadEnv } from "../env.js";
 import { validationError } from "../lib/http-errors.js";
+import { createUserSchema } from "../validation/admin-users.js";
 import { getSessionUser } from "../lib/session.js";
 import type { PermissionKey } from "../auth/permissions.js";
 import { userHasPermission } from "../services/access-control.js";
 import { permissionsForUser } from "../services/access-control.js";
 import {
   acceptInvitation,
+  createDirectUser,
   createInvitation,
   deactivateOrDeleteUser,
   deleteRole,
@@ -52,7 +54,7 @@ const roleSchema = z.object({
   permissions: z.array(z.string()).max(80).default([]),
 });
 
-function json(c: Context, body: unknown, status: 200 | 400 | 401 | 403 | 404 | 409 | 429 | 502 = 200) {
+function json(c: Context, body: unknown, status: 200 | 400 | 401 | 403 | 404 | 409 | 429 | 500 | 502 = 200) {
   c.header("Cache-Control", "no-store");
   return c.json(body, status);
 }
@@ -96,6 +98,16 @@ export function registerAdminRoutes(app: Hono) {
     const detail = await getAdminUser(db, c.req.param("userId"));
     if (!detail) return json(c, { error: "User not found" }, 404);
     return json(c, { user: detail });
+  });
+
+  app.post("/api/admin/users", async (c) => {
+    const access = await requirePermission(c, "users.create");
+    if ("response" in access) return access.response;
+    const parsed = createUserSchema.safeParse(await c.req.json().catch(() => null));
+    if (!parsed.success) return json(c, validationError(parsed.error), 400);
+    const result = await createDirectUser(db, access.user, parsed.data, c.req.raw.headers);
+    if ("error" in result) return json(c, { error: result.error }, result.status);
+    return json(c, result, 200);
   });
 
   app.post("/api/admin/users/invite", async (c) => {

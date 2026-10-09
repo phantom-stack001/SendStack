@@ -1,4 +1,4 @@
-import { PERMISSIONS, RESERVED_ROLE_KEYS, type PermissionKey } from "./permissions.js";
+import { parseRoleKeys, PERMISSIONS, RESERVED_ROLE_KEYS, type PermissionKey } from "./permissions.js";
 
 const PERMISSION_SET = new Set<string>(PERMISSIONS);
 
@@ -64,6 +64,18 @@ export function customRoleKeyError(key: string) {
     return "That role key is reserved.";
   }
   return null;
+}
+
+export function canDirectlyCreatePasswordAccount(role: string | null | undefined) {
+  return parseRoleKeys(role).includes("super-admin");
+}
+
+export function userCreatedAuditMetadata(input: { roles: string[]; status: string; verificationEmail: string }) {
+  return {
+    roles: input.roles,
+    status: input.status,
+    verificationEmail: input.verificationEmail,
+  };
 }
 
 export function invalidPermissionKeys(keys: string[]) {
