@@ -16,12 +16,6 @@ import {
   SidebarGroupLabel,
 } from "@/components/ui/sidebar";
 
-const workspaceUser = {
-  name: "SendStack operator",
-  email: "Not signed in",
-  avatar: "",
-};
-
 export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
   return (
     <Sidebar variant="inset" {...props}>
@@ -69,7 +63,7 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
         </SidebarGroup>
       </SidebarContent>
       <SidebarFooter>
-        <NavUser user={workspaceUser} />
+        <NavUser />
       </SidebarFooter>
     </Sidebar>
   );

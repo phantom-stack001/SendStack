@@ -1,5 +1,7 @@
 import { Navigate } from "react-router-dom";
 
+import { GuestRoute } from "@/components/auth/GuestRoute";
+import { ProtectedRoute } from "@/components/auth/ProtectedRoute";
 import { AuthLayout } from "@/components/layout/AuthLayout";
 import { DashboardLayout } from "@/components/layout/DashboardLayout";
 import { PublicLayout } from "@/components/layout/PublicLayout";
@@ -11,11 +13,15 @@ import { QueuePage } from "@/pages/app/QueuePage";
 import { RecipientsPage } from "@/pages/app/RecipientsPage";
 import { SettingsPage } from "@/pages/app/SettingsPage";
 import { TemplatesPage } from "@/pages/app/TemplatesPage";
+import { ForgotPasswordPage } from "@/pages/ForgotPasswordPage";
 import { HomePage } from "@/pages/HomePage";
 import { LoginPage } from "@/pages/LoginPage";
 import { NotFoundPage } from "@/pages/NotFoundPage";
 import { PrivacyPage } from "@/pages/PrivacyPage";
+import { RegisterPage } from "@/pages/RegisterPage";
+import { ResetPasswordPage } from "@/pages/ResetPasswordPage";
 import { TermsPage } from "@/pages/TermsPage";
+import { VerifyEmailPage } from "@/pages/VerifyEmailPage";
 
 export const appRoutes = [
   {
@@ -44,9 +50,42 @@ export const appRoutes = [
     element: <Navigate to="/login/" replace />,
   },
   {
-    path: "/login/",
+    path: "/register",
+    element: <Navigate to="/register/" replace />,
+  },
+  {
+    path: "/forgot-password",
+    element: <Navigate to="/forgot-password/" replace />,
+  },
+  {
+    path: "/reset-password",
+    element: <Navigate to="/reset-password/" replace />,
+  },
+  {
+    path: "/verify-email",
+    element: <Navigate to="/verify-email/" replace />,
+  },
+  {
+    element: (
+      <GuestRoute>
+        <AuthLayout />
+      </GuestRoute>
+    ),
+    children: [
+      { path: "/login/", element: <LoginPage /> },
+      { path: "/register/", element: <RegisterPage /> },
+      { path: "/forgot-password/", element: <ForgotPasswordPage /> },
+    ],
+  },
+  {
+    path: "/reset-password/",
     element: <AuthLayout />,
-    children: [{ index: true, element: <LoginPage /> }],
+    children: [{ index: true, element: <ResetPasswordPage /> }],
+  },
+  {
+    path: "/verify-email/",
+    element: <AuthLayout />,
+    children: [{ index: true, element: <VerifyEmailPage /> }],
   },
   {
     path: "/app",
@@ -54,7 +93,11 @@ export const appRoutes = [
   },
   {
     path: "/app/",
-    element: <DashboardLayout />,
+    element: (
+      <ProtectedRoute>
+        <DashboardLayout />
+      </ProtectedRoute>
+    ),
     children: [
       { index: true, element: <DashboardPage /> },
       { path: "compose/", element: <ComposePage /> },

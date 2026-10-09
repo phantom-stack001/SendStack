@@ -2,9 +2,9 @@
 
 Public website and future operator UI for [ctn-sk.com](https://ctn-sk.com).
 
-**Phase 1B** delivered the React + Vite + Tailwind + shadcn/ui foundation. **Phase 2** adds the SendStack **login UI** (`login-04`) and **dashboard shell** (`sidebar-08`). **Phase 2.5** unifies the design system across public pages, auth, and the app shell.
+**Phase 1B** delivered the React + Vite + Tailwind + shadcn/ui foundation. **Phase 2** adds the SendStack **login UI** (`login-04`) and **dashboard shell** (`sidebar-08`). **Phase 2.5** unifies the design system. **Phase 3** adds **Better Auth**, a Hono API, **Neon PostgreSQL**, and protected `/app/*` routes.
 
-Authentication, real sessions, SMTP, database, and queue workers are **not** implemented yet. The dashboard is an **unprotected UI prototype** until the backend is built.
+Campaign, queue, and SMTP delivery features are **not** implemented yet. The dashboard remains a UI shell with placeholder data.
 
 ## Stack
 
@@ -176,18 +176,96 @@ location / {
 
 ## Environment
 
-No secrets or `.env` values are required for the public site. Future API and SMTP configuration will live on the server only—never in client bundles or `localStorage`.
+Copy `.env.example` to `.env` for local API development. **Never** commit `.env` or put secrets in `VITE_*` variables.
 
-## Authentication limitations (Phase 2)
+| Variable | Scope | Purpose |
+| --- | --- | --- |
+| `DATABASE_URL` | Server | Neon PostgreSQL connection string |
+| `BETTER_AUTH_SECRET` | Server | Session signing secret (≥ 32 chars) |
+| `BETTER_AUTH_URL` | Server | Public origin Better Auth uses for links/cookies (e.g. `http://localhost:5173`) |
+| `FRONTEND_URL` | Server | Trusted browser origin for CORS |
+| `AUTH_EMAIL_DELIVERY` | Server | `console` (dev logs), `disabled`, or future `smtp` |
+| `SENDSTACK_DB_RESET_CONFIRM` | Server | Must be `yes` to run `npm run db:reset` |
+| `BOOTSTRAP_ADMIN_EMAIL` | Server | Target email for `admin:bootstrap` |
+| `BOOTSTRAP_ADMIN_NAME` | Server | Display name for bootstrap (optional) |
+| `BOOTSTRAP_ADMIN_PASSWORD` | Server | One-time bootstrap password (never commit) |
+| `VITE_APP_URL` | Client (optional) | Auth client base URL when not same-origin |
 
-- Sign in at `/login/` validates input client-side only.
-- Submitting the form shows an informational message; **no session is created**.
-- `/app/*` routes are reachable without login until server-side auth is added.
-- No passwords, tokens, or SMTP credentials are stored in the browser.
+## Authentication (Phase 3)
+
+SendStack uses **Better Auth** on a **Hono** API (`server/`) with **Drizzle ORM** and **Neon PostgreSQL**. Sessions are **HttpOnly cookies**—nothing is stored in `localStorage`.
+
+### Local development
+
+```bash
+cp .env.example .env
+# Set DATABASE_URL (Neon dev branch) and BETTER_AUTH_SECRET
+
+npm run db:migrate   # applies drizzle/migrations
+npm run dev          # Vite on :5173 + API on :3001 (proxied /api → API)
+```
+
+| Command | Description |
+| --- | --- |
+| `npm run dev:client` | Vite only |
+| `npm run dev:server` | Hono API only |
+| `npm run db:generate` | Drizzle Kit migration from schema |
+| `npm run db:migrate` | Apply migrations |
+| `npm run db:inspect` | List scoped public tables on Neon (no secrets) |
+| `npm run db:reset` | Drop allowlisted SendStack tables (requires `SENDSTACK_DB_RESET_CONFIRM=yes`) |
+| `npm run admin:bootstrap` | One-time super-admin provisioning (CLI only) |
+| `npm run auth:generate` | Regenerate Better Auth Drizzle schema (after config changes) |
+
+### Roles (Phase 3.1)
+
+Better Auth **admin plugin** enforces privileged roles on the server:
+
+| Role | Purpose |
+| --- | --- |
+| `user` | Default for self-service registration |
+| `super-admin` | Initial administrator (`adminRoles` in `server/auth/auth.ts`) |
+
+Registration never accepts a client-supplied role. Only `npm run admin:bootstrap` (or future admin APIs) may assign `super-admin`.
+
+### Neon reset and bootstrap
+
+1. **Inspect** (safe): `npm run db:inspect`
+2. **Reset** (destructive, allowlisted tables only):
+
+   ```bash
+   SENDSTACK_DB_RESET_CONFIRM=yes npm run db:reset
+   npm run db:migrate
+   ```
+
+3. **Bootstrap** the first administrator (password is **not** stored in Git):
+
+   ```bash
+   export BOOTSTRAP_ADMIN_EMAIL=roux.thomas@ctn-sk.com
+   export BOOTSTRAP_ADMIN_NAME="Thomas Roux"
+   # Either export BOOTSTRAP_ADMIN_PASSWORD='…' for one command, or omit for an interactive prompt:
+   npm run admin:bootstrap
+   ```
+
+The reset script refuses to run if unexpected `public` tables exist outside the SendStack allowlist (`server/lib/sendstack-tables.ts`). It does **not** drop the Neon database or branch.
+
+### Routes
+
+| Path | Access |
+| --- | --- |
+| `/login/`, `/register/`, `/forgot-password/`, `/reset-password/` | Public auth UI |
+| `/verify-email/` | Post-registration / verification help |
+| `/app/*` | Requires verified session |
+| `/api/auth/*` | Better Auth handler |
+| `GET /api/health` | Public health check |
+
+Email verification and password reset **require outbound email**. With `AUTH_EMAIL_DELIVERY=console`, links are printed to the API server log (development only). Configure a transactional provider before production.
+
+### Production deployment
+
+The static `dist/` SPA alone is **not** sufficient: you need a Node (or serverless) host for `server/` with `DATABASE_URL` and auth secrets, plus reverse-proxy `/api` to that service (or deploy frontend and API on one origin). Update `vercel.json` / hosting accordingly—do not expose Neon credentials to the browser.
 
 ## Planned phases (not implemented)
 
-- **Phase 3:** Real authentication, sessions, and protected `/app/*` routes
 - **Phase 4+:** Bulk composer, recipients, campaigns, queue monitoring, server-side email delivery
 - **Backend:** Node.js API, PostgreSQL, Redis + BullMQ workers
 - **Email transport:** Server-side SMTP delivery (provider configured in infrastructure, not exposed in the UI)

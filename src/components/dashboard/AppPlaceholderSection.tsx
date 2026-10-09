@@ -26,7 +26,7 @@ export function AppPlaceholderSection({
       <PageHeader
         title={title}
         description={description}
-        notice="UI prototype only — live data and sending are not connected yet."
+        notice="Live campaign and queue data are not connected yet."
       />
       <EmptyState icon={icon} title={emptyTitle} description={emptyMessage} action={action} />
     </AppPageContainer>

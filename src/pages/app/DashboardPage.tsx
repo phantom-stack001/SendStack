@@ -18,7 +18,7 @@ export function DashboardPage() {
         <PageHeader
           title="Dashboard"
           description="Manage your email campaigns and sending activity."
-          notice="UI prototype only — authentication and live data are not connected yet."
+          notice="Workspace data is not connected yet — campaign and queue features arrive in later phases."
         />
         <DashboardStats />
         <QuickActions />
