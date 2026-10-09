@@ -96,9 +96,11 @@ export function LoginForm({ className, ...props }: LoginFormProps) {
               <Field>
                 <div className="flex items-center">
                   <FieldLabel htmlFor="password">Password</FieldLabel>
-                  <button
+                  <Button
                     type="button"
-                    className="ml-auto text-sm text-muted-foreground underline-offset-2 hover:underline"
+                    variant="link"
+                    size="sm"
+                    className="ml-auto h-auto px-0 text-muted-foreground"
                     onClick={() =>
                       setInfoMessage(
                         "Password reset will be available when authentication is implemented.",
@@ -106,7 +108,7 @@ export function LoginForm({ className, ...props }: LoginFormProps) {
                     }
                   >
                     Forgot your password?
-                  </button>
+                  </Button>
                 </div>
                 <Input
                   id="password"
@@ -151,8 +153,8 @@ export function LoginForm({ className, ...props }: LoginFormProps) {
                 Compose, queue, and send with accountability.
               </p>
               <p className="mt-3 max-w-sm text-sm text-primary-foreground/85">
-                Bulk email operations for CTN Slovakia — delivery through SpaceMail SMTP will be
-                handled server-side in a later phase.
+                Bulk email operations for CTN Slovakia — outbound delivery will be handled
+                securely on the server in a later phase.
               </p>
             </div>
           </div>

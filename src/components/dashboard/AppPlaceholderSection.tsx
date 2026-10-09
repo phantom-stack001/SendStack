@@ -1,31 +1,34 @@
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import type { LucideIcon } from "lucide-react";
+
+import { AppPageContainer } from "@/components/shared/AppPageContainer";
+import { EmptyState } from "@/components/shared/EmptyState";
+import { PageHeader } from "@/components/shared/PageHeader";
 
 type AppPlaceholderSectionProps = {
   title: string;
   description: string;
+  emptyTitle?: string;
   emptyMessage: string;
+  icon?: LucideIcon;
+  action?: React.ReactNode;
 };
 
 export function AppPlaceholderSection({
   title,
   description,
+  emptyTitle = "Nothing here yet",
   emptyMessage,
+  icon,
+  action,
 }: AppPlaceholderSectionProps) {
   return (
-    <div className="mx-auto flex w-full max-w-5xl flex-col gap-4">
-      <div>
-        <h1 className="text-2xl font-semibold tracking-tight">{title}</h1>
-        <p className="text-muted-foreground">{description}</p>
-      </div>
-      <Card>
-        <CardHeader>
-          <CardTitle className="text-base">Coming in a future phase</CardTitle>
-          <CardDescription>This screen is a UI placeholder only.</CardDescription>
-        </CardHeader>
-        <CardContent>
-          <p className="text-sm text-muted-foreground">{emptyMessage}</p>
-        </CardContent>
-      </Card>
-    </div>
+    <AppPageContainer>
+      <PageHeader
+        title={title}
+        description={description}
+        notice="UI prototype only — live data and sending are not connected yet."
+      />
+      <EmptyState icon={icon} title={emptyTitle} description={emptyMessage} action={action} />
+    </AppPageContainer>
   );
 }

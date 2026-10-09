@@ -18,8 +18,13 @@ export function QuickActions() {
         <CardDescription>Jump to common workspace tasks.</CardDescription>
       </CardHeader>
       <CardContent className="flex flex-wrap gap-2">
-        {actions.map((action) => (
-          <Button key={action.label} asChild variant="secondary">
+        {actions.map((action, index) => (
+          <Button
+            key={action.label}
+            asChild
+            variant={index === 0 ? "default" : "outline"}
+            size="sm"
+          >
             <Link to={action.href}>{action.label}</Link>
           </Button>
         ))}

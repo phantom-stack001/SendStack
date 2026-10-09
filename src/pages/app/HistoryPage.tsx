@@ -1,3 +1,5 @@
+import { History } from "lucide-react";
+
 import { AppPlaceholderSection } from "@/components/dashboard/AppPlaceholderSection";
 import { PageMeta } from "@/components/layout/PageMeta";
 
@@ -8,7 +10,8 @@ export function HistoryPage() {
       <AppPlaceholderSection
         title="Sending History"
         description="Review submitted sends and delivery outcomes."
-        emptyMessage="No sending history yet."
+        icon={History}
+        emptyMessage="Delivery logs and bounce summaries will appear here after sending is enabled. No historical data is fabricated in this prototype."
       />
     </>
   );

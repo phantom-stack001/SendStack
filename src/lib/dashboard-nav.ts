@@ -48,9 +48,17 @@ export const dashboardNavGroups: DashboardNavGroup[] = [
   },
 ];
 
+export function normalizeAppPath(pathname: string) {
+  if (pathname === "/") {
+    return pathname;
+  }
+  return pathname.endsWith("/") ? pathname : `${pathname}/`;
+}
+
 export function findDashboardNavItem(pathname: string): DashboardNavItem | undefined {
+  const currentPath = normalizeAppPath(pathname);
   for (const group of dashboardNavGroups) {
-    const match = group.items.find((item) => item.url === pathname);
+    const match = group.items.find((item) => item.url === currentPath);
     if (match) {
       return match;
     }

@@ -50,8 +50,8 @@
   --secondary-foreground: #141821;
   --muted: #e2e6ea;
   --muted-foreground: #5b6578;
-  --accent: #0f7a72;
-  --accent-foreground: #f7fffe;
+  --accent: #dcecea;
+  --accent-foreground: #141821;
   --destructive: #b42318;
   --border: rgba(20, 24, 33, 0.12);
   --input: rgba(20, 24, 33, 0.12);
@@ -69,13 +69,54 @@
 @import "./landing.css";
 @import "./legal.css";
 
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+
+  body {
+    @apply bg-background text-foreground antialiased;
+    font-family: "Avenir Next", "Segoe UI", "Helvetica Neue", sans-serif;
+    line-height: 1.5;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
 .dark {
-  --sidebar: hsl(240 5.9% 10%);
-  --sidebar-foreground: hsl(240 4.8% 95.9%);
-  --sidebar-primary: hsl(224.3 76.3% 48%);
-  --sidebar-primary-foreground: hsl(0 0% 100%);
-  --sidebar-accent: hsl(240 3.7% 15.9%);
-  --sidebar-accent-foreground: hsl(240 4.8% 95.9%);
-  --sidebar-border: hsl(240 3.7% 15.9%);
-  --sidebar-ring: hsl(217.2 91.2% 59.8%);
+  --background: #141821;
+  --foreground: #f4f7f8;
+  --card: #1c2230;
+  --card-foreground: #f4f7f8;
+  --popover: #1c2230;
+  --popover-foreground: #f4f7f8;
+  --primary: #14a399;
+  --primary-foreground: #f7fffe;
+  --secondary: #252d3d;
+  --secondary-foreground: #f4f7f8;
+  --muted: #252d3d;
+  --muted-foreground: #a3adbd;
+  --accent: #1e3d3a;
+  --accent-foreground: #e8f6f4;
+  --destructive: #f04438;
+  --border: rgba(244, 247, 248, 0.12);
+  --input: rgba(244, 247, 248, 0.14);
+  --ring: #14a399;
+  --sidebar: #1a1f2b;
+  --sidebar-foreground: #f4f7f8;
+  --sidebar-primary: #14a399;
+  --sidebar-primary-foreground: #f7fffe;
+  --sidebar-accent: #252d3d;
+  --sidebar-accent-foreground: #f4f7f8;
+  --sidebar-border: rgba(244, 247, 248, 0.12);
+  --sidebar-ring: #14a399;
 }

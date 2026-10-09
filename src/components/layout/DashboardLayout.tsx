@@ -10,7 +10,7 @@ export function DashboardLayout() {
       <AppSidebar />
       <SidebarInset>
         <DashboardHeader />
-        <div className="flex flex-1 flex-col gap-4 p-4 pt-0">
+        <div className="flex flex-1 flex-col gap-6 p-4 md:p-6 pt-0">
           <Outlet />
         </div>
       </SidebarInset>

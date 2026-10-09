@@ -1,3 +1,5 @@
+import { Users } from "lucide-react";
+
 import { AppPlaceholderSection } from "@/components/dashboard/AppPlaceholderSection";
 import { PageMeta } from "@/components/layout/PageMeta";
 
@@ -8,7 +10,8 @@ export function RecipientsPage() {
       <AppPlaceholderSection
         title="Recipients"
         description="Manage contact lists and consent-aware audiences."
-        emptyMessage="No recipients yet."
+        icon={Users}
+        emptyMessage="Recipient lists and import tools will appear here in a future phase. Consent metadata will be enforced server-side."
       />
     </>
   );

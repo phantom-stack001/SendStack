@@ -2,7 +2,7 @@
 
 Public website and future operator UI for [ctn-sk.com](https://ctn-sk.com).
 
-**Phase 1B** delivered the React + Vite + Tailwind + shadcn/ui foundation. **Phase 2** adds the SendStack **login UI** (`login-04`) and **dashboard shell** (`sidebar-08`).
+**Phase 1B** delivered the React + Vite + Tailwind + shadcn/ui foundation. **Phase 2** adds the SendStack **login UI** (`login-04`) and **dashboard shell** (`sidebar-08`). **Phase 2.5** unifies the design system across public pages, auth, and the app shell.
 
 Authentication, real sessions, SMTP, database, and queue workers are **not** implemented yet. The dashboard is an **unprotected UI prototype** until the backend is built.
 
@@ -27,6 +27,7 @@ SendStack/
 │   ├── components/
 │   │   ├── ui/             # shadcn/ui primitives
 │   │   ├── layout/         # Header, Footer, PageMeta, …
+│   │   ├── shared/         # AppPageContainer, PageHeader, EmptyState, StatCard
 │   │   └── landing/        # Hero, Services, About, Contact, SVG art
 │   ├── content/            # Shared copy/data
 │   ├── hooks/
@@ -108,6 +109,28 @@ Official blocks installed via CLI:
 
 Additional UI: **Button**, **Card**, **Sheet**, **Separator**, **Input**, **Field**, **Breadcrumb**, **Avatar**, **Dropdown Menu**, **Tooltip**, **Collapsible**, **Skeleton**.
 
+## Design system (Phase 2.5)
+
+Tokens live in `src/styles/globals.css`. The landing page keeps its Phase 1 palette via `src/styles/landing.css` (scoped under `.page`); the app shell uses shadcn semantic variables.
+
+| Token | Value / role |
+| --- | --- |
+| Primary | `#0f7a72` — CTN teal; primary actions, focus rings, sidebar brand mark |
+| Accent | Soft teal tint — hover surfaces for ghost/outline controls (not full primary fill) |
+| Canvas / background | `#e8ecef` — matches public site `--canvas` |
+| Foreground | `#141821` — body text and headings in the app |
+| Muted foreground | `#5b6578` — descriptions, helper text, stat hints |
+
+**Typography:** Public marketing copy uses landing CSS (display serif in hero, Avenir-style sans elsewhere). Dashboard and auth use the same sans stack via `body` in `globals.css`. Page titles use `text-2xl font-semibold`; supporting copy uses `text-muted-foreground`.
+
+**Layout:** App routes wrap content in `AppPageContainer` (`max-w-6xl`, vertical `gap-6`). `PageHeader` standardizes title, description, and prototype notice. `EmptyState` provides dashed-border placeholders with optional Lucide icon and action.
+
+**Buttons:** `default` = primary CTA; `outline` = secondary navigation in the dashboard; `secondary` = low-emphasis surfaces (e.g. public mobile menu). Landing hero CTAs keep `.btn-primary` / `.btn-secondary` classes from `landing.css`.
+
+**Icons:** Lucide at `size-4` in buttons/sidebar, `size-5` in empty states (`stroke-[1.75]`).
+
+When adding screens, reuse `AppPageContainer`, `PageHeader`, and `EmptyState` before introducing new layout patterns.
+
 ## Production build
 
 ```bash
@@ -165,9 +188,9 @@ No secrets or `.env` values are required for the public site. Future API and SMT
 ## Planned phases (not implemented)
 
 - **Phase 3:** Real authentication, sessions, and protected `/app/*` routes
-- **Phase 4+:** Bulk composer, recipients, campaigns, queue monitoring, SpaceMail SMTP (server-side only)
+- **Phase 4+:** Bulk composer, recipients, campaigns, queue monitoring, server-side email delivery
 - **Backend:** Node.js API, PostgreSQL, Redis + BullMQ workers
-- **Email transport:** SpaceMail SMTP (server-side only)
+- **Email transport:** Server-side SMTP delivery (provider configured in infrastructure, not exposed in the UI)
 
 ## Verified public contact
 
