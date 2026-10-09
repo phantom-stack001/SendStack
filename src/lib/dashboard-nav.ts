@@ -1,9 +1,12 @@
 import {
   FileText,
   History,
+  Inbox,
   LayoutDashboard,
+  LayoutTemplate,
   ListOrdered,
   Mail,
+  Send,
   Settings,
   SquarePen,
   Users,
@@ -12,6 +15,8 @@ import {
 
 const NAV_PREFIX_MATCHES: Record<string, string> = {
   "/app/compose/": "/app/compose/",
+  "/app/inbox/": "/app/inbox/",
+  "/app/sent/": "/app/sent/",
   "/app/drafts/": "/app/drafts/",
   "/app/campaigns/": "/app/campaigns/",
   "/app/recipients/": "/app/recipients/",
@@ -21,6 +26,7 @@ export type DashboardNavItem = {
   title: string;
   url: string;
   icon: LucideIcon;
+  superAdminOnly?: boolean;
 };
 
 export type DashboardNavGroup = {
@@ -34,27 +40,40 @@ export const dashboardNavGroups: DashboardNavGroup[] = [
     items: [{ title: "Dashboard", url: "/app/", icon: LayoutDashboard }],
   },
   {
-    label: "Email management",
+    label: "Mail",
     items: [
       { title: "Compose", url: "/app/compose/", icon: SquarePen },
+      { title: "Inbox", url: "/app/inbox/", icon: Inbox, superAdminOnly: true },
+      { title: "Sent", url: "/app/sent/", icon: Send, superAdminOnly: true },
       { title: "Drafts", url: "/app/drafts/", icon: FileText },
+    ],
+  },
+  {
+    label: "Campaigns",
+    items: [
       { title: "Campaigns", url: "/app/campaigns/", icon: Mail },
       { title: "Recipients", url: "/app/recipients/", icon: Users },
-      { title: "Templates", url: "/app/templates/", icon: FileText },
+      { title: "Templates", url: "/app/templates/", icon: LayoutTemplate },
     ],
   },
   {
-    label: "Delivery",
+    label: "System",
     items: [
       { title: "Queue", url: "/app/queue/", icon: ListOrdered },
-      { title: "Sending History", url: "/app/history/", icon: History },
+      { title: "History", url: "/app/history/", icon: History },
+      { title: "Settings", url: "/app/settings/", icon: Settings },
     ],
   },
-  {
-    label: "Account",
-    items: [{ title: "Settings", url: "/app/settings/", icon: Settings }],
-  },
 ];
+
+export function visibleDashboardNavGroups(isSuperAdmin: boolean): DashboardNavGroup[] {
+  return dashboardNavGroups
+    .map((group) => ({
+      ...group,
+      items: group.items.filter((item) => isSuperAdmin || !item.superAdminOnly),
+    }))
+    .filter((group) => group.items.length > 0);
+}
 
 export function normalizeAppPath(pathname: string) {
   if (pathname === "/") {

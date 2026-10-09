@@ -36,6 +36,13 @@
       "when": 1791580000000,
       "tag": "0004_queue_infrastructure",
       "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1791600000000,
+      "tag": "0005_mailbox",
+      "breakpoints": true
     }
   ]
 }

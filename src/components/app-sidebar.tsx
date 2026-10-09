@@ -3,7 +3,8 @@ import { ExternalLink } from "lucide-react";
 
 import { NavMain } from "@/components/nav-main";
 import { NavUser } from "@/components/nav-user";
-import { dashboardNavGroups } from "@/lib/dashboard-nav";
+import { authClient } from "@/lib/auth-client";
+import { visibleDashboardNavGroups } from "@/lib/dashboard-nav";
 import {
   Sidebar,
   SidebarContent,
@@ -17,6 +18,10 @@ import {
 } from "@/components/ui/sidebar";
 
 export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
+  const { data: session } = authClient.useSession();
+  const role = (session?.user as { role?: string } | undefined)?.role;
+  const groups = visibleDashboardNavGroups(role === "super-admin");
+
   return (
     <Sidebar variant="inset" {...props}>
       <SidebarHeader>
@@ -37,7 +42,7 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
         </SidebarMenu>
       </SidebarHeader>
       <SidebarContent>
-        {dashboardNavGroups.map((group) => (
+        {groups.map((group) => (
           <NavMain
             key={group.label}
             label={group.label}

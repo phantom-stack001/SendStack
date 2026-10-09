@@ -10,6 +10,7 @@ import { registerContactRoutes } from "./routes/contacts.js";
 import { registerDraftRoutes } from "./routes/drafts.js";
 import { registerHealthRoutes } from "./routes/health.js";
 import { registerCampaignRoutes } from "./routes/campaigns.js";
+import { registerMailRoutes } from "./routes/mail.js";
 import { registerQueueRoutes } from "./routes/queue.js";
 import { registerSuppressionRoutes } from "./routes/suppressions.js";
 
@@ -34,6 +35,7 @@ registerContactImportRoutes(app);
 registerSuppressionRoutes(app);
 registerCampaignRoutes(app);
 registerQueueRoutes(app);
+registerMailRoutes(app);
 
 app.get("/api/me", async (c) => {
   const session = await auth.api.getSession({ headers: c.req.raw.headers });

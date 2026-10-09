@@ -385,3 +385,50 @@ export const queueEvents = pgTable(
     index("queue_events_delivery_job_id_idx").on(table.deliveryJobId),
   ],
 );
+
+export const mailConnectionChecks = pgTable(
+  "mail_connection_checks",
+  {
+    id: text("id").primaryKey(),
+    userId: text("user_id")
+      .notNull()
+      .references(() => user.id, { onDelete: "cascade" }),
+    smtpStatus: text("smtp_status").notNull(),
+    imapStatus: text("imap_status").notNull(),
+    smtpError: text("smtp_error"),
+    imapError: text("imap_error"),
+    checkedAt: timestamp("checked_at").defaultNow().notNull(),
+  },
+  (table) => [index("mail_connection_checks_checked_at_idx").on(table.checkedAt)],
+);
+
+export const mailSubmissions = pgTable(
+  "mail_submissions",
+  {
+    id: text("id").primaryKey(),
+    userId: text("user_id")
+      .notNull()
+      .references(() => user.id, { onDelete: "cascade" }),
+    idempotencyKey: text("idempotency_key").notNull(),
+    fromAddress: text("from_address").notNull(),
+    toAddress: text("to_address").notNull(),
+    subject: text("subject").notNull(),
+    messageId: text("message_id"),
+    status: text("status").notNull(),
+    smtpResponse: text("smtp_response"),
+    acceptedRecipients: jsonb("accepted_recipients").$type<string[]>().notNull().default([]),
+    rejectedRecipients: jsonb("rejected_recipients").$type<string[]>().notNull().default([]),
+    sentCopyStatus: text("sent_copy_status"),
+    sentCopyError: text("sent_copy_error"),
+    errorMessage: text("error_message"),
+    createdAt: timestamp("created_at").defaultNow().notNull(),
+    updatedAt: timestamp("updated_at")
+      .defaultNow()
+      .$onUpdate(() => new Date())
+      .notNull(),
+  },
+  (table) => [
+    uniqueIndex("mail_submissions_idempotency_key_unique").on(table.idempotencyKey),
+    index("mail_submissions_created_at_idx").on(table.createdAt),
+  ],
+);

@@ -40,7 +40,7 @@ function ComposePageContent({ draftId }: { draftId?: string }) {
         <PageHeader
           title="Compose email"
           description="Create, edit, and save email drafts."
-          notice="Email sending is not available in this phase. Drafts are saved securely to your account."
+          notice="Drafts are saved to your account. Campaign queues stay simulation-only. Individual test delivery is limited to Settings."
         />
 
         {loading ? (

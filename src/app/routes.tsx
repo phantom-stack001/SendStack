@@ -13,6 +13,9 @@ import { ComposePage } from "@/pages/app/ComposePage";
 import { DraftsPage } from "@/pages/app/DraftsPage";
 import { DashboardPage } from "@/pages/app/DashboardPage";
 import { HistoryPage } from "@/pages/app/HistoryPage";
+import { InboxPage } from "@/pages/app/InboxPage";
+import { MailMessagePage } from "@/pages/app/MailMessagePage";
+import { SentPage } from "@/pages/app/SentPage";
 import { QueueJobDetailsPage } from "@/pages/app/QueueJobDetailsPage";
 import { QueuePage } from "@/pages/app/QueuePage";
 import { ContactListDetailsPage } from "@/pages/app/ContactListDetailsPage";
@@ -111,6 +114,10 @@ export const appRoutes = [
       { index: true, element: <DashboardPage /> },
       { path: "compose/", element: <ComposePage /> },
       { path: "compose/:draftId/", element: <ComposePage /> },
+      { path: "inbox/", element: <InboxPage /> },
+      { path: "inbox/:uid/", element: <MailMessagePage /> },
+      { path: "sent/", element: <SentPage /> },
+      { path: "sent/:uid/", element: <MailMessagePage /> },
       { path: "drafts/", element: <DraftsPage /> },
       { path: "campaigns/", element: <CampaignsPage /> },
       { path: "campaigns/new/", element: <CreateCampaignPage /> },

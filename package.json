@@ -23,6 +23,7 @@
     "db:inspect": "tsx server/scripts/inspect-database.ts",
     "db:reset": "tsx server/scripts/reset-sendstack-db.ts",
     "admin:bootstrap": "tsx server/scripts/bootstrap-admin.ts",
+    "mail:check": "tsx server/scripts/mail-check.ts",
     "auth:generate": "npx @better-auth/cli@latest generate --config ./server/auth/auth.ts --output ./server/db/schema.ts"
   },
   "dependencies": {
@@ -42,8 +43,11 @@
     "dotenv": "^18.0.6",
     "drizzle-orm": "^0.45.4",
     "hono": "^4.13.13",
+    "imapflow": "^2.3.0",
     "ioredis": "^6.0.0",
     "lucide-react": "^1.54.0",
+    "mailparser": "^3.9.37",
+    "nodemailer": "^10.0.16",
     "postgres": "^3.4.9",
     "radix-ui": "^1.7.0",
     "react": "^19.3.0",

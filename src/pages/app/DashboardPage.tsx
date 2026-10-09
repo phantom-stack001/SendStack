@@ -18,7 +18,7 @@ export function DashboardPage() {
         <PageHeader
           title="Dashboard"
           description="Manage your email campaigns and sending activity."
-          notice="Email delivery is not enabled — queue jobs run in simulation-only mode when Redis workers are active."
+          notice="Campaign queues stay simulation-only. Individual mailbox test messages are sent from Settings."
         />
         <DashboardStats />
         <QuickActions />

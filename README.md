@@ -413,14 +413,14 @@ Ownership is enforced on campaigns, drafts, contacts, and lists. Cross-user IDs 
 
 ### Known limitations (Phase 6)
 
-- No email delivery, open/click tracking, or bounce handling.
+- Campaign delivery, open/click tracking, and bounce handling are not part of campaign management. A separate mailbox connection can send one controlled test message and does not send campaigns.
 - Scheduled times are stored but **not executed**.
 - Eligibility snapshots are point-in-time; future delivery must re-check consent and suppressions.
 - Sender addresses are syntactically validated only (not verified sending identities).
 
 ## Queue infrastructure (Phase 7)
 
-Phase 7 adds **Redis + BullMQ** workers for **simulation-only** processing. **No SMTP, no outbound email, no delivery providers.**
+Phase 7 adds **Redis + BullMQ** workers for **simulation-only** campaign processing. Campaign workers do not send email. Direct mailbox SMTP is a separate path and is not wired into these workers.
 
 ### Processes
 
@@ -470,6 +470,34 @@ Scheduling, pause/resume, cancellation, retries, and Redis interruption should b
 ### Production deployment
 
 The static `dist/` SPA alone is **not** sufficient: you need a Node (or serverless) host for `server/` with `DATABASE_URL` and auth secrets, plus reverse-proxy `/api` to that service (or deploy frontend and API on one origin). Update `vercel.json` / hosting accordingly—do not expose Neon credentials to the browser.
+
+## Direct mailbox
+
+The dashboard can connect to one mailbox for inbox, sent mail, and a single controlled test message. Campaign queues stay simulation-only.
+
+### Server environment
+
+Set these in `.env` only. Do not use a `VITE_` prefix, and do not return the password from the API.
+
+`SPACEMAIL_SMTP_HOST`, `SPACEMAIL_SMTP_PORT`, `SPACEMAIL_SMTP_SECURE`, `SPACEMAIL_IMAP_HOST`, `SPACEMAIL_IMAP_PORT`, `SPACEMAIL_IMAP_SECURE`, `SPACEMAIL_EMAIL`, `SPACEMAIL_PASSWORD`, `SPACEMAIL_SENDER_NAME`, `SPACEMAIL_TEST_RECIPIENT`.
+
+The accepted server settings match the published client configuration for this mailbox host: `mail.spacemail.com`, IMAP port 993 with SSL/TLS, and SMTP port 465 with SSL/TLS or port 587 with STARTTLS. Other hosts and cleartext ports are rejected. This workspace uses SMTP port 587 with required STARTTLS, which is the account setting already present for `SMTP_PORT`, plus IMAP port 993.
+
+`npm run mail:check` verifies both connections. `npm run mail:check -- --send` sends one message to `SPACEMAIL_TEST_RECIPIENT` and records the result. SMTP acceptance is stored as acceptance, not as confirmed inbox delivery.
+
+### Sent folder
+
+The provider does not document an automatic copy of SMTP submissions into Sent. After the outgoing server accepts a test message, SendStack searches the IMAP special-use Sent folder (or a folder named Sent, Sent Items, Sent Messages, or Sent Mail) for the same Message-ID. It appends the submitted message only when that id is absent. If the folder is missing, the submission is still recorded and the sent-copy status is `folder_missing`.
+
+POP3 is not implemented.
+
+### Mail APIs
+
+All of these require a Better Auth session and the `super-admin` role:
+
+`GET /api/mail/status`, `POST /api/mail/test-connection`, `POST /api/mail/test-send`, `GET /api/mail/folders`, `GET /api/mail/inbox`, `GET /api/mail/sent`, `GET /api/mail/mailbox`, `GET /api/mail/messages/:uid`.
+
+Test sending requires `confirm: true`, a UUID idempotency key, and the server-side recipient. The limit is one message per minute and three per hour. The UI asks for confirmation before the request is sent.
 
 ## Verified public contact
 
