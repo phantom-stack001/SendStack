@@ -53,9 +53,30 @@ export type EligibilitySummary = {
   eligible: number;
   excludedUnsubscribed: number;
   excludedSuppressed: number;
+  excludedPendingConsent?: number;
   excludedUnknownConsent: number;
   excludedInvalid: number;
   excludedTotal: number;
+};
+
+export type RecipientEligibilityExclusion = {
+  contactId: string | null;
+  email: string;
+  eligibilityStatus:
+    | "excluded_unsubscribed"
+    | "excluded_suppressed"
+    | "excluded_pending_consent"
+    | "excluded_unknown_consent"
+    | "excluded_invalid";
+  eligibilityReason: string;
+};
+
+export type ContactListEligibilityHint = {
+  listId: string;
+  name: string;
+  memberCount: number;
+  eligible: number;
+  excluded: number;
 };
 
 export type CampaignEvent = {
@@ -158,8 +179,24 @@ export function validateCampaign(id: string) {
   return request<{
     contentIssues: { code: string; message: string }[];
     eligibility: EligibilitySummary;
+    exclusions: RecipientEligibilityExclusion[];
+    recipientIssues: { code: string; message: string }[];
     canMarkReady: boolean;
   }>(`/api/campaigns/${id}/validate`, { method: "POST" });
+}
+
+export function previewRecipientEligibility(input: {
+  contactIds: string[];
+  contactListIds: string[];
+}) {
+  return request<{
+    summary: EligibilitySummary;
+    exclusions: RecipientEligibilityExclusion[];
+    listHints: ContactListEligibilityHint[];
+  }>("/api/campaigns/recipient-eligibility-preview", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
 }
 
 export function prepareCampaign(id: string, markReady = false) {

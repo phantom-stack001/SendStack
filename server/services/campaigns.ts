@@ -19,8 +19,10 @@ import {
 import {
   buildEligibilitySnapshot,
   type ContactCandidate,
+  type EligibilityRow,
   type EligibilitySummary,
 } from "./campaign-eligibility.js";
+import { getContactListById } from "./contact-lists.js";
 import type { CampaignStatus } from "../validation/campaigns.js";
 import {
   CAMPAIGN_CANCELLABLE_STATUSES,
@@ -318,9 +320,122 @@ export async function computeEligibilityForCampaign(
   campaignId: string,
 ): Promise<{ rows: ReturnType<typeof buildEligibilitySnapshot>["rows"]; summary: EligibilitySummary }> {
   const sources = await getRecipientSources(db, campaignId);
+  return computeEligibilityFromSources(db, userId, sources);
+}
+
+function sourcesFromRecipientIds(contactIds: string[], contactListIds: string[]) {
+  const uniqueContactIds = [...new Set(contactIds)];
+  const uniqueListIds = [...new Set(contactListIds)];
+  const sources: typeof campaignRecipientSources.$inferSelect[] = [
+    ...uniqueContactIds.map((contactId) => ({
+      id: "",
+      campaignId: "",
+      sourceType: "individual_contact",
+      contactId,
+      contactListId: null,
+      createdAt: new Date(),
+    })),
+    ...uniqueListIds.map((contactListId) => ({
+      id: "",
+      campaignId: "",
+      sourceType: "contact_list",
+      contactId: null,
+      contactListId,
+      createdAt: new Date(),
+    })),
+  ];
+  return { uniqueContactIds, uniqueListIds, sources };
+}
+
+export async function computeEligibilityFromSources(
+  db: Database,
+  userId: string,
+  sources: typeof campaignRecipientSources.$inferSelect[],
+): Promise<{ rows: EligibilityRow[]; summary: EligibilitySummary }> {
   const candidates = await collectContactCandidates(db, userId, sources);
   const suppressed = await loadSuppressedSet(db, userId);
   return buildEligibilitySnapshot(candidates, suppressed);
+}
+
+export async function computeEligibilityForRecipientSources(
+  db: Database,
+  userId: string,
+  contactIds: string[],
+  contactListIds: string[],
+): Promise<{ rows: EligibilityRow[]; summary: EligibilitySummary }> {
+  const { uniqueContactIds, uniqueListIds, sources } = sourcesFromRecipientIds(
+    contactIds,
+    contactListIds,
+  );
+  await validateRecipientOwnership(db, userId, uniqueContactIds, uniqueListIds);
+  return computeEligibilityFromSources(db, userId, sources);
+}
+
+export type RecipientEligibilityExclusion = {
+  contactId: string | null;
+  email: string;
+  eligibilityStatus: EligibilityRow["eligibilityStatus"];
+  eligibilityReason: string;
+};
+
+export type ContactListEligibilityHint = {
+  listId: string;
+  name: string;
+  memberCount: number;
+  eligible: number;
+  excluded: number;
+};
+
+const EXCLUSION_PREVIEW_LIMIT = 100;
+
+export async function previewRecipientEligibility(
+  db: Database,
+  userId: string,
+  contactIds: string[],
+  contactListIds: string[],
+): Promise<{
+  summary: EligibilitySummary;
+  exclusions: RecipientEligibilityExclusion[];
+  listHints: ContactListEligibilityHint[];
+}> {
+  const { uniqueListIds } = sourcesFromRecipientIds(contactIds, contactListIds);
+  const { rows, summary } = await computeEligibilityForRecipientSources(
+    db,
+    userId,
+    contactIds,
+    contactListIds,
+  );
+
+  const exclusions = rows
+    .filter((row) => row.eligibilityStatus !== "eligible")
+    .slice(0, EXCLUSION_PREVIEW_LIMIT)
+    .map((row) => ({
+      contactId: row.contactId,
+      email: row.email,
+      eligibilityStatus: row.eligibilityStatus,
+      eligibilityReason: row.eligibilityReason,
+    }));
+
+  const listHints: ContactListEligibilityHint[] = [];
+  for (const listId of uniqueListIds) {
+    const list = await getContactListById(db, userId, listId);
+    if (!list) continue;
+    const { summary: listSummary } = await computeEligibilityForRecipientSources(
+      db,
+      userId,
+      [],
+      [listId],
+    );
+    listHints.push({
+      listId,
+      name: list.name,
+      memberCount: listSummary.selectedRaw,
+      eligible: listSummary.eligible,
+      excluded: listSummary.excludedTotal,
+    });
+  }
+
+  return { summary, exclusions, listHints };
 }
 
 /** Recalculate eligibility snapshot without changing campaign lifecycle status. */
@@ -632,7 +747,11 @@ export async function prepareCampaign(
       throw new Error("NAME_REQUIRED");
     }
     if (summary.eligible === 0) {
-      throw new Error("NO_ELIGIBLE_RECIPIENTS");
+      const err = new Error("NO_ELIGIBLE_RECIPIENTS") as Error & {
+        eligibilitySummary?: EligibilitySummary;
+      };
+      err.eligibilitySummary = summary;
+      throw err;
     }
     if (existing.scheduledAt) {
       validateSchedule(existing.scheduledAt, existing.scheduleTimezone);
@@ -722,13 +841,39 @@ export async function validateCampaign(
     bodyText: existing.bodyText,
   });
 
-  const { summary } = await computeEligibilityForCampaign(db, userId, campaignId);
+  const { rows, summary } = await computeEligibilityForCampaign(db, userId, campaignId);
+
+  const exclusions = rows
+    .filter((row) => row.eligibilityStatus !== "eligible")
+    .slice(0, EXCLUSION_PREVIEW_LIMIT)
+    .map((row) => ({
+      contactId: row.contactId,
+      email: row.email,
+      eligibilityStatus: row.eligibilityStatus,
+      eligibilityReason: row.eligibilityReason,
+    }));
+
+  const recipientIssues: { code: string; message: string }[] = [];
+  if (summary.selectedRaw === 0) {
+    recipientIssues.push({
+      code: "NO_RECIPIENT_SOURCES",
+      message: "Select at least one contact or contact list.",
+    });
+  } else if (summary.eligible === 0) {
+    recipientIssues.push({
+      code: "NO_ELIGIBLE_RECIPIENTS",
+      message: "No eligible recipients are currently selected.",
+    });
+  }
 
   return {
     contentIssues,
     eligibility: summary,
+    exclusions,
+    recipientIssues,
     canMarkReady:
       contentIssues.length === 0 &&
+      recipientIssues.length === 0 &&
       existing.name.trim().length > 0 &&
       summary.eligible > 0,
   };

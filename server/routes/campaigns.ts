@@ -13,6 +13,7 @@ import {
   listCampaignEvents,
   listCampaigns,
   prepareCampaign,
+  previewRecipientEligibility,
   serializeCampaign,
   updateCampaign,
   validateCampaign,
@@ -23,6 +24,7 @@ import {
   createCampaignSchema,
   listCampaignsQuerySchema,
   prepareCampaignSchema,
+  recipientEligibilityPreviewSchema,
   updateCampaignSchema,
 } from "../validation/campaigns.js";
 
@@ -150,6 +152,35 @@ export function registerCampaignRoutes(app: Hono) {
     return c.json({ campaign: serializeCampaign(row) }, 201);
   });
 
+  app.post("/api/campaigns/recipient-eligibility-preview", async (c) => {
+    const user = await getSessionUser(c.req.raw.headers);
+    if (!user) return c.json({ error: "Unauthorized" }, 401);
+
+    const body = await c.req.json().catch(() => ({}));
+    const parsed = recipientEligibilityPreviewSchema.safeParse(body);
+    if (!parsed.success) return c.json(validationError(parsed.error), 400);
+
+    try {
+      const result = await previewRecipientEligibility(
+        db,
+        user.id,
+        parsed.data.contactIds,
+        parsed.data.contactListIds,
+      );
+      return c.json(result);
+    } catch (error) {
+      if (error instanceof Error) {
+        if (
+          error.message === "INVALID_CONTACT_SOURCES" ||
+          error.message === "INVALID_LIST_SOURCES"
+        ) {
+          return c.json({ error: "One or more recipient sources are invalid" }, 400);
+        }
+      }
+      throw error;
+    }
+  });
+
   app.post("/api/campaigns/:id/validate", async (c) => {
     const user = await getSessionUser(c.req.raw.headers);
     if (!user) return c.json({ error: "Unauthorized" }, 401);
@@ -203,7 +234,17 @@ export function registerCampaignRoutes(app: Hono) {
           return c.json({ error: "Campaign name is required before marking ready" }, 400);
         }
         if (error.message === "NO_ELIGIBLE_RECIPIENTS") {
-          return c.json({ error: "At least one eligible recipient is required" }, 400);
+          const eligibility =
+            (error as Error & { eligibilitySummary?: unknown }).eligibilitySummary ?? null;
+          return c.json(
+            {
+              error:
+                "This campaign cannot be marked ready because no eligible recipients are selected.",
+              code: "NO_ELIGIBLE_RECIPIENTS",
+              eligibility,
+            },
+            400,
+          );
         }
         if (error.message === "SCHEDULE_MUST_BE_FUTURE") {
           return c.json({ error: "Scheduled time must be in the future" }, 400);

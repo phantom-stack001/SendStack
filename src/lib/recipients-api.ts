@@ -202,11 +202,13 @@ export function importContacts(csvText: string, mapping: Record<string, string |
 
 export function fetchSuppressions(params: {
   page?: number;
+  limit?: number;
   q?: string;
   reason?: SuppressionReason;
 }) {
   const search = new URLSearchParams();
   if (params.page) search.set("page", String(params.page));
+  if (params.limit) search.set("limit", String(params.limit));
   if (params.q) search.set("q", params.q);
   if (params.reason) search.set("reason", params.reason);
   return request<{

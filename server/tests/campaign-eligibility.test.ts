@@ -40,6 +40,12 @@ describe("campaign eligibility", () => {
     ).toBe("excluded_unknown_consent");
     expect(
       classifyContactEligibility(
+        { contactId: "5", email: "wait@example.com", subscriptionStatus: "pending" },
+        suppressed,
+      ).eligibilityStatus,
+    ).toBe("excluded_pending_consent");
+    expect(
+      classifyContactEligibility(
         { contactId: "4", email: "ok@example.com", subscriptionStatus: "subscribed" },
         suppressed,
       ).eligibilityStatus,

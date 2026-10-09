@@ -1,7 +1,9 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 
 import { EmailPreview } from "@/components/composer/EmailPreview";
+import { RecipientEligibilitySummary } from "@/components/campaigns/RecipientEligibilitySummary";
+import { RecipientStatusBadge } from "@/components/campaigns/RecipientStatusBadge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -11,16 +13,26 @@ import { Textarea } from "@/components/ui/textarea";
 import {
   CampaignApiError,
   type Campaign,
+  type ContactListEligibilityHint,
   type EligibilitySummary,
+  type RecipientEligibilityExclusion,
   prepareCampaign,
+  previewRecipientEligibility,
   updateCampaign,
   validateCampaign,
 } from "@/lib/campaigns-api";
+import { recipientDisplayStatus } from "@/lib/campaign-eligibility-ui";
 import { listDrafts, type Draft } from "@/lib/drafts-api";
-import { contactStatusLabel } from "@/lib/contact-status";
-import { fetchContactLists, fetchContacts, type Contact, type ContactList } from "@/lib/recipients-api";
+import {
+  fetchContactLists,
+  fetchContacts,
+  fetchSuppressions,
+  type Contact,
+  type ContactList,
+} from "@/lib/recipients-api";
 
 const STEPS = ["Details", "Email", "Recipients", "Review", "Prepare"] as const;
+const RECIPIENTS_STEP = 2;
 
 type CampaignWizardProps = {
   campaign: Campaign;
@@ -50,7 +62,17 @@ export function CampaignWizard({
   );
   const [selectedListIds, setSelectedListIds] = useState(() => new Set(initialListIds ?? []));
   const [eligibility, setEligibility] = useState<EligibilitySummary | null>(null);
-  const [validationIssues, setValidationIssues] = useState<{ code: string; message: string }[]>([]);
+  const [exclusions, setExclusions] = useState<RecipientEligibilityExclusion[]>([]);
+  const [listHints, setListHints] = useState<ContactListEligibilityHint[]>([]);
+  const [eligibilityLoading, setEligibilityLoading] = useState(false);
+  const [eligibilityPreviewError, setEligibilityPreviewError] = useState<string | null>(null);
+  const [contentIssues, setContentIssues] = useState<{ code: string; message: string }[]>([]);
+  const [recipientIssues, setRecipientIssues] = useState<{ code: string; message: string }[]>([]);
+  const [canMarkReady, setCanMarkReady] = useState(false);
+  const [detailsError, setDetailsError] = useState<string | null>(null);
+  const [emailError, setEmailError] = useState<string | null>(null);
+  const [prepareBlock, setPrepareBlock] = useState<string | null>(null);
+  const [suppressedEmails, setSuppressedEmails] = useState<Set<string>>(() => new Set());
   const [scheduleEnabled, setScheduleEnabled] = useState(Boolean(campaign.scheduledAt));
   const [scheduleLocal, setScheduleLocal] = useState("");
   const [scheduleTimezone, setScheduleTimezone] = useState(
@@ -58,7 +80,7 @@ export function CampaignWizard({
   );
   const [previewOpen, setPreviewOpen] = useState(false);
   const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
 
   useEffect(() => {
@@ -74,8 +96,50 @@ export function CampaignWizard({
     fetchContactLists().then((res) => setLists(res.lists));
   }, [contactQ]);
 
-  const previewContent = useMemo(() => {
-    if (campaign.bodyHtml) {
+  useEffect(() => {
+    if (step !== RECIPIENTS_STEP) return;
+    fetchSuppressions({ page: 1, limit: 100 })
+      .then((res) => setSuppressedEmails(new Set(res.suppressions.map((s) => s.email.toLowerCase()))))
+      .catch(() => setSuppressedEmails(new Set()));
+  }, [step]);
+
+  const refreshEligibilityPreview = useCallback(async () => {
+    setEligibilityPreviewError(null);
+    setEligibilityLoading(true);
+    try {
+      const result = await previewRecipientEligibility({
+        contactIds: [...selectedContactIds],
+        contactListIds: [...selectedListIds],
+      });
+      setEligibility(result.summary);
+      setExclusions(result.exclusions);
+      setListHints(result.listHints);
+      if (result.summary.eligible > 0) {
+        setRecipientIssues([]);
+        setPrepareBlock(null);
+      }
+    } catch {
+      setEligibilityPreviewError("Could not refresh eligibility. Check your connection and try again.");
+    } finally {
+      setEligibilityLoading(false);
+    }
+  }, [selectedContactIds, selectedListIds]);
+
+  useEffect(() => {
+    if (step !== RECIPIENTS_STEP) return;
+    const timer = window.setTimeout(() => {
+      void refreshEligibilityPreview();
+    }, 350);
+    return () => window.clearTimeout(timer);
+  }, [step, refreshEligibilityPreview]);
+
+  const selectedDraft = useMemo(
+    () => drafts.find((d) => d.id === selectedDraftId) ?? null,
+    [drafts, selectedDraftId],
+  );
+
+  const senderPreview = useMemo(() => {
+    if (campaign.bodyHtml && campaign.sourceDraftId === selectedDraftId) {
       return {
         senderName: campaign.senderName,
         senderEmail: campaign.senderEmail,
@@ -83,15 +147,22 @@ export function CampaignWizard({
         bodyHtml: campaign.bodyHtml,
       };
     }
-    const draft = drafts.find((d) => d.id === selectedDraftId);
-    if (!draft) return null;
+    if (!selectedDraft) return null;
     return {
-      senderName: draft.senderName,
-      senderEmail: draft.senderEmail,
-      subject: draft.subject,
-      bodyHtml: draft.bodyHtml,
+      senderName: selectedDraft.senderName,
+      senderEmail: selectedDraft.senderEmail,
+      subject: selectedDraft.subject,
+      bodyHtml: selectedDraft.bodyHtml,
     };
-  }, [campaign, drafts, selectedDraftId]);
+  }, [campaign, selectedDraft, selectedDraftId]);
+
+  const exclusionByContactId = useMemo(() => {
+    const map = new Map<string, RecipientEligibilityExclusion>();
+    for (const row of exclusions) {
+      if (row.contactId) map.set(row.contactId, row);
+    }
+    return map;
+  }, [exclusions]);
 
   const patchCampaign = async (
     current: Campaign,
@@ -123,22 +194,39 @@ export function CampaignWizard({
     });
   };
 
+  const goToRecipients = () => {
+    setPrepareBlock(null);
+    setActionError(null);
+    setStep(RECIPIENTS_STEP);
+  };
+
   const goNext = async () => {
-    setError(null);
+    setActionError(null);
     setMessage(null);
     setBusy(true);
     try {
       if (step === 0) {
+        setDetailsError(null);
+        if (name.trim().length > 200) {
+          setDetailsError("Campaign name must be 200 characters or fewer.");
+          return;
+        }
+        if (description.length > 2000) {
+          setDetailsError("Description must be 2000 characters or fewer.");
+          return;
+        }
         await patchCampaign(campaign, { name, description });
         setStep(1);
       } else if (step === 1) {
+        setEmailError(null);
         if (!selectedDraftId) {
-          setError("Select an email draft to continue.");
+          setEmailError("Select an email draft to continue.");
           return;
         }
         await patchCampaign(campaign, { sourceDraftId: selectedDraftId });
         setStep(2);
       } else if (step === 2) {
+        setRecipientIssues([]);
         const synced = await patchCampaign(campaign, {
           recipientSources: {
             contactIds: [...selectedContactIds],
@@ -148,15 +236,33 @@ export function CampaignWizard({
         const prep = await prepareCampaign(synced.id, false);
         setEligibility(prep.eligibility);
         onCampaignChange(prep.campaign);
+        if (prep.eligibility.eligible === 0 && prep.eligibility.selectedRaw > 0) {
+          setRecipientIssues([
+            {
+              code: "NO_ELIGIBLE_RECIPIENTS",
+              message: "No eligible recipients are currently selected.",
+            },
+          ]);
+        } else if (prep.eligibility.selectedRaw === 0) {
+          setRecipientIssues([
+            {
+              code: "NO_RECIPIENT_SOURCES",
+              message: "Select at least one contact or contact list to target recipients.",
+            },
+          ]);
+        }
         setStep(3);
       } else if (step === 3) {
         const result = await validateCampaign(campaign.id);
         setEligibility(result.eligibility);
-        setValidationIssues(result.contentIssues);
+        setExclusions(result.exclusions);
+        setContentIssues(result.contentIssues);
+        setRecipientIssues(result.recipientIssues);
+        setCanMarkReady(result.canMarkReady);
         setStep(4);
       }
     } catch (err) {
-      setError(err instanceof CampaignApiError ? err.message : "Could not save progress");
+      setActionError(err instanceof CampaignApiError ? err.message : "Could not save progress");
     } finally {
       setBusy(false);
     }
@@ -178,7 +284,8 @@ export function CampaignWizard({
 
   const saveDraft = async () => {
     setBusy(true);
-    setError(null);
+    setActionError(null);
+    setPrepareBlock(null);
     setMessage(null);
     try {
       let current = campaign;
@@ -194,7 +301,7 @@ export function CampaignWizard({
       setMessage("Campaign saved as draft.");
       navigate(`/app/campaigns/${campaign.id}/`);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Could not save campaign");
+      setActionError(err instanceof Error ? err.message : "Could not save campaign");
     } finally {
       setBusy(false);
     }
@@ -202,11 +309,17 @@ export function CampaignWizard({
 
   const markReady = async () => {
     setBusy(true);
-    setError(null);
+    setActionError(null);
+    setPrepareBlock(null);
     setMessage(null);
     try {
       let current = campaign;
       current = await patchCampaign(current, { name, description });
+      if (!current.name.trim()) {
+        setPrepareBlock("Campaign name is required before marking ready.");
+        setStep(0);
+        return;
+      }
       if (selectedDraftId) current = await patchCampaign(current, { sourceDraftId: selectedDraftId });
       current = await patchCampaign(current, {
         recipientSources: {
@@ -219,21 +332,41 @@ export function CampaignWizard({
       onCampaignChange(prep.campaign);
       navigate(`/app/campaigns/${campaign.id}/`);
     } catch (err) {
-      if (err instanceof CampaignApiError && err.details) {
-        const details = err.details as { contentIssues?: { code: string; message: string }[] };
-        if (details.contentIssues?.length) {
-          setValidationIssues(details.contentIssues);
+      if (err instanceof CampaignApiError) {
+        const payload = err.details as {
+          code?: string;
+          eligibility?: EligibilitySummary;
+          contentIssues?: { code: string; message: string }[];
+        };
+        if (payload.eligibility) setEligibility(payload.eligibility);
+        if (payload.contentIssues?.length) setContentIssues(payload.contentIssues);
+        if (payload.code === "NO_ELIGIBLE_RECIPIENTS") {
+          setPrepareBlock(
+            "This campaign cannot be marked ready because no eligible recipients are selected.",
+          );
+          setRecipientIssues([
+            {
+              code: "NO_ELIGIBLE_RECIPIENTS",
+              message: "No eligible recipients are currently selected.",
+            },
+          ]);
+          return;
         }
       }
-      setError(err instanceof CampaignApiError ? err.message : "Could not mark campaign ready");
+      setActionError(err instanceof CampaignApiError ? err.message : "Could not mark campaign ready");
     } finally {
       setBusy(false);
     }
   };
 
+  const listHintMap = useMemo(
+    () => new Map(listHints.map((hint) => [hint.listId, hint])),
+    [listHints],
+  );
+
   return (
     <div className="space-y-6">
-      <div className="flex flex-wrap gap-2">
+      <div className="flex flex-wrap gap-2" aria-label="Campaign wizard progress">
         {STEPS.map((label, index) => (
           <div
             key={label}
@@ -250,7 +383,11 @@ export function CampaignWizard({
         ))}
       </div>
 
-      {error && <p className="text-sm text-destructive">{error}</p>}
+      {actionError && (
+        <p className="text-sm text-destructive" role="alert">
+          {actionError}
+        </p>
+      )}
       {message && <p className="text-sm text-muted-foreground">{message}</p>}
 
       {step === 0 && (
@@ -260,12 +397,18 @@ export function CampaignWizard({
             <CardDescription>Name your campaign and add optional context.</CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
+            {detailsError && (
+              <p className="text-sm text-destructive" role="alert">{detailsError}</p>
+            )}
             <div className="space-y-2">
               <Label htmlFor="campaign-name">Campaign name</Label>
               <Input
                 id="campaign-name"
                 value={name}
-                onChange={(e) => setName(e.target.value)}
+                onChange={(e) => {
+                  setName(e.target.value);
+                  setDetailsError(null);
+                }}
                 placeholder="Spring newsletter"
                 maxLength={200}
               />
@@ -275,7 +418,10 @@ export function CampaignWizard({
               <Textarea
                 id="campaign-description"
                 value={description}
-                onChange={(e) => setDescription(e.target.value)}
+                onChange={(e) => {
+                  setDescription(e.target.value);
+                  setDetailsError(null);
+                }}
                 placeholder="Optional notes for your team"
                 rows={4}
                 maxLength={2000}
@@ -290,10 +436,27 @@ export function CampaignWizard({
           <CardHeader>
             <CardTitle>Email content</CardTitle>
             <CardDescription>
-              Choose a saved draft. SendStack stores an independent snapshot on the campaign.
+              Choose a saved draft. SendStack stores an independent snapshot on the campaign when you
+              continue.
             </CardDescription>
           </CardHeader>
-          <CardContent className="space-y-3">
+          <CardContent className="space-y-4">
+            {emailError && (
+              <p className="text-sm text-destructive" role="alert">{emailError}</p>
+            )}
+            {contentIssues.length > 0 && (
+              <div
+                className="rounded-md border border-destructive/40 bg-destructive/5 p-3 text-sm text-destructive"
+                role="alert"
+              >
+                <p className="font-medium">Email content issues</p>
+                <ul className="mt-1 list-disc pl-5">
+                  {contentIssues.map((issue) => (
+                    <li key={issue.code}>{issue.message}</li>
+                  ))}
+                </ul>
+              </div>
+            )}
             {draftsLoading ? (
               <Skeleton className="h-24 w-full" />
             ) : drafts.length === 0 ? (
@@ -308,14 +471,17 @@ export function CampaignWizard({
                     <div>
                       <p className="font-medium">{draft.subject || "Untitled draft"}</p>
                       <p className="text-xs text-muted-foreground">
-                        {draft.senderName || "Sender"} · {draft.senderEmail || "email not set"}
+                        From: {draft.senderName || "—"} · {draft.senderEmail || "not set"}
                       </p>
                     </div>
                     <Button
                       type="button"
                       size="sm"
                       variant={selectedDraftId === draft.id ? "default" : "outline"}
-                      onClick={() => setSelectedDraftId(draft.id)}
+                      onClick={() => {
+                        setSelectedDraftId(draft.id);
+                        setEmailError(null);
+                      }}
                     >
                       {selectedDraftId === draft.id ? "Selected" : "Select"}
                     </Button>
@@ -323,66 +489,132 @@ export function CampaignWizard({
                 ))}
               </ul>
             )}
-            {previewContent && (
-              <Button type="button" variant="outline" size="sm" onClick={() => setPreviewOpen(true)}>
-                Preview email
-              </Button>
+            {senderPreview && (
+              <div className="rounded-md border bg-muted/30 p-3 text-sm space-y-1">
+                <p className="font-medium">Selected email (sender)</p>
+                <p>
+                  <span className="text-muted-foreground">From name:</span>{" "}
+                  {senderPreview.senderName || "—"}
+                </p>
+                <p>
+                  <span className="text-muted-foreground">From email:</span>{" "}
+                  {senderPreview.senderEmail || "—"}
+                </p>
+                <p>
+                  <span className="text-muted-foreground">Subject:</span>{" "}
+                  {senderPreview.subject || "—"}
+                </p>
+                <Button type="button" variant="outline" size="sm" className="mt-2" onClick={() => setPreviewOpen(true)}>
+                  Preview email
+                </Button>
+              </div>
             )}
           </CardContent>
         </Card>
       )}
 
       {step === 2 && (
-        <div className="grid gap-4 lg:grid-cols-2">
-          <Card>
-            <CardHeader>
-              <CardTitle>Contacts</CardTitle>
-              <CardDescription>Search and select individual contacts.</CardDescription>
-            </CardHeader>
-            <CardContent className="space-y-3">
-              <Input
-                placeholder="Search contacts"
-                value={contactQ}
-                onChange={(e) => setContactQ(e.target.value)}
-              />
-              <ul className="max-h-64 space-y-2 overflow-y-auto">
-                {contacts.map((contact) => (
-                  <li key={contact.id} className="flex items-center gap-2 text-sm">
-                    <input
-                      type="checkbox"
-                      checked={selectedContactIds.has(contact.id)}
-                      onChange={() => toggleContact(contact.id)}
-                      aria-label={`Select ${contact.email}`}
-                    />
-                    <span>{contact.email}</span>
-                    <span className="text-muted-foreground">({contactStatusLabel(contact.subscriptionStatus)})</span>
-                  </li>
-                ))}
-              </ul>
-            </CardContent>
-          </Card>
-          <Card>
-            <CardHeader>
-              <CardTitle>Contact lists</CardTitle>
-              <CardDescription>Include entire lists; duplicates are removed automatically.</CardDescription>
-            </CardHeader>
-            <CardContent>
-              <ul className="space-y-2">
-                {lists.map((list) => (
-                  <li key={list.id} className="flex items-center gap-2 text-sm">
-                    <input
-                      type="checkbox"
-                      checked={selectedListIds.has(list.id)}
-                      onChange={() => toggleList(list.id)}
-                      aria-label={`Select list ${list.name}`}
-                    />
-                    <span>{list.name}</span>
-                    <span className="text-muted-foreground">({list.memberCount} members)</span>
-                  </li>
-                ))}
-              </ul>
-            </CardContent>
-          </Card>
+        <div className="space-y-4">
+          {recipientIssues.length > 0 && (
+            <div
+              className="rounded-md border border-destructive/40 bg-destructive/5 p-3 text-sm text-destructive"
+              role="alert"
+            >
+              <p className="font-medium">{recipientIssues[0]?.message}</p>
+              <p className="mt-1 text-destructive/90">
+                Selected contacts must have valid permission and must not be unsubscribed or
+                suppressed.
+              </p>
+            </div>
+          )}
+          {eligibilityPreviewError && (
+            <p className="text-sm text-destructive" role="alert">{eligibilityPreviewError}</p>
+          )}
+          <div className="grid gap-4 lg:grid-cols-2">
+            <Card>
+              <CardHeader>
+                <CardTitle>Contacts</CardTitle>
+                <CardDescription>
+                  Select individual contacts. Ineligible contacts stay visible for planning but do not
+                  count toward delivery.
+                </CardDescription>
+              </CardHeader>
+              <CardContent className="space-y-3">
+                <Input
+                  placeholder="Search contacts"
+                  value={contactQ}
+                  onChange={(e) => setContactQ(e.target.value)}
+                />
+                <ul className="max-h-64 space-y-2 overflow-y-auto">
+                  {contacts.map((contact) => {
+                    const display = recipientDisplayStatus(
+                      contact.subscriptionStatus,
+                      suppressedEmails.has(contact.email.toLowerCase()),
+                    );
+                    const exclusion = exclusionByContactId.get(contact.id);
+                    const eligible = !exclusion && display === "subscribed";
+                    return (
+                      <li key={contact.id} className="flex flex-wrap items-center gap-2 text-sm">
+                        <input
+                          type="checkbox"
+                          checked={selectedContactIds.has(contact.id)}
+                          onChange={() => toggleContact(contact.id)}
+                          aria-label={`Select ${contact.email}`}
+                        />
+                        <span className="min-w-0 flex-1 truncate">{contact.email}</span>
+                        <RecipientStatusBadge status={display} eligible={eligible} />
+                      </li>
+                    );
+                  })}
+                </ul>
+              </CardContent>
+            </Card>
+            <Card>
+              <CardHeader>
+                <CardTitle>Contact lists</CardTitle>
+                <CardDescription>
+                  Include entire lists; duplicates across sources are removed automatically.
+                </CardDescription>
+              </CardHeader>
+              <CardContent>
+                <ul className="space-y-3">
+                  {lists.map((list) => {
+                    const hint = listHintMap.get(list.id);
+                    return (
+                      <li key={list.id} className="flex flex-wrap items-start gap-2 text-sm">
+                        <input
+                          className="mt-1"
+                          type="checkbox"
+                          checked={selectedListIds.has(list.id)}
+                          onChange={() => toggleList(list.id)}
+                          aria-label={`Select list ${list.name}`}
+                        />
+                        <div className="min-w-0 flex-1">
+                          <p className="font-medium">{list.name}</p>
+                          <p className="text-muted-foreground">
+                            {list.memberCount === 0
+                              ? "Empty list"
+                              : `${list.memberCount} member${list.memberCount === 1 ? "" : "s"}`}
+                            {hint && list.memberCount > 0 && (
+                              <>
+                                {" "}
+                                · ~{hint.eligible} eligible, {hint.excluded} excluded
+                              </>
+                            )}
+                          </p>
+                        </div>
+                      </li>
+                    );
+                  })}
+                </ul>
+              </CardContent>
+            </Card>
+          </div>
+          {eligibilityLoading && !eligibility ? (
+            <Skeleton className="h-32 w-full" />
+          ) : eligibility ? (
+            <RecipientEligibilitySummary summary={eligibility} exclusions={exclusions} />
+          ) : null}
         </div>
       )}
 
@@ -393,32 +625,108 @@ export function CampaignWizard({
               <CardTitle>Review</CardTitle>
               <CardDescription>Confirm details before preparing the campaign.</CardDescription>
             </CardHeader>
-            <CardContent className="space-y-2 text-sm">
-              <p><span className="text-muted-foreground">Name:</span> {name || "—"}</p>
-              <p><span className="text-muted-foreground">Subject:</span> {campaign.subject || "—"}</p>
-              <p>
-                <span className="text-muted-foreground">Recipients:</span>{" "}
-                {selectedContactIds.size} contacts, {selectedListIds.size} lists
-              </p>
+            <CardContent className="space-y-6 text-sm">
+              <section>
+                <h3 className="font-medium">Campaign details</h3>
+                <p className="mt-1">
+                  <span className="text-muted-foreground">Name:</span> {name.trim() || "—"}
+                </p>
+                <p className="mt-1">
+                  <span className="text-muted-foreground">Description:</span>{" "}
+                  {description.trim() || "—"}
+                </p>
+              </section>
+              <section>
+                <h3 className="font-medium">Email</h3>
+                <p className="mt-1">
+                  <span className="text-muted-foreground">From name:</span>{" "}
+                  {campaign.senderName || senderPreview?.senderName || "—"}
+                </p>
+                <p className="mt-1">
+                  <span className="text-muted-foreground">From email:</span>{" "}
+                  {campaign.senderEmail || senderPreview?.senderEmail || "—"}
+                </p>
+                <p className="mt-1">
+                  <span className="text-muted-foreground">Subject:</span>{" "}
+                  {campaign.subject || senderPreview?.subject || "—"}
+                </p>
+                {senderPreview && (
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    className="mt-2"
+                    onClick={() => setPreviewOpen(true)}
+                  >
+                    Preview email
+                  </Button>
+                )}
+              </section>
+              <section>
+                <h3 className="font-medium">Recipients</h3>
+                <p className="mt-1">
+                  <span className="text-muted-foreground">Individual contacts selected:</span>{" "}
+                  {selectedContactIds.size}
+                </p>
+                <p className="mt-1">
+                  <span className="text-muted-foreground">Lists selected:</span> {selectedListIds.size}
+                </p>
+                {eligibility && (
+                  <>
+                    <p className="mt-1">
+                      <span className="text-muted-foreground">Unique recipients:</span>{" "}
+                      {eligibility.uniqueEmails}
+                    </p>
+                    <p className="mt-1">
+                      <span className="text-muted-foreground">Eligible recipients:</span>{" "}
+                      {eligibility.eligible}
+                    </p>
+                    <p className="mt-1">
+                      <span className="text-muted-foreground">Excluded recipients:</span>{" "}
+                      {eligibility.excludedTotal}
+                    </p>
+                  </>
+                )}
+              </section>
               {eligibility && (
-                <div className="mt-4 rounded-md border p-3">
-                  <p className="font-medium">Recipient eligibility</p>
-                  <ul className="mt-2 space-y-1 text-muted-foreground">
-                    <li>Selected (raw): {eligibility.selectedRaw}</li>
-                    <li>Duplicates removed: {eligibility.duplicates}</li>
-                    <li>Eligible: {eligibility.eligible}</li>
-                    <li>Excluded: {eligibility.excludedTotal}</li>
-                  </ul>
-                </div>
+                <section>
+                  <h3 className="font-medium">Eligibility</h3>
+                  <div className="mt-2">
+                    <RecipientEligibilitySummary
+                      summary={eligibility}
+                      exclusions={exclusions}
+                      compact={exclusions.length > 8}
+                    />
+                  </div>
+                </section>
               )}
-              {validationIssues.length > 0 && (
-                <div className="rounded-md border border-destructive/40 bg-destructive/5 p-3 text-destructive">
-                  <p className="font-medium">Content issues</p>
+              {contentIssues.length > 0 && (
+                <div
+                  className="rounded-md border border-destructive/40 bg-destructive/5 p-3 text-destructive"
+                  role="alert"
+                >
+                  <p className="font-medium">Blocking email issues</p>
                   <ul className="mt-1 list-disc pl-5">
-                    {validationIssues.map((issue) => (
+                    {contentIssues.map((issue) => (
                       <li key={issue.code}>{issue.message}</li>
                     ))}
                   </ul>
+                </div>
+              )}
+              {recipientIssues.length > 0 && (
+                <div
+                  className="rounded-md border border-amber-500/40 bg-amber-500/5 p-3 text-sm"
+                  role="status"
+                >
+                  <p className="font-medium">Recipient warnings</p>
+                  <ul className="mt-1 list-disc pl-5">
+                    {recipientIssues.map((issue) => (
+                      <li key={issue.code}>{issue.message}</li>
+                    ))}
+                  </ul>
+                  <Button type="button" variant="outline" size="sm" className="mt-3" onClick={goToRecipients}>
+                    Review recipients
+                  </Button>
                 </div>
               )}
             </CardContent>
@@ -431,11 +739,43 @@ export function CampaignWizard({
           <CardHeader>
             <CardTitle>Save &amp; prepare</CardTitle>
             <CardDescription>
-              Delivery is not available in this phase. You can save a draft, mark the campaign ready, or
-              record an intended schedule for a future release.
+              Delivery is not available in this phase. Save a draft, mark ready when eligible, or
+              record an intended schedule for simulation testing.
             </CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
+            {prepareBlock && (
+              <div
+                className="rounded-md border border-destructive/40 bg-destructive/5 p-3 text-sm text-destructive"
+                role="alert"
+              >
+                <p className="font-medium">{prepareBlock}</p>
+                <p className="mt-1">
+                  Selected contacts must have valid permission and must not be unsubscribed or
+                  suppressed.
+                </p>
+                <Button type="button" variant="outline" size="sm" className="mt-3" onClick={goToRecipients}>
+                  Review recipients
+                </Button>
+              </div>
+            )}
+            {!prepareBlock && !canMarkReady && eligibility && eligibility.eligible === 0 && (
+              <div className="rounded-md border p-3 text-sm" role="status">
+                <p className="font-medium">Mark as ready requires eligible recipients</p>
+                <p className="mt-1 text-muted-foreground">
+                  You can still save this campaign as a draft while you fix recipient targeting.
+                </p>
+                <Button type="button" variant="outline" size="sm" className="mt-3" onClick={goToRecipients}>
+                  Review recipients
+                </Button>
+              </div>
+            )}
+            {canMarkReady && eligibility && eligibility.eligible > 0 && (
+              <p className="text-sm text-muted-foreground" role="status">
+                {eligibility.eligible} eligible recipient{eligibility.eligible === 1 ? "" : "s"} ready
+                for simulation queue activation.
+              </p>
+            )}
             <div className="flex items-center gap-2">
               <input
                 id="schedule-enabled"
@@ -467,15 +807,23 @@ export function CampaignWizard({
               </div>
             )}
             <p className="text-xs text-muted-foreground">
-              Scheduled times are stored for planning only. No background job will send this campaign
-              automatically.
+              Scheduled times are stored in UTC for planning. Simulation activation still requires a
+              ready campaign and queue workers.
             </p>
           </CardContent>
         </Card>
       )}
 
       <div className="flex flex-wrap justify-between gap-2">
-        <Button type="button" variant="outline" disabled={step === 0 || busy} onClick={() => setStep((s) => s - 1)}>
+        <Button
+          type="button"
+          variant="outline"
+          disabled={step === 0 || busy}
+          onClick={() => {
+            setActionError(null);
+            setStep((s) => s - 1);
+          }}
+        >
           Back
         </Button>
         <div className="flex flex-wrap gap-2">
@@ -496,14 +844,14 @@ export function CampaignWizard({
         </div>
       </div>
 
-      {previewContent && (
+      {senderPreview && (
         <EmailPreview
           open={previewOpen}
           onOpenChange={setPreviewOpen}
-          senderName={previewContent.senderName}
-          senderEmail={previewContent.senderEmail}
-          subject={previewContent.subject}
-          bodyHtml={previewContent.bodyHtml}
+          senderName={senderPreview.senderName}
+          senderEmail={senderPreview.senderEmail}
+          subject={senderPreview.subject}
+          bodyHtml={senderPreview.bodyHtml}
         />
       )}
     </div>

@@ -5,6 +5,7 @@ export type EligibilityStatus =
   | "eligible"
   | "excluded_unsubscribed"
   | "excluded_suppressed"
+  | "excluded_pending_consent"
   | "excluded_unknown_consent"
   | "excluded_invalid";
 
@@ -28,6 +29,7 @@ export type EligibilitySummary = {
   eligible: number;
   excludedUnsubscribed: number;
   excludedSuppressed: number;
+  excludedPendingConsent: number;
   excludedUnknownConsent: number;
   excludedInvalid: number;
   excludedTotal: number;
@@ -70,11 +72,19 @@ export function classifyContactEligibility(
       eligibilityReason: "subscribed",
     };
   }
+  if (contact.subscriptionStatus === "pending") {
+    return {
+      contactId: contact.contactId,
+      email,
+      eligibilityStatus: "excluded_pending_consent",
+      eligibilityReason: "pending",
+    };
+  }
   return {
     contactId: contact.contactId,
     email,
     eligibilityStatus: "excluded_unknown_consent",
-    eligibilityReason: contact.subscriptionStatus,
+    eligibilityReason: contact.subscriptionStatus === "unknown" ? "unknown" : contact.subscriptionStatus,
   };
 }
 
@@ -120,6 +130,7 @@ export function buildEligibilitySnapshot(
     eligible: 0,
     excludedUnsubscribed: 0,
     excludedSuppressed: 0,
+    excludedPendingConsent: 0,
     excludedUnknownConsent: 0,
     excludedInvalid: 0,
     excludedTotal: 0,
@@ -129,6 +140,7 @@ export function buildEligibilitySnapshot(
     if (row.eligibilityStatus === "eligible") summary.eligible += 1;
     else if (row.eligibilityStatus === "excluded_unsubscribed") summary.excludedUnsubscribed += 1;
     else if (row.eligibilityStatus === "excluded_suppressed") summary.excludedSuppressed += 1;
+    else if (row.eligibilityStatus === "excluded_pending_consent") summary.excludedPendingConsent += 1;
     else if (row.eligibilityStatus === "excluded_unknown_consent") summary.excludedUnknownConsent += 1;
     else if (row.eligibilityStatus === "excluded_invalid") summary.excludedInvalid += 1;
   }
@@ -136,6 +148,7 @@ export function buildEligibilitySnapshot(
   summary.excludedTotal =
     summary.excludedUnsubscribed +
     summary.excludedSuppressed +
+    summary.excludedPendingConsent +
     summary.excludedUnknownConsent +
     summary.excludedInvalid;
 

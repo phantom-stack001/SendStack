@@ -372,8 +372,25 @@ Server-side evaluation (`server/services/campaign-eligibility.ts`):
 
 - Deduplicate by normalized email (deterministic contact ID tie-break).
 - **Eligible:** `subscription_status = subscribed` and not on `email_suppressions`.
-- **Excluded:** unsubscribed, unknown/pending consent, suppressed, invalid email.
+- **Excluded:** unsubscribed, pending consent, unknown consent, suppressed, invalid email (each unique address counted once using a fixed priority: invalid → suppressed → unsubscribed → pending → unknown).
 - Recalculated on validate/prepare and before marking ready.
+- Live wizard preview: `POST /api/campaigns/recipient-eligibility-preview` with `contactIds` / `contactListIds` (no campaign state change).
+
+### Campaign wizard validation (Phase 7.5)
+
+The create/edit wizard shows **step-scoped** errors:
+
+| Step | Validates |
+| --- | --- |
+| Details | Name/description length |
+| Email | Draft selection, sender fields, content issues |
+| Recipients | Selection, live eligibility summary, exclusion reasons |
+| Review | Full summary + warnings |
+| Prepare | Blocking issues for **Mark as ready**; **Save as draft** always allowed |
+
+Recipient issues (e.g. no eligible addresses) appear on **Recipients** and **Prepare**, not on Details. **Review recipients** jumps back to step 3 without losing wizard state.
+
+Manual contact adds default to **subscribed** with dashboard consent metadata; CSV import still defaults to **unknown** until consent is recorded.
 
 ### Campaign APIs (session required)
 
@@ -386,7 +403,8 @@ Server-side evaluation (`server/services/campaign-eligibility.ts`):
 | `PATCH` | `/api/campaigns/:id` | Update (`expectedRevision` for optimistic locking) |
 | `DELETE` | `/api/campaigns/:id` | Delete **draft** only |
 | `POST` | `/api/campaigns/:id/duplicate` | Duplicate as new draft |
-| `POST` | `/api/campaigns/:id/validate` | Content + eligibility preview |
+| `POST` | `/api/campaigns/:id/validate` | Content + eligibility preview + exclusion list |
+| `POST` | `/api/campaigns/recipient-eligibility-preview` | Eligibility for arbitrary contact/list IDs |
 | `POST` | `/api/campaigns/:id/prepare` | Recipient snapshot (`markReady` optional) |
 | `POST` | `/api/campaigns/:id/cancel` | Cancel pre-processing campaigns |
 | `GET` | `/api/campaigns/:id/events` | Audit history |
@@ -436,6 +454,18 @@ Durable jobs are created in PostgreSQL first; the dispatcher publishes to BullMQ
 ### UI
 
 `/app/queue/` — live stats and job table (polls every 5s). Campaign details include **Activate simulation queue** controls.
+
+Labels use **Simulation completed** / **Simulation failed** / **Skipped** — never “Sent” or “Delivered”.
+
+### Queue local verification (Phase 7.5)
+
+1. Set `QUEUE_ENABLED=true`, `QUEUE_SIMULATION_ONLY=true`, and `REDIS_URL` in `.env` (server-only).
+2. Run `npm run dev`, `npm run dev:dispatcher`, and `npm run dev:worker` in separate terminals.
+3. Mark a campaign **ready** with at least one eligible test contact, then activate simulation from campaign details.
+4. Confirm jobs in `/app/queue/` move through `pending` → `queued` → `processing` → `simulation_completed` (or `skipped` for ineligible recipients).
+5. Optional: `npm run queue:reconcile` after worker/dispatcher restarts to republish orphaned `pending` rows.
+
+Scheduling, pause/resume, cancellation, retries, and Redis interruption should be validated against a **dedicated dev Redis** instance — results depend on your local infrastructure.
 
 ### Production deployment
 

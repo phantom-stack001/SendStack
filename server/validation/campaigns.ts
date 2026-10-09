@@ -87,6 +87,11 @@ export const prepareCampaignSchema = z.object({
   markReady: z.boolean().default(false),
 });
 
+export const recipientEligibilityPreviewSchema = z.object({
+  contactIds: z.array(z.string().uuid()).max(CAMPAIGN_LIMITS.maxIndividualSources).default([]),
+  contactListIds: z.array(z.string().uuid()).max(CAMPAIGN_LIMITS.maxListSources).default([]),
+});
+
 export const scheduleInputSchema = z.object({
   scheduledAt: z.string().datetime(),
   scheduleTimezone: z.string().min(1).max(80),
