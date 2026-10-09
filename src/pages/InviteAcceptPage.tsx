@@ -29,14 +29,14 @@ export function InviteAcceptPage() {
   }
 
   return (
-    <main className="mx-auto flex min-h-svh max-w-lg flex-col justify-center gap-4 p-6">
+    <main className="mx-auto flex min-h-svh w-full min-w-0 max-w-lg flex-col justify-center gap-4 px-4 py-6 pb-[max(1.5rem,env(safe-area-inset-bottom))]">
       <Card>
         <CardHeader>
           <CardTitle>Accept invitation</CardTitle>
         </CardHeader>
         <CardContent className="space-y-3 text-sm">
           <p>Sign in with the invited email address, verify that email, then accept.</p>
-          {error ? <p className="text-destructive">{error}</p> : null}
+          {error ? <p className="wrap-break-word text-destructive">{error}</p> : null}
           {message ? <p>{message}</p> : null}
           <Button type="button" onClick={() => void accept()} disabled={token.length < 20}>Accept invitation</Button>
           <Button variant="outline" asChild><Link to="/login/">Sign in</Link></Button>

@@ -32,11 +32,23 @@ export function AuditPage() {
   return (
     <>
       <PageMeta title="Audit log | SendStack" description="Administrative actions." canonicalPath="/app/admin/audit/" />
-      <AppPageContainer className="max-w-none">
+      <AppPageContainer className="max-w-[90rem]">
         <PageHeader title="Audit log" description="Sensitive account and role changes recorded by SendStack." />
         {error ? <p className="text-sm text-destructive">{error}</p> : null}
         <Card>
           <CardContent className="p-0">
+            <ul className="divide-y md:hidden">
+              {events.length === 0 ? <li className="px-4 py-6 text-sm text-muted-foreground">No administrative events yet.</li> : null}
+              {events.map((event) => (
+                <li key={event.id} className="space-y-1 px-4 py-3 text-sm">
+                  <p className="font-medium">{event.action}</p>
+                  <p className="text-muted-foreground">{new Date(event.createdAt).toLocaleString()}</p>
+                  <p className="break-all text-muted-foreground">Actor {event.actorUserId ?? "—"}</p>
+                  <p className="break-all text-muted-foreground">Target {event.targetUserId ?? "—"}</p>
+                </li>
+              ))}
+            </ul>
+            <div className="hidden md:block">
             <Table>
               <TableHeader>
                 <TableRow>
@@ -54,12 +66,13 @@ export function AuditPage() {
                   <TableRow key={event.id}>
                     <TableCell>{new Date(event.createdAt).toLocaleString()}</TableCell>
                     <TableCell>{event.action}</TableCell>
-                    <TableCell className="max-w-32 truncate">{event.actorUserId ?? "—"}</TableCell>
-                    <TableCell className="max-w-32 truncate">{event.targetUserId ?? "—"}</TableCell>
+                    <TableCell className="max-w-32 truncate" title={event.actorUserId ?? undefined}>{event.actorUserId ?? "—"}</TableCell>
+                    <TableCell className="max-w-32 truncate" title={event.targetUserId ?? undefined}>{event.targetUserId ?? "—"}</TableCell>
                   </TableRow>
                 ))}
               </TableBody>
             </Table>
+            </div>
           </CardContent>
         </Card>
       </AppPageContainer>

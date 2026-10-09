@@ -78,7 +78,7 @@ export function ImportContactsPage() {
             {step === 1 ? (
               <div className="space-y-2">
                 <Label htmlFor="csv-file">Upload CSV (UTF-8)</Label>
-                <input id="csv-file" type="file" accept=".csv,text/csv" onChange={(e) => void onFile(e.target.files?.[0] ?? null)} />
+                <input id="csv-file" className="block w-full max-w-full text-sm file:mr-3 file:rounded-md file:border-0 file:bg-secondary file:px-3 file:py-2" type="file" accept=".csv,text/csv" onChange={(e) => void onFile(e.target.files?.[0] ?? null)} />
                 <p className="text-xs text-muted-foreground">Max 2MB / 10,000 rows. Imports use unknown consent unless suppressed.</p>
               </div>
             ) : null}
@@ -106,7 +106,7 @@ export function ImportContactsPage() {
                   <div key={field} className="space-y-1">
                     <Label>{field === "email" ? "Email (required)" : field}</Label>
                     <select
-                      className="flex h-9 w-full rounded-md border border-input px-2 text-sm"
+                      className="native-select"
                       value={mapping[field] ?? ""}
                       onChange={(e) => setMapping((m) => ({ ...m, [field]: e.target.value }))}
                     >

@@ -101,10 +101,11 @@ export function CreateUserPage() {
     <>
       <PageMeta title="Create User | SendStack" description="Create a new account and configure its access." canonicalPath="/app/admin/users/new/" />
       <AppPageContainer>
-        <div className="flex items-start justify-between gap-3">
-          <PageHeader title="Create User" description="Create a new account and configure its access." />
-          <Button variant="outline" asChild><Link to="/app/admin/users/">Back</Link></Button>
-        </div>
+        <PageHeader
+          title="Create User"
+          description="Create a new account and configure its access."
+          actions={<Button variant="outline" asChild><Link to="/app/admin/users/">Back</Link></Button>}
+        />
         <Card>
           <CardContent>
             <form className="space-y-4" onSubmit={(event) => void submit(event)}>
@@ -133,14 +134,14 @@ export function CreateUserPage() {
               <div className="grid gap-3 md:grid-cols-2">
                 <div className="space-y-2">
                   <Label htmlFor="create-role">Assign role</Label>
-                  <select id="create-role" className="h-9 w-full rounded-md border px-3 text-sm" value={roleId} onChange={(event) => setRoleId(event.target.value)} required>
+                  <select id="create-role" className="native-select" value={roleId} onChange={(event) => setRoleId(event.target.value)} required>
                     {roles.map((role) => <option key={role.id} value={role.id}>{role.name}</option>)}
                   </select>
                   {selected ? <p className="text-sm text-muted-foreground">{selected.description}</p> : null}
                 </div>
                 <div className="space-y-2">
                   <Label htmlFor="create-status">Account status</Label>
-                  <select id="create-status" className="h-9 w-full rounded-md border px-3 text-sm" value={status} onChange={(event) => setStatus(event.target.value as "active" | "suspended")}>
+                  <select id="create-status" className="native-select" value={status} onChange={(event) => setStatus(event.target.value as "active" | "suspended")}>
                     <option value="active">Active</option>
                     <option value="suspended">Suspended</option>
                   </select>

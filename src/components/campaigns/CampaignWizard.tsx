@@ -366,22 +366,32 @@ export function CampaignWizard({
 
   return (
     <div className="space-y-6">
-      <div className="flex flex-wrap gap-2" aria-label="Campaign wizard progress">
-        {STEPS.map((label, index) => (
-          <div
-            key={label}
-            className={`rounded-full px-3 py-1 text-xs font-medium ${
-              index === step
-                ? "bg-primary text-primary-foreground"
-                : index < step
-                  ? "bg-muted text-foreground"
-                  : "bg-muted/50 text-muted-foreground"
-            }`}
-          >
-            {index + 1}. {label}
+      <nav aria-label="Campaign wizard progress">
+        <div className="space-y-2 md:hidden">
+          <p className="text-sm font-medium">Step {step + 1} of {STEPS.length}</p>
+          <p className="text-sm text-muted-foreground">{STEPS[step]}</p>
+          <div className="h-1.5 overflow-hidden rounded-full bg-muted" aria-hidden="true">
+            <div className="h-full bg-primary" style={{ width: `${((step + 1) / STEPS.length) * 100}%` }} />
           </div>
-        ))}
-      </div>
+        </div>
+        <ol className="hidden flex-wrap gap-2 md:flex">
+          {STEPS.map((label, index) => (
+            <li
+              key={label}
+              className={`rounded-full px-3 py-1 text-xs font-medium ${
+                index === step
+                  ? "bg-primary text-primary-foreground"
+                  : index < step
+                    ? "bg-muted text-foreground"
+                    : "bg-muted/50 text-muted-foreground"
+              }`}
+              aria-current={index === step ? "step" : undefined}
+            >
+              {index + 1}. {label}
+            </li>
+          ))}
+        </ol>
+      </nav>
 
       {actionError && (
         <p className="text-sm text-destructive" role="alert">
@@ -554,15 +564,18 @@ export function CampaignWizard({
                     const exclusion = exclusionByContactId.get(contact.id);
                     const eligible = !exclusion && display === "subscribed";
                     return (
-                      <li key={contact.id} className="flex flex-wrap items-center gap-2 text-sm">
+                      <li key={contact.id} className="grid grid-cols-[auto_minmax(0,1fr)] items-start gap-x-3 gap-y-1 text-sm">
                         <input
+                          className="mt-1 size-5"
                           type="checkbox"
                           checked={selectedContactIds.has(contact.id)}
                           onChange={() => toggleContact(contact.id)}
                           aria-label={`Select ${contact.email}`}
                         />
-                        <span className="min-w-0 flex-1 truncate">{contact.email}</span>
-                        <RecipientStatusBadge status={display} eligible={eligible} />
+                        <span className="min-w-0 break-all">{contact.email}</span>
+                        <span className="col-start-2">
+                          <RecipientStatusBadge status={display} eligible={eligible} />
+                        </span>
                       </li>
                     );
                   })}
@@ -583,7 +596,7 @@ export function CampaignWizard({
                     return (
                       <li key={list.id} className="flex flex-wrap items-start gap-2 text-sm">
                         <input
-                          className="mt-1"
+                          className="mt-1 size-5"
                           type="checkbox"
                           checked={selectedListIds.has(list.id)}
                           onChange={() => toggleList(list.id)}
@@ -814,10 +827,11 @@ export function CampaignWizard({
         </Card>
       )}
 
-      <div className="flex flex-wrap justify-between gap-2">
+      <div className="flex flex-col-reverse gap-2 sm:flex-row sm:flex-wrap sm:justify-between">
         <Button
           type="button"
           variant="outline"
+          className="w-full sm:w-auto"
           disabled={step === 0 || busy}
           onClick={() => {
             setActionError(null);
@@ -826,18 +840,18 @@ export function CampaignWizard({
         >
           Back
         </Button>
-        <div className="flex flex-wrap gap-2">
+        <div className="flex flex-col gap-2 sm:flex-row sm:flex-wrap">
           {step === 4 ? (
             <>
-              <Button type="button" variant="outline" disabled={busy} onClick={saveDraft}>
+              <Button type="button" variant="outline" className="w-full sm:w-auto" disabled={busy} onClick={saveDraft}>
                 Save as draft
               </Button>
-              <Button type="button" disabled={busy} onClick={markReady}>
+              <Button type="button" className="w-full sm:w-auto" disabled={busy} onClick={markReady}>
                 Mark as ready
               </Button>
             </>
           ) : (
-            <Button type="button" disabled={busy} onClick={goNext}>
+            <Button type="button" className="w-full sm:w-auto" disabled={busy} onClick={goNext}>
               Next
             </Button>
           )}

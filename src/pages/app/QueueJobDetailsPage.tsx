@@ -51,24 +51,24 @@ export function QueueJobDetailsPage() {
         canonicalPath={`/app/queue/jobs/${jobId}/`}
       />
       <AppPageContainer>
-        <div className="mb-4 flex items-center justify-between">
-          <PageHeader title="Simulation job" description="Processing details (no email was sent)." />
-          <Button asChild variant="outline" size="sm">
-            <Link to="/app/queue/">Back to queue</Link>
-          </Button>
-        </div>
+        <PageHeader
+          className="mb-4"
+          title="Simulation job"
+          description="Processing details (no email was sent)."
+          actions={<Button asChild variant="outline"><Link to="/app/queue/">Back to queue</Link></Button>}
+        />
         {error && <p className="text-sm text-destructive">{error}</p>}
         {job && (
           <Card>
             <CardHeader>
-              <CardTitle className="flex items-center gap-2">
+              <CardTitle className="flex min-w-0 flex-wrap items-center gap-2">
                 <QueueStatusBadge status={job.status} />
-                <span className="font-mono text-sm">{job.id}</span>
+                <span className="min-w-0 break-all font-mono text-sm">{job.id}</span>
               </CardTitle>
             </CardHeader>
             <CardContent className="space-y-2 text-sm">
               <p>Campaign: <Link className="underline" to={`/app/campaigns/${job.campaignId}/`}>{job.campaignId}</Link></p>
-              <p>Recipient: {email ?? "—"}</p>
+              <p className="break-all">Recipient: {email ?? "—"}</p>
               <p>Attempts: {job.attemptCount}/{job.maxAttempts}</p>
               {job.lastErrorMessage && <p className="text-destructive">Last error: {job.lastErrorMessage}</p>}
               {job.skipReason && <p>Skip reason: {job.skipReason}</p>}

@@ -49,8 +49,8 @@ function ToolbarButton({
         <Button
           type="button"
           variant={active ? "secondary" : "ghost"}
-          size="icon-sm"
-          className={cn("shrink-0", active && "bg-accent text-accent-foreground")}
+          size="icon"
+          className={cn("size-11 shrink-0 sm:size-8", active && "bg-accent text-accent-foreground")}
           disabled={disabled}
           onClick={onClick}
           aria-label={label}

@@ -37,6 +37,20 @@ function senderLabel(draft: Draft) {
 
 export function DraftsTable({ drafts, onDelete }: DraftsTableProps) {
   return (
+    <>
+      <ul className="divide-y md:hidden">
+        {drafts.map((draft) => (
+          <li key={draft.id} className="space-y-2 px-4 py-3">
+            <Link to={`/app/compose/${draft.id}/`} className="block font-medium wrap-break-word hover:text-primary hover:underline">
+              {draftDisplaySubject(draft.subject)}
+            </Link>
+            <p className="text-sm wrap-break-word text-muted-foreground">{senderLabel(draft)}</p>
+            <p className="text-xs text-muted-foreground">Updated {formatDate(draft.updatedAt)}</p>
+            <DraftActions draftId={draft.id} onDelete={() => onDelete(draft)} />
+          </li>
+        ))}
+      </ul>
+      <div className="hidden md:block">
     <Table>
       <TableHeader>
         <TableRow>
@@ -72,5 +86,7 @@ export function DraftsTable({ drafts, onDelete }: DraftsTableProps) {
         ))}
       </TableBody>
     </Table>
+      </div>
+    </>
   );
 }

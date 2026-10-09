@@ -161,7 +161,7 @@ export function CampaignsPage() {
             className="sm:max-w-xs"
           />
           <select
-            className="h-9 rounded-md border border-input bg-background px-3 text-sm"
+            className="native-select sm:w-56"
             value={status}
             onChange={(e) => {
               setStatus(e.target.value as CampaignStatus | "");

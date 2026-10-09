@@ -46,14 +46,14 @@ export function MessageList({
                     className={cn("size-2 shrink-0 rounded-full", message.seen ? "bg-transparent" : "bg-primary")}
                     aria-hidden="true"
                   />
-                  <span className="truncate">
+                  <span className="truncate" title={address}>
                     <span className="text-muted-foreground sm:hidden">{addressLabel} </span>
                     {address}
                   </span>
                   {!message.seen ? <span className="sr-only">Unread</span> : null}
                 </span>
                 <span className="min-w-0 sm:col-start-2">
-                  <span className={cn("block truncate text-sm", !message.seen && "font-medium")}>
+                  <span className={cn("block truncate text-sm", !message.seen && "font-medium")} title={message.subject}>
                     {message.subject}
                   </span>
                   {message.preview ? (

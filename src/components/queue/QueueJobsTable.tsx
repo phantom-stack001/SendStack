@@ -24,6 +24,24 @@ function formatDate(iso: string | null) {
 
 export function QueueJobsTable({ jobs }: { jobs: DeliveryJob[] }) {
   return (
+    <>
+      <ul className="divide-y md:hidden">
+        {jobs.map((job) => (
+          <li key={job.id} className="space-y-1 px-4 py-3 text-sm">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <Link className="font-medium hover:underline" to={`/app/queue/jobs/${job.id}/`}>
+                Job {job.id.slice(0, 8)}…
+              </Link>
+              <QueueStatusBadge status={job.status} />
+            </div>
+            <p className="wrap-break-word">{job.recipientEmail ?? "No recipient"}</p>
+            <p className="text-xs text-muted-foreground">
+              {job.attemptCount}/{job.maxAttempts} attempts · {formatDate(job.updatedAt)}
+            </p>
+          </li>
+        ))}
+      </ul>
+      <div className="hidden md:block">
     <Table>
       <TableHeader>
         <TableRow>
@@ -48,7 +66,7 @@ export function QueueJobsTable({ jobs }: { jobs: DeliveryJob[] }) {
                 {job.campaignId.slice(0, 8)}…
               </Link>
             </TableCell>
-            <TableCell>{job.recipientEmail ?? "—"}</TableCell>
+            <TableCell className="max-w-56 truncate">{job.recipientEmail ?? "—"}</TableCell>
             <TableCell>
               <QueueStatusBadge status={job.status} />
             </TableCell>
@@ -60,5 +78,7 @@ export function QueueJobsTable({ jobs }: { jobs: DeliveryJob[] }) {
         ))}
       </TableBody>
     </Table>
+      </div>
+    </>
   );
 }

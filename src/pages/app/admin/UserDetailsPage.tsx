@@ -120,11 +120,12 @@ export function UserDetailsPage() {
   return (
     <>
       <PageMeta title={`${account.name} | SendStack`} description="User account details." canonicalPath={`/app/admin/users/${account.id}/`} />
-      <AppPageContainer className="max-w-none">
-        <div className="flex items-start justify-between gap-3">
-          <PageHeader title={account.name} description={account.email} />
-          <Button variant="outline" asChild><Link to="/app/admin/users/">Back</Link></Button>
-        </div>
+      <AppPageContainer className="max-w-[90rem]">
+        <PageHeader
+          title={account.name}
+          description={account.email}
+          actions={<Button variant="outline" asChild><Link to="/app/admin/users/">Back</Link></Button>}
+        />
         {created ? <p className="text-sm" role="status">User created successfully.</p> : null}
         {error ? <p className="text-sm text-destructive">{error}</p> : null}
         {message ? <p className="text-sm">{message}</p> : null}
@@ -143,8 +144,9 @@ export function UserDetailsPage() {
             <CardHeader><CardTitle>Access</CardTitle></CardHeader>
             <CardContent className="space-y-3">
               {ASSIGNABLE.map((key) => (
-                <label key={key} className="flex items-center gap-2 text-sm">
+                <label key={key} className="flex min-h-11 items-center gap-3 text-sm">
                   <input
+                    className="size-5"
                     type="checkbox"
                     checked={roles.includes(key)}
                     onChange={(event) => {

@@ -88,6 +88,7 @@ body {
   position: sticky;
   top: 0;
   z-index: 20;
+  padding-top: env(safe-area-inset-top);
   backdrop-filter: blur(14px);
   background: rgba(232, 236, 239, 0.78);
   border-bottom: 1px solid transparent;

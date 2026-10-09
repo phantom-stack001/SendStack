@@ -79,7 +79,7 @@ export function MailboxScreen({ mode }: { mode: "inbox" | "sent" }) {
         description={description}
         canonicalPath={mode === "sent" ? "/app/sent/" : "/app/inbox/"}
       />
-      <AppPageContainer className="max-w-none">
+      <AppPageContainer className="max-w-[90rem]">
         <PageHeader title={title} description={description} />
 
         {restricted ? (

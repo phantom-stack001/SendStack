@@ -57,13 +57,11 @@ export function MailMessagePage() {
         description="Read a mailbox message."
         canonicalPath={pathname}
       />
-      <AppPageContainer className="max-w-none">
-        <div className="flex items-start justify-between gap-3">
-          <PageHeader className="min-w-0" title={message?.subject ?? "Message"} />
-          <Button variant="outline" className="shrink-0" asChild>
-            <Link to={back}>Back</Link>
-          </Button>
-        </div>
+      <AppPageContainer className="max-w-[90rem]">
+        <PageHeader
+          title={message?.subject ?? "Message"}
+          actions={<Button variant="outline" asChild><Link to={back}>Back</Link></Button>}
+        />
 
         {missing ? (
           <Card>
@@ -90,9 +88,11 @@ export function MailMessagePage() {
                 <dd>{formatMailDate(message.date) || "Unknown date"}</dd>
               </dl>
               {message.attachments.length > 0 ? (
-                <p className="text-sm text-muted-foreground">
-                  Attachments: {message.attachments.map((attachment) => attachment.name).join(", ")}
-                </p>
+                <ul className="space-y-1 text-sm text-muted-foreground">
+                  {message.attachments.map((attachment) => (
+                    <li key={attachment.name} className="break-all">Attachment: {attachment.name}</li>
+                  ))}
+                </ul>
               ) : null}
               {message.bodyLimited ? (
                 <p className="text-sm text-muted-foreground">
@@ -100,15 +100,17 @@ export function MailMessagePage() {
                 </p>
               ) : null}
               {message.html ? (
-                <iframe
-                  title="Message content"
-                  sandbox="allow-popups allow-popups-to-escape-sandbox"
-                  referrerPolicy="no-referrer"
-                  srcDoc={mailMessageSrcDoc(message.html)}
-                  className="min-h-64 w-full rounded-md border border-border bg-white"
-                />
+                <div className="max-w-full overflow-x-auto">
+                  <iframe
+                    title="Message content"
+                    sandbox="allow-popups allow-popups-to-escape-sandbox"
+                    referrerPolicy="no-referrer"
+                    srcDoc={mailMessageSrcDoc(message.html)}
+                    className="min-h-64 w-full max-w-full rounded-md border border-border bg-white"
+                  />
+                </div>
               ) : (
-                <pre className="whitespace-pre-wrap font-sans text-sm">{message.text}</pre>
+                <pre className="wrap-break-word whitespace-pre-wrap font-sans text-sm">{message.text}</pre>
               )}
             </CardContent>
           </Card>

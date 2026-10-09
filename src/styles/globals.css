@@ -75,10 +75,20 @@
     @apply border-border outline-ring/50;
   }
 
+  html {
+    text-size-adjust: 100%;
+  }
+
   body {
     @apply bg-background text-foreground antialiased;
     font-family: "Avenir Next", "Segoe UI", "Helvetica Neue", sans-serif;
     line-height: 1.5;
+  }
+}
+
+@layer components {
+  .native-select {
+    @apply h-11 w-full min-w-0 rounded-md border border-input bg-background px-3 text-base md:h-9 md:text-sm;
   }
 }
 

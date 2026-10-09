@@ -10,8 +10,8 @@ type DraftActionsProps = {
 
 export function DraftActions({ draftId, onDelete }: DraftActionsProps) {
   return (
-    <div className="flex items-center justify-end gap-1">
-      <Button variant="ghost" size="icon-sm" asChild>
+    <div className="flex items-center justify-start gap-1 md:justify-end">
+      <Button variant="ghost" size="icon" className="size-11 md:size-8" asChild>
         <Link to={`/app/compose/${draftId}/`} aria-label="Open draft">
           <Pencil />
         </Link>
@@ -19,7 +19,8 @@ export function DraftActions({ draftId, onDelete }: DraftActionsProps) {
       <Button
         type="button"
         variant="ghost"
-        size="icon-sm"
+        size="icon"
+        className="size-11 md:size-8"
         onClick={onDelete}
         aria-label="Delete draft"
       >

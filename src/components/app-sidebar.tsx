@@ -1,4 +1,5 @@
-import { Link } from "react-router-dom";
+import { useEffect } from "react";
+import { Link, useLocation } from "react-router-dom";
 import { ExternalLink } from "lucide-react";
 
 import { NavMain } from "@/components/nav-main";
@@ -15,10 +16,17 @@ import {
   SidebarMenuItem,
   SidebarGroup,
   SidebarGroupLabel,
+  useSidebar,
 } from "@/components/ui/sidebar";
 
 export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
+  const { pathname } = useLocation();
+  const { setOpenMobile } = useSidebar();
   const { permissions } = useAuthorization();
+
+  useEffect(() => {
+    setOpenMobile(false);
+  }, [pathname, setOpenMobile]);
   const groups = visibleDashboardNavGroups(permissions);
 
   return (

@@ -74,6 +74,17 @@ export function SuppressionsPage() {
             {loading ? <Skeleton className="h-40 w-full" /> : items.length === 0 ? (
               <EmptyState title="No suppressions" description="Manual blocks and unsubscribe events appear here." />
             ) : (
+              <>
+              <ul className="divide-y md:hidden">
+                {items.map((item) => (
+                  <li key={item.id} className="space-y-1 py-3">
+                    <p className="break-all font-medium">{item.email}</p>
+                    <Badge variant="secondary">{item.reason}</Badge>
+                    <p className="text-sm text-muted-foreground">{new Date(item.createdAt).toLocaleDateString()}</p>
+                  </li>
+                ))}
+              </ul>
+              <div className="hidden md:block">
               <Table>
                 <TableHeader>
                   <TableRow>
@@ -85,13 +96,15 @@ export function SuppressionsPage() {
                 <TableBody>
                   {items.map((item) => (
                     <TableRow key={item.id}>
-                      <TableCell>{item.email}</TableCell>
+                      <TableCell className="max-w-xs truncate" title={item.email}>{item.email}</TableCell>
                       <TableCell><Badge variant="secondary">{item.reason}</Badge></TableCell>
                       <TableCell>{new Date(item.createdAt).toLocaleDateString()}</TableCell>
                     </TableRow>
                   ))}
                 </TableBody>
               </Table>
+              </div>
+              </>
             )}
           </CardContent>
         </Card>

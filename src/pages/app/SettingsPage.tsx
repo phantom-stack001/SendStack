@@ -198,10 +198,10 @@ export function SettingsPage() {
               <CardContent className="space-y-4 text-sm">
                 <div className="space-y-1">
                   <p className="text-muted-foreground">Email account</p>
-                  <p>{status.accountEmail ?? "Not configured"}</p>
+                  <p className="break-all">{status.accountEmail ?? "Not configured"}</p>
                 </div>
-                <div className="flex items-center justify-between gap-3">
-                  <p>Outgoing mail server</p>
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <p className="min-w-0 wrap-break-word">Outgoing mail server</p>
                   <Badge variant={connectionVariant(status.outgoing.status)}>
                     {connectionLabel(status.outgoing.status)}
                   </Badge>
@@ -209,8 +209,8 @@ export function SettingsPage() {
                 {status.outgoing.error ? (
                   <p className="text-destructive">{status.outgoing.error}</p>
                 ) : null}
-                <div className="flex items-center justify-between gap-3">
-                  <p>Incoming mail server</p>
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <p className="min-w-0 wrap-break-word">Incoming mail server</p>
                   <Badge variant={connectionVariant(status.incoming.status)}>
                     {connectionLabel(status.incoming.status)}
                   </Badge>

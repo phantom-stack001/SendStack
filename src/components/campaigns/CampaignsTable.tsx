@@ -50,8 +50,86 @@ type CampaignsTableProps = {
   onDelete: (campaign: Campaign) => void;
 };
 
+function CampaignActions({
+  campaign,
+  onDuplicate,
+  onCancel,
+  onDelete,
+}: {
+  campaign: Campaign;
+  onDuplicate: (campaign: Campaign) => void;
+  onCancel: (campaign: Campaign) => void;
+  onDelete: (campaign: Campaign) => void;
+}) {
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <Button variant="ghost" size="icon" className="size-11 md:size-9" aria-label="Campaign actions">
+          <MoreHorizontal className="size-4" />
+        </Button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="end">
+        <DropdownMenuItem asChild>
+          <Link to={`/app/campaigns/${campaign.id}/`}>
+            <Eye className="size-4" />
+            View
+          </Link>
+        </DropdownMenuItem>
+        {campaign.status === "draft" && (
+          <DropdownMenuItem asChild>
+            <Link to={`/app/campaigns/${campaign.id}/edit/`}>
+              <Pencil className="size-4" />
+              Edit
+            </Link>
+          </DropdownMenuItem>
+        )}
+        <DropdownMenuItem onClick={() => onDuplicate(campaign)}>
+          <Copy className="size-4" />
+          Duplicate
+        </DropdownMenuItem>
+        {["draft", "ready", "scheduled", "queued", "processing", "paused"].includes(
+          campaign.status,
+        ) && (
+          <>
+            <DropdownMenuSeparator />
+            <DropdownMenuItem onClick={() => onCancel(campaign)}>
+              <XCircle className="size-4" />
+              Cancel
+            </DropdownMenuItem>
+          </>
+        )}
+        {campaign.status === "draft" && (
+          <DropdownMenuItem variant="destructive" onClick={() => onDelete(campaign)}>
+            <Trash2 className="size-4" />
+            Delete
+          </DropdownMenuItem>
+        )}
+      </DropdownMenuContent>
+    </DropdownMenu>
+  );
+}
+
 export function CampaignsTable({ campaigns, onDuplicate, onCancel, onDelete }: CampaignsTableProps) {
   return (
+    <>
+      <ul className="divide-y md:hidden">
+        {campaigns.map((campaign) => (
+          <li key={campaign.id} className="flex items-start gap-2 px-4 py-3">
+            <div className="min-w-0 flex-1 space-y-1">
+              <Link className="block font-medium wrap-break-word hover:underline" to={`/app/campaigns/${campaign.id}/`}>
+                {campaign.name || "Untitled campaign"}
+              </Link>
+              <div className="flex flex-wrap items-center gap-2">
+                <CampaignStatusBadge status={campaign.status} />
+                <span className="text-sm text-muted-foreground">{campaign.eligibleRecipientCount} eligible</span>
+              </div>
+              <p className="text-xs text-muted-foreground">Updated {formatDate(campaign.updatedAt)}</p>
+            </div>
+            <CampaignActions campaign={campaign} onDuplicate={onDuplicate} onCancel={onCancel} onDelete={onDelete} />
+          </li>
+        ))}
+      </ul>
+      <div className="hidden md:block">
     <Table>
       <TableHeader>
         <TableRow>
@@ -78,54 +156,13 @@ export function CampaignsTable({ campaigns, onDuplicate, onCancel, onDelete }: C
             <TableCell>{formatDate(campaign.updatedAt)}</TableCell>
             <TableCell>{formatSchedule(campaign)}</TableCell>
             <TableCell>
-              <DropdownMenu>
-                <DropdownMenuTrigger asChild>
-                  <Button variant="ghost" size="icon" aria-label="Campaign actions">
-                    <MoreHorizontal className="size-4" />
-                  </Button>
-                </DropdownMenuTrigger>
-                <DropdownMenuContent align="end">
-                  <DropdownMenuItem asChild>
-                    <Link to={`/app/campaigns/${campaign.id}/`}>
-                      <Eye className="size-4" />
-                      View
-                    </Link>
-                  </DropdownMenuItem>
-                  {campaign.status === "draft" && (
-                    <DropdownMenuItem asChild>
-                      <Link to={`/app/campaigns/${campaign.id}/edit/`}>
-                        <Pencil className="size-4" />
-                        Edit
-                      </Link>
-                    </DropdownMenuItem>
-                  )}
-                  <DropdownMenuItem onClick={() => onDuplicate(campaign)}>
-                    <Copy className="size-4" />
-                    Duplicate
-                  </DropdownMenuItem>
-                  {["draft", "ready", "scheduled", "queued", "processing", "paused"].includes(
-                    campaign.status,
-                  ) && (
-                    <>
-                      <DropdownMenuSeparator />
-                      <DropdownMenuItem onClick={() => onCancel(campaign)}>
-                        <XCircle className="size-4" />
-                        Cancel
-                      </DropdownMenuItem>
-                    </>
-                  )}
-                  {campaign.status === "draft" && (
-                    <DropdownMenuItem variant="destructive" onClick={() => onDelete(campaign)}>
-                      <Trash2 className="size-4" />
-                      Delete
-                    </DropdownMenuItem>
-                  )}
-                </DropdownMenuContent>
-              </DropdownMenu>
+              <CampaignActions campaign={campaign} onDuplicate={onDuplicate} onCancel={onCancel} onDelete={onDelete} />
             </TableCell>
           </TableRow>
         ))}
       </TableBody>
     </Table>
+      </div>
+    </>
   );
 }

@@ -51,12 +51,12 @@ export function EditCampaignPage() {
         canonicalPath={`/app/campaigns/${campaignId}/edit/`}
       />
       <AppPageContainer>
-        <div className="mb-4 flex items-center justify-between gap-2">
-          <PageHeader title="Edit campaign" description="Update draft campaign settings and targeting." />
-          <Button asChild variant="outline" size="sm">
-            <Link to={`/app/campaigns/${campaignId}/`}>View details</Link>
-          </Button>
-        </div>
+        <PageHeader
+          className="mb-4"
+          title="Edit campaign"
+          description="Update draft campaign settings and targeting."
+          actions={<Button asChild variant="outline"><Link to={`/app/campaigns/${campaignId}/`}>View details</Link></Button>}
+        />
         {error && (
           <Card>
             <CardContent className="py-6 text-sm text-destructive">{error}</CardContent>

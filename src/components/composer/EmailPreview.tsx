@@ -42,7 +42,7 @@ export function EmailPreview({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-4xl gap-4">
+      <DialogContent className="gap-4 sm:max-w-4xl">
         <DialogHeader>
           <DialogTitle>Email preview</DialogTitle>
           <DialogDescription>
@@ -72,20 +72,20 @@ export function EmailPreview({
         </div>
 
         <div className="space-y-2 rounded-lg border border-border bg-muted/30 p-4 text-sm">
-          <p><span className="text-muted-foreground">From:</span> {fromLine}</p>
-          <p>
+          <p className="wrap-break-word"><span className="text-muted-foreground">From:</span> {fromLine}</p>
+          <p className="wrap-break-word">
             <span className="text-muted-foreground">Subject:</span>{" "}
             {subject.trim() || "(No subject)"}
           </p>
         </div>
 
-        <div className="flex justify-center rounded-lg border border-border bg-muted/20 p-4">
+        <div className="flex justify-center overflow-x-auto rounded-lg border border-border bg-muted/20 p-3 sm:p-4">
           <iframe
             title="Email preview"
             sandbox=""
             srcDoc={srcDoc}
             className={cn(
-              "h-[min(60vh,520px)] w-full rounded-md border border-border bg-white shadow-sm",
+              "h-[min(50dvh,520px)] w-full max-w-full rounded-md border border-border bg-white shadow-sm",
               mode === "mobile" ? "max-w-[390px]" : "max-w-3xl",
             )}
           />

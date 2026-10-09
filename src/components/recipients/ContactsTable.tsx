@@ -54,6 +54,69 @@ export function ContactsTable({
   showActions = true,
 }: ContactsTableProps) {
   return (
+    <>
+      <ul className="divide-y md:hidden">
+        <li className="flex min-h-11 items-center gap-3 px-4 py-3">
+          <input
+            type="checkbox"
+            className="size-5"
+            aria-label="Select all contacts"
+            checked={allSelected}
+            onChange={onToggleSelectAll}
+          />
+          <span className="text-sm">Select all</span>
+        </li>
+        {contacts.map((contact) => (
+          <li key={contact.id} className="flex items-start gap-3 px-4 py-3">
+            <input
+              type="checkbox"
+              className="mt-1 size-5 shrink-0"
+              aria-label={`Select ${contact.email}`}
+              checked={selectedIds.has(contact.id)}
+              onChange={() => onToggleSelect(contact.id)}
+            />
+            <div className="min-w-0 flex-1 space-y-1">
+              <p className="font-medium wrap-break-word">{contactDisplayName(contact)}</p>
+              <p className="text-sm break-all text-muted-foreground">{contact.email}</p>
+              <Badge variant={contactStatusBadgeVariant(contact.subscriptionStatus)}>
+                {contactStatusLabel(contact.subscriptionStatus)}
+              </Badge>
+            </div>
+            {showActions ? (
+              <DropdownMenu>
+                <DropdownMenuTrigger asChild>
+                  <Button variant="ghost" size="icon" className="size-11 shrink-0" aria-label="Contact actions">
+                    <MoreHorizontal />
+                  </Button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="end">
+                  {onEdit ? (
+                    <DropdownMenuItem onClick={() => onEdit(contact)}>
+                      <Pencil className="size-4" /> Edit
+                    </DropdownMenuItem>
+                  ) : null}
+                  {onAddToList ? (
+                    <DropdownMenuItem onClick={() => onAddToList(contact)}>
+                      Add to list
+                    </DropdownMenuItem>
+                  ) : null}
+                  {onUnsubscribe && contact.subscriptionStatus !== "unsubscribed" ? (
+                    <DropdownMenuItem onClick={() => onUnsubscribe(contact)}>
+                      <UserMinus className="size-4" /> Unsubscribe
+                    </DropdownMenuItem>
+                  ) : null}
+                  {onDelete ? (
+                    <DropdownMenuItem variant="destructive" onClick={() => onDelete(contact)}>
+                      <Trash2 className="size-4" /> Delete
+                    </DropdownMenuItem>
+                  ) : null}
+                </DropdownMenuContent>
+              </DropdownMenu>
+            ) : null}
+          </li>
+        ))}
+      </ul>
+      <div className="hidden md:block">
     <Table>
       <TableHeader>
         <TableRow>
@@ -85,7 +148,7 @@ export function ContactsTable({
               />
             </TableCell>
             <TableCell className="font-medium">{contactDisplayName(contact)}</TableCell>
-            <TableCell>{contact.email}</TableCell>
+            <TableCell className="max-w-64 truncate">{contact.email}</TableCell>
             <TableCell>
               <Badge variant={contactStatusBadgeVariant(contact.subscriptionStatus)}>
                 {contactStatusLabel(contact.subscriptionStatus)}
@@ -132,5 +195,7 @@ export function ContactsTable({
         ))}
       </TableBody>
     </Table>
+      </div>
+    </>
   );
 }

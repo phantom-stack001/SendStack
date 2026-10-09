@@ -80,7 +80,7 @@ export function QueuePage() {
 
         <div className="flex flex-wrap gap-2">
           <select
-            className="h-9 rounded-md border border-input bg-background px-3 text-sm"
+            className="native-select sm:w-64"
             value={status}
             onChange={(e) => {
               setStatus(e.target.value as DeliveryJobStatus | "");

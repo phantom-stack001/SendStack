@@ -43,7 +43,7 @@ export function Header() {
                 type="button"
                 variant="secondary"
                 size="sm"
-                className="nav-toggle max-[720px]:inline-flex min-[721px]:hidden border-[var(--line)] bg-[rgba(255,255,255,0.65)]"
+                className="nav-toggle min-h-11 max-[720px]:inline-flex min-[721px]:hidden border-[var(--line)] bg-[rgba(255,255,255,0.65)]"
                 aria-label="Open menu"
               >
                 <span className="nav-toggle-label">Menu</span>
@@ -58,7 +58,7 @@ export function Header() {
                 {navLinks.map((link) => (
                   <a
                     key={link.label}
-                    className="rounded-md px-3 py-2 text-[0.92rem] font-medium text-muted-foreground hover:bg-accent hover:text-foreground"
+                    className="min-h-11 rounded-md px-3 py-2.5 text-[0.92rem] font-medium text-muted-foreground hover:bg-accent hover:text-foreground"
                     href={link.href}
                   >
                     {link.label}

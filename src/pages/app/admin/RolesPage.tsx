@@ -40,14 +40,26 @@ export function RolesPage() {
   return (
     <>
       <PageMeta title="Roles | SendStack" description="Manage roles and permissions." canonicalPath="/app/admin/roles/" />
-      <AppPageContainer className="max-w-none">
-        <div className="flex items-start justify-between gap-3">
-          <PageHeader title="Roles" description="System roles are protected. Custom roles can be created from a copy of the permission list." />
-          <Button asChild><Link to="/app/admin/roles/new/">Create role</Link></Button>
-        </div>
+      <AppPageContainer className="max-w-[90rem]">
+        <PageHeader
+          title="Roles"
+          description="System roles are protected. Custom roles can be created from a copy of the permission list."
+          actions={<Button asChild><Link to="/app/admin/roles/new/">Create role</Link></Button>}
+        />
         {error ? <p className="text-sm text-destructive">{error}</p> : null}
         <Card>
           <CardContent className="p-0">
+            <ul className="divide-y md:hidden">
+              {roles.map((role) => (
+                <li key={role.id} className="space-y-1 px-4 py-3">
+                  <Link className="font-medium wrap-break-word hover:underline" to={`/app/admin/roles/${role.id}/`}>{role.name}</Link>
+                  <p className="text-sm break-all text-muted-foreground">{role.key}</p>
+                  <p className="text-sm text-muted-foreground">{role.userCount} users · {role.permissionCount} permissions</p>
+                  {role.isSystem ? <Badge variant="outline">System</Badge> : <Badge>Custom</Badge>}
+                </li>
+              ))}
+            </ul>
+            <div className="hidden md:block">
             <Table>
               <TableHeader>
                 <TableRow>
@@ -70,6 +82,7 @@ export function RolesPage() {
                 ))}
               </TableBody>
             </Table>
+            </div>
           </CardContent>
         </Card>
       </AppPageContainer>
@@ -167,19 +180,19 @@ export function RoleDetailsPage() {
               <legend className="px-1 text-sm font-medium">{category}</legend>
               <div className="grid gap-2 sm:grid-cols-2">
                 {items.map((item) => (
-                  <label key={item.key} className="flex items-start gap-2 text-sm">
+                  <label key={item.key} className="flex min-h-11 items-start gap-3 text-sm">
                     <input
                       type="checkbox"
-                      className="mt-1"
+                      className="mt-1 size-5 shrink-0"
                       disabled={isSystem}
                       checked={selected.includes(item.key)}
                       onChange={(event) => {
                         setSelected((current) => event.target.checked ? [...current, item.key] : current.filter((key) => key !== item.key));
                       }}
                     />
-                    <span>
-                      <span className="block">{item.key.split(".")[1]}</span>
-                      <span className="text-muted-foreground">{item.description}</span>
+                    <span className="min-w-0">
+                      <span className="block capitalize">{item.key.split(".")[1]}</span>
+                      <span className="wrap-break-word text-muted-foreground">{item.description}</span>
                     </span>
                   </label>
                 ))}
@@ -187,9 +200,9 @@ export function RoleDetailsPage() {
             </fieldset>
           ))}
           {isSystem ? <p className="text-sm text-muted-foreground">System roles cannot be changed or deleted.</p> : (
-            <div className="flex gap-2">
-              <Button type="submit">{creating ? "Create role" : "Save role"}</Button>
-              {!creating ? <Button type="button" variant="outline" onClick={() => void remove()}>Delete role</Button> : null}
+            <div className="flex flex-col gap-2 sm:flex-row">
+              <Button type="submit" className="w-full sm:w-auto">{creating ? "Create role" : "Save role"}</Button>
+              {!creating ? <Button type="button" variant="outline" className="w-full sm:w-auto" onClick={() => void remove()}>Delete role</Button> : null}
             </div>
           )}
         </form>

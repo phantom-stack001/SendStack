@@ -99,8 +99,8 @@ export function CampaignDetailsPage() {
         canonicalPath={`/app/campaigns/${campaignId}/`}
       />
       <AppPageContainer>
-        <div className="mb-4 flex flex-wrap items-start justify-between gap-2">
-          <div>
+        <div className="mb-4 flex flex-col gap-3 sm:flex-row sm:flex-wrap sm:items-start sm:justify-between">
+          <div className="min-w-0">
             <PageHeader
               title={campaign?.name || "Untitled campaign"}
               description={campaign?.description || "Campaign details and preparation history."}
@@ -112,21 +112,21 @@ export function CampaignDetailsPage() {
             )}
           </div>
           <div className="flex flex-wrap gap-2">
-            <Button asChild variant="outline" size="sm">
+            <Button asChild variant="outline">
               <Link to="/app/campaigns/">All campaigns</Link>
             </Button>
             {campaign?.status === "draft" && (
-              <Button asChild size="sm">
+              <Button asChild>
                 <Link to={`/app/campaigns/${campaign.id}/edit/`}>Edit</Link>
               </Button>
             )}
             {campaign && ["ready", "scheduled"].includes(campaign.status) && (
-              <Button size="sm" variant="outline" disabled={busy} onClick={revertToDraft}>
+              <Button variant="outline" disabled={busy} onClick={revertToDraft}>
                 Revert to draft
               </Button>
             )}
             {campaign && (
-              <Button size="sm" variant="outline" disabled={busy} onClick={handleDuplicate}>
+              <Button variant="outline" disabled={busy} onClick={handleDuplicate}>
                 Duplicate
               </Button>
             )}

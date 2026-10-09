@@ -8,9 +8,9 @@ export function DashboardLayout() {
   return (
     <SidebarProvider>
       <AppSidebar />
-      <SidebarInset>
+      <SidebarInset className="min-w-0">
         <DashboardHeader />
-        <div className="flex flex-1 flex-col gap-6 p-4 md:p-6 pt-0">
+        <div className="flex min-w-0 flex-1 flex-col gap-4 px-4 pt-0 pb-[max(1rem,env(safe-area-inset-bottom))] md:gap-6 md:px-6 md:pb-6">
           <Outlet />
         </div>
       </SidebarInset>

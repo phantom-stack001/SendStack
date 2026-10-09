@@ -18,20 +18,22 @@ export function DashboardHeader() {
   const pageTitle = current?.title ?? "SendStack";
 
   return (
-    <header className="flex h-16 shrink-0 items-center gap-2 border-b border-border/60">
-      <div className="flex items-center gap-2 px-4">
-        <SidebarTrigger className="-ml-1" />
-        <Separator orientation="vertical" className="mr-2 data-[orientation=vertical]:h-4" />
-        <Breadcrumb>
-          <BreadcrumbList>
+    <header className="flex h-14 shrink-0 items-center gap-2 border-b border-border/60 md:h-16">
+      <div className="flex min-w-0 flex-1 items-center gap-2 px-3 md:px-4">
+        <SidebarTrigger className="size-11 shrink-0 md:size-8" />
+        <Separator orientation="vertical" className="mr-1 data-[orientation=vertical]:h-4" />
+        <Breadcrumb className="min-w-0">
+          <BreadcrumbList className="flex-nowrap">
             <BreadcrumbItem className="hidden md:block">
               <BreadcrumbLink asChild>
                 <Link to="/app/">SendStack</Link>
               </BreadcrumbLink>
             </BreadcrumbItem>
             <BreadcrumbSeparator className="hidden md:block" />
-            <BreadcrumbItem>
-              <BreadcrumbPage>{pageTitle}</BreadcrumbPage>
+            <BreadcrumbItem className="min-w-0">
+              <BreadcrumbPage className="block max-w-[46vw] truncate sm:max-w-xs md:max-w-md" title={pageTitle}>
+                {pageTitle}
+              </BreadcrumbPage>
             </BreadcrumbItem>
           </BreadcrumbList>
         </Breadcrumb>

@@ -19,7 +19,7 @@ export function FolderNav({
       <label className="block lg:hidden">
         <span className="sr-only">Mailbox folder</span>
         <select
-          className="h-9 w-full rounded-md border border-input bg-background px-3 text-sm"
+          className="native-select"
           value={active ? folderHref(active) : ""}
           onChange={(event) => navigate(event.target.value)}
         >

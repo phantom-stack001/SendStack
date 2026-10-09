@@ -137,7 +137,7 @@ export function UsersPage() {
   return (
     <>
       <PageMeta title="Users | SendStack" description="Manage accounts, access, and permissions." canonicalPath="/app/admin/users/" />
-      <AppPageContainer className="max-w-none">
+      <AppPageContainer className="max-w-[90rem]">
         <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
           <PageHeader title="Users" description="Manage accounts, access, and permissions." />
           <div className="flex flex-wrap gap-2">
@@ -162,13 +162,13 @@ export function UsersPage() {
         </div>
         <form className="grid gap-3 rounded-xl border p-4 md:grid-cols-[1fr_12rem_12rem]" onSubmit={(event) => event.preventDefault()}>
           <Input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search name or email" aria-label="Search users" />
-          <select className="h-9 rounded-md border px-3 text-sm" value={role} onChange={(event) => setRole(event.target.value)} aria-label="Filter by role">
+          <select className="native-select" value={role} onChange={(event) => setRole(event.target.value)} aria-label="Filter by role">
             <option value="">All roles</option>
             {["super-admin", "admin", "campaign-manager", "editor", "viewer", "user"].map((key) => (
               <option key={key} value={key}>{key}</option>
             ))}
           </select>
-          <select className="h-9 rounded-md border px-3 text-sm" value={status} onChange={(event) => setStatus(event.target.value)} aria-label="Filter by status">
+          <select className="native-select" value={status} onChange={(event) => setStatus(event.target.value)} aria-label="Filter by status">
             <option value="">All statuses</option>
             <option value="active">Active</option>
             <option value="suspended">Suspended</option>
@@ -178,6 +178,19 @@ export function UsersPage() {
         {error ? <p className="text-sm text-destructive">{error}</p> : null}
         <Card>
           <CardContent className="p-0">
+            <ul className="divide-y md:hidden">
+              {users.map((account) => (
+                <li key={account.id} className="space-y-1 px-4 py-3">
+                  <Link className="block font-medium wrap-break-word hover:underline" to={`/app/admin/users/${account.id}/`}>{account.name}</Link>
+                  <p className="text-sm break-all text-muted-foreground">{account.email}</p>
+                  <div className="flex flex-wrap gap-1">
+                    {account.roles.map((item) => <Badge key={item} variant="outline">{item}</Badge>)}
+                  </div>
+                  <p className="text-sm capitalize">{account.emailVerified ? account.status : `${account.status} · pending verification`}</p>
+                </li>
+              ))}
+            </ul>
+            <div className="hidden md:block">
             <Table>
               <TableHeader>
                 <TableRow>
@@ -206,6 +219,7 @@ export function UsersPage() {
                 ))}
               </TableBody>
             </Table>
+            </div>
           </CardContent>
         </Card>
         {showInvite ? <Card>
@@ -218,7 +232,7 @@ export function UsersPage() {
               </div>
               <div className="space-y-2">
                 <Label htmlFor="invite-role">Role</Label>
-                <select id="invite-role" className="h-9 w-full rounded-md border px-3 text-sm" value={inviteRole} onChange={(event) => setInviteRole(event.target.value)}>
+                <select id="invite-role" className="native-select" value={inviteRole} onChange={(event) => setInviteRole(event.target.value)}>
                   {roleOptions.map((item) => <option key={item.id} value={item.key}>{item.name}</option>)}
                 </select>
               </div>

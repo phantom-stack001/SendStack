@@ -29,12 +29,12 @@ export function CreateCampaignPage() {
         canonicalPath="/app/campaigns/new/"
       />
       <AppPageContainer>
-        <div className="mb-4 flex items-center justify-between gap-2">
-          <PageHeader title="Create campaign" description="Follow the steps to prepare a new email campaign." />
-          <Button asChild variant="outline" size="sm">
-            <Link to="/app/campaigns/">Back to campaigns</Link>
-          </Button>
-        </div>
+        <PageHeader
+          className="mb-4"
+          title="Create campaign"
+          description="Follow the steps to prepare a new email campaign."
+          actions={<Button asChild variant="outline"><Link to="/app/campaigns/">Back to campaigns</Link></Button>}
+        />
         {error && <p className="text-sm text-destructive">{error}</p>}
         {!campaign ? (
           <Skeleton className="h-64 w-full" />
