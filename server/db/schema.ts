@@ -4,6 +4,7 @@ import {
   integer,
   jsonb,
   pgTable,
+  primaryKey,
   text,
   timestamp,
   uniqueIndex,
@@ -430,5 +431,96 @@ export const mailSubmissions = pgTable(
   (table) => [
     uniqueIndex("mail_submissions_idempotency_key_unique").on(table.idempotencyKey),
     index("mail_submissions_created_at_idx").on(table.createdAt),
+  ],
+);
+
+export const appRoles = pgTable("app_roles", {
+  id: text("id").primaryKey(),
+  key: text("key").notNull().unique(),
+  name: text("name").notNull(),
+  description: text("description").notNull().default(""),
+  isSystem: boolean("is_system").notNull().default(false),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+});
+
+export const appPermissions = pgTable("app_permissions", {
+  id: text("id").primaryKey(),
+  key: text("key").notNull().unique(),
+  description: text("description").notNull().default(""),
+  category: text("category").notNull(),
+});
+
+export const appRolePermissions = pgTable(
+  "app_role_permissions",
+  {
+    roleId: text("role_id")
+      .notNull()
+      .references(() => appRoles.id, { onDelete: "cascade" }),
+    permissionId: text("permission_id")
+      .notNull()
+      .references(() => appPermissions.id, { onDelete: "cascade" }),
+  },
+  (table) => [primaryKey({ columns: [table.roleId, table.permissionId] })],
+);
+
+export const appUserRoles = pgTable(
+  "app_user_roles",
+  {
+    userId: text("user_id")
+      .notNull()
+      .references(() => user.id, { onDelete: "cascade" }),
+    roleId: text("role_id")
+      .notNull()
+      .references(() => appRoles.id, { onDelete: "cascade" }),
+    assignedBy: text("assigned_by").references(() => user.id, { onDelete: "set null" }),
+    assignedAt: timestamp("assigned_at").defaultNow().notNull(),
+  },
+  (table) => [primaryKey({ columns: [table.userId, table.roleId] })],
+);
+
+export const appUserAccess = pgTable("app_user_access", {
+  userId: text("user_id")
+    .primaryKey()
+    .references(() => user.id, { onDelete: "cascade" }),
+  status: text("status").notNull().default("active"),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+});
+
+export const adminAuditEvents = pgTable(
+  "admin_audit_events",
+  {
+    id: text("id").primaryKey(),
+    actorUserId: text("actor_user_id").references(() => user.id, { onDelete: "set null" }),
+    targetUserId: text("target_user_id").references(() => user.id, { onDelete: "set null" }),
+    action: text("action").notNull(),
+    metadata: jsonb("metadata").$type<Record<string, unknown>>(),
+    createdAt: timestamp("created_at").defaultNow().notNull(),
+  },
+  (table) => [
+    index("admin_audit_events_created_at_idx").on(table.createdAt),
+    index("admin_audit_events_actor_idx").on(table.actorUserId),
+    index("admin_audit_events_target_idx").on(table.targetUserId),
+  ],
+);
+
+export const userInvitations = pgTable(
+  "user_invitations",
+  {
+    id: text("id").primaryKey(),
+    email: text("email").notNull(),
+    roleKeys: jsonb("role_keys").$type<string[]>().notNull().default([]),
+    tokenHash: text("token_hash").notNull(),
+    expiresAt: timestamp("expires_at").notNull(),
+    acceptedAt: timestamp("accepted_at"),
+    revokedAt: timestamp("revoked_at"),
+    invitedBy: text("invited_by").references(() => user.id, { onDelete: "set null" }),
+    deliveryStatus: text("delivery_status").notNull().default("pending"),
+    deliveryError: text("delivery_error"),
+    createdAt: timestamp("created_at").defaultNow().notNull(),
+  },
+  (table) => [
+    uniqueIndex("user_invitations_token_hash_unique").on(table.tokenHash),
+    index("user_invitations_email_idx").on(table.email),
   ],
 );

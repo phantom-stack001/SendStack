@@ -23,10 +23,15 @@ import { ContactListsPage } from "@/pages/app/ContactListsPage";
 import { ImportContactsPage } from "@/pages/app/ImportContactsPage";
 import { RecipientsPage } from "@/pages/app/RecipientsPage";
 import { SuppressionsPage } from "@/pages/app/SuppressionsPage";
+import { AuditPage } from "@/pages/app/admin/AuditPage";
+import { RoleDetailsPage, RolesPage } from "@/pages/app/admin/RolesPage";
+import { UserDetailsPage } from "@/pages/app/admin/UserDetailsPage";
+import { UsersPage } from "@/pages/app/admin/UsersPage";
 import { SettingsPage } from "@/pages/app/SettingsPage";
 import { TemplatesPage } from "@/pages/app/TemplatesPage";
 import { ForgotPasswordPage } from "@/pages/ForgotPasswordPage";
 import { HomePage } from "@/pages/HomePage";
+import { InviteAcceptPage } from "@/pages/InviteAcceptPage";
 import { LoginPage } from "@/pages/LoginPage";
 import { NotFoundPage } from "@/pages/NotFoundPage";
 import { PrivacyPage } from "@/pages/PrivacyPage";
@@ -72,6 +77,10 @@ export const appRoutes = [
   {
     path: "/reset-password",
     element: <Navigate to="/reset-password/" replace />,
+  },
+  {
+    path: "/invite/",
+    element: <InviteAcceptPage />,
   },
   {
     path: "/verify-email",
@@ -133,6 +142,12 @@ export const appRoutes = [
       { path: "queue/jobs/:jobId/", element: <QueueJobDetailsPage /> },
       { path: "history/", element: <HistoryPage /> },
       { path: "settings/", element: <SettingsPage /> },
+      { path: "admin/users/", element: <UsersPage /> },
+      { path: "admin/users/:userId/", element: <UserDetailsPage /> },
+      { path: "admin/roles/", element: <RolesPage /> },
+      { path: "admin/roles/new/", element: <RoleDetailsPage /> },
+      { path: "admin/roles/:roleId/", element: <RoleDetailsPage /> },
+      { path: "admin/audit/", element: <AuditPage /> },
     ],
   },
   {

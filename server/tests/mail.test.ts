@@ -149,11 +149,11 @@ describe("mailbox safety", () => {
     expect(parsed.success).toBe(false);
   });
 
-  it("shows inbox and sent only for the super admin", () => {
-    const adminTitles = visibleDashboardNavGroups(true).flatMap((group) =>
+  it("shows inbox and sent only for mailbox permission", () => {
+    const adminTitles = visibleDashboardNavGroups(new Set(["mailbox.read", "users.read"])).flatMap((group) =>
       group.items.map((item) => item.title),
     );
-    const userTitles = visibleDashboardNavGroups(false).flatMap((group) =>
+    const userTitles = visibleDashboardNavGroups(new Set<string>()).flatMap((group) =>
       group.items.map((item) => item.title),
     );
     expect(adminTitles).toEqual(

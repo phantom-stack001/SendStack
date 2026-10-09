@@ -3,7 +3,9 @@ import type { Context, Hono } from "hono";
 import { createDb } from "../db/index.js";
 import { loadEnv } from "../env.js";
 import { validationError } from "../lib/http-errors.js";
+import type { PermissionKey } from "../auth/permissions.js";
 import { getSessionUser } from "../lib/session.js";
+import { userHasPermission } from "../services/access-control.js";
 import { loadMailConfig } from "../mail/configuration.js";
 import { MailboxError } from "../mail/errors.js";
 import {
@@ -28,14 +30,17 @@ function json(c: Context, body: unknown, status: 200 | 400 | 401 | 403 | 404 | 4
   return c.json(body, status);
 }
 
-async function requireSuperAdmin(c: Context) {
+async function requireMailbox(c: Context, permission: PermissionKey) {
   const user = await getSessionUser(c.req.raw.headers);
   if (!user) {
     return { response: json(c, { error: "Unauthorized" }, 401) };
   }
-  const role = (user as { role?: string | null }).role;
-  if (role !== "super-admin") {
-    return { response: json(c, { error: "Mailbox access is limited to the super admin." }, 403) };
+  if ((user as { banned?: boolean | null }).banned) {
+    return { response: json(c, { error: "This account cannot access SendStack." }, 403) };
+  }
+  const allowed = await userHasPermission(db, user, permission);
+  if (!allowed) {
+    return { response: json(c, { error: "You do not have permission to use the mailbox." }, 403) };
   }
   return { user };
 }
@@ -49,14 +54,14 @@ function pageQuery(c: Context) {
 
 export function registerMailRoutes(app: Hono) {
   app.get("/api/mail/status", async (c) => {
-    const access = await requireSuperAdmin(c);
+    const access = await requireMailbox(c, "mailbox.read");
     if ("response" in access) return access.response;
     const status = await getMailboxStatus(db);
     return json(c, status);
   });
 
   app.post("/api/mail/test-connection", async (c) => {
-    const access = await requireSuperAdmin(c);
+    const access = await requireMailbox(c, "mailbox.manage_connection");
     if ("response" in access) return access.response;
     const result = await testMailboxConnection(db, access.user.id);
     if (result.kind === "not_configured") {
@@ -69,7 +74,7 @@ export function registerMailRoutes(app: Hono) {
   });
 
   app.post("/api/mail/test-send", async (c) => {
-    const access = await requireSuperAdmin(c);
+    const access = await requireMailbox(c, "mailbox.send_test");
     if ("response" in access) return access.response;
 
     let body: unknown;
@@ -118,7 +123,7 @@ export function registerMailRoutes(app: Hono) {
   });
 
   app.get("/api/mail/folders", async (c) => {
-    const access = await requireSuperAdmin(c);
+    const access = await requireMailbox(c, "mailbox.read");
     if ("response" in access) return access.response;
     const loaded = loadMailConfig();
     if (!loaded.ok) {
@@ -137,7 +142,7 @@ export function registerMailRoutes(app: Hono) {
   });
 
   app.get("/api/mail/inbox", async (c) => {
-    const access = await requireSuperAdmin(c);
+    const access = await requireMailbox(c, "mailbox.read");
     if ("response" in access) return access.response;
     const page = pageQuery(c);
     if (!page.success) {
@@ -165,7 +170,7 @@ export function registerMailRoutes(app: Hono) {
   });
 
   app.get("/api/mail/sent", async (c) => {
-    const access = await requireSuperAdmin(c);
+    const access = await requireMailbox(c, "mailbox.read");
     if ("response" in access) return access.response;
     const page = pageQuery(c);
     if (!page.success) {
@@ -188,7 +193,7 @@ export function registerMailRoutes(app: Hono) {
   });
 
   app.get("/api/mail/mailbox", async (c) => {
-    const access = await requireSuperAdmin(c);
+    const access = await requireMailbox(c, "mailbox.read");
     if ("response" in access) return access.response;
     const folder = mailboxFolderSchema.safeParse(c.req.query("folder") ?? "");
     if (!folder.success) {
@@ -220,7 +225,7 @@ export function registerMailRoutes(app: Hono) {
   });
 
   app.get("/api/mail/messages/:uid", async (c) => {
-    const access = await requireSuperAdmin(c);
+    const access = await requireMailbox(c, "mailbox.read");
     if ("response" in access) return access.response;
     const uid = mailUidSchema.safeParse(c.req.param("uid"));
     const folder = mailboxFolderSchema.safeParse(c.req.query("folder") ?? "");

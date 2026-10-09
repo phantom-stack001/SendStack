@@ -493,11 +493,44 @@ POP3 is not implemented.
 
 ### Mail APIs
 
-All of these require a Better Auth session and the `super-admin` role:
+All of these require a Better Auth session and the `mailbox.read`, `mailbox.send_test`, or `mailbox.manage_connection` permission. By default only `super-admin` has those permissions.
 
 `GET /api/mail/status`, `POST /api/mail/test-connection`, `POST /api/mail/test-send`, `GET /api/mail/folders`, `GET /api/mail/inbox`, `GET /api/mail/sent`, `GET /api/mail/mailbox`, `GET /api/mail/messages/:uid`.
 
 Test sending requires `confirm: true`, a UUID idempotency key, and the server-side recipient. The limit is one message per minute and three per hour. The UI asks for confirmation before the request is sent.
+
+## Administration (Phase 8)
+
+Better Auth remains authoritative for accounts, passwords, email verification, sessions, and the `user.role` string. SendStack permissions are authoritative for feature access. A role key registered with Better Auth (`user`, `viewer`, `editor`, `campaign-manager`, `admin`, `super-admin`) is stored on `user.role`. Custom roles are stored in `app_user_roles` and included when permissions are resolved. Only `super-admin` can call the Better Auth admin plugin.
+
+### Default roles
+
+| Role | Access |
+| --- | --- |
+| `super-admin` | Every permission, including the shared mailbox and role administration |
+| `admin` | Users, campaigns, contacts, drafts, queue operations, and the audit log. No mailbox access and no ability to assign `admin` or `super-admin` |
+| `campaign-manager` | Campaigns, recipients, drafts, templates, and simulation queue actions |
+| `editor` | Drafts and templates, plus read access to related resources |
+| `viewer` | Read-only access to resources the account is otherwise allowed to see |
+| `user` | Default self-service registration. Same working permissions as a campaign manager so existing owner access is preserved |
+
+Ownership checks still apply. `campaigns.read` does not grant another user's campaigns. Mailbox permissions are not included in any role except `super-admin`.
+
+### Status
+
+`active` accounts can sign in. `suspended` and `deactivated` accounts are banned in Better Auth and their sessions are deleted. Deactivation keeps campaigns, drafts, contacts, consent events, and history. Hard deletion is not used.
+
+### Invitations
+
+Administrators invite by email and role. The invitation token is stored only as a SHA-256 hash, expires after 7 days, and can be accepted once by a verified session for that same email. If email delivery fails, the invitation stays pending and is not marked sent.
+
+### Password reset and sessions
+
+Password reset uses Better Auth's reset email. Administrators never see passwords. Session lists omit the session token. Revoking a session deletes that row.
+
+### Last super admin
+
+The final active super admin cannot be suspended, deactivated, or removed from that role. The check runs inside a database lock.
 
 ## Verified public contact
 

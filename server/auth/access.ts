@@ -2,16 +2,19 @@ import { createAccessControl } from "better-auth/plugins/access";
 import { defaultStatements } from "better-auth/plugins/admin/access";
 
 /**
- * SendStack role model:
- * - user: default self-service registrations (no admin permissions)
- * - super-admin: full admin plugin permissions
+ * Better Auth admin-plugin roles.
+ * Only super-admin may call the admin plugin.
+ * Application permissions live in server/auth/permissions.ts and are enforced by SendStack.
  */
 export const sendstackAccessControl = createAccessControl(defaultStatements);
 
-const userRole = sendstackAccessControl.newRole({
-  user: [],
-  session: [],
-});
+const noAdminPluginAccess = { user: [], session: [] } as const;
+
+const userRole = sendstackAccessControl.newRole(noAdminPluginAccess);
+const viewerRole = sendstackAccessControl.newRole(noAdminPluginAccess);
+const editorRole = sendstackAccessControl.newRole(noAdminPluginAccess);
+const campaignManagerRole = sendstackAccessControl.newRole(noAdminPluginAccess);
+const adminRole = sendstackAccessControl.newRole(noAdminPluginAccess);
 
 const superAdminRole = sendstackAccessControl.newRole({
   user: [
@@ -31,5 +34,9 @@ const superAdminRole = sendstackAccessControl.newRole({
 
 export const sendstackAdminRoles = {
   user: userRole,
+  viewer: viewerRole,
+  editor: editorRole,
+  "campaign-manager": campaignManagerRole,
+  admin: adminRole,
   "super-admin": superAdminRole,
 };

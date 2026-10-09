@@ -6,8 +6,10 @@ import {
   LayoutTemplate,
   ListOrdered,
   Mail,
+  ScrollText,
   Send,
   Settings,
+  Shield,
   SquarePen,
   Users,
   type LucideIcon,
@@ -20,13 +22,16 @@ const NAV_PREFIX_MATCHES: Record<string, string> = {
   "/app/drafts/": "/app/drafts/",
   "/app/campaigns/": "/app/campaigns/",
   "/app/recipients/": "/app/recipients/",
+  "/app/admin/users/": "/app/admin/users/",
+  "/app/admin/roles/": "/app/admin/roles/",
+  "/app/queue/": "/app/queue/",
 };
 
 export type DashboardNavItem = {
   title: string;
   url: string;
   icon: LucideIcon;
-  superAdminOnly?: boolean;
+  permission?: string;
 };
 
 export type DashboardNavGroup = {
@@ -43,8 +48,8 @@ export const dashboardNavGroups: DashboardNavGroup[] = [
     label: "Mail",
     items: [
       { title: "Compose", url: "/app/compose/", icon: SquarePen },
-      { title: "Inbox", url: "/app/inbox/", icon: Inbox, superAdminOnly: true },
-      { title: "Sent", url: "/app/sent/", icon: Send, superAdminOnly: true },
+      { title: "Inbox", url: "/app/inbox/", icon: Inbox, permission: "mailbox.read" },
+      { title: "Sent", url: "/app/sent/", icon: Send, permission: "mailbox.read" },
       { title: "Drafts", url: "/app/drafts/", icon: FileText },
     ],
   },
@@ -64,13 +69,21 @@ export const dashboardNavGroups: DashboardNavGroup[] = [
       { title: "Settings", url: "/app/settings/", icon: Settings },
     ],
   },
+  {
+    label: "Administration",
+    items: [
+      { title: "Users", url: "/app/admin/users/", icon: Users, permission: "users.read" },
+      { title: "Roles", url: "/app/admin/roles/", icon: Shield, permission: "roles.read" },
+      { title: "Audit log", url: "/app/admin/audit/", icon: ScrollText, permission: "audit.read" },
+    ],
+  },
 ];
 
-export function visibleDashboardNavGroups(isSuperAdmin: boolean): DashboardNavGroup[] {
+export function visibleDashboardNavGroups(permissions: ReadonlySet<string>): DashboardNavGroup[] {
   return dashboardNavGroups
     .map((group) => ({
       ...group,
-      items: group.items.filter((item) => isSuperAdmin || !item.superAdminOnly),
+      items: group.items.filter((item) => !item.permission || permissions.has(item.permission)),
     }))
     .filter((group) => group.items.length > 0);
 }
