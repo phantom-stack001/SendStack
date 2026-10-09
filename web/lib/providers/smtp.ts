@@ -3,12 +3,6 @@ import type SMTPTransport from "nodemailer/lib/smtp-transport";
 import { normalizeEmail, validEmail } from "../ids";
 import { liveSendAllowed, providerTimeoutMs } from "../live-send";
 
-export type SmtpAttachment = {
-  filename: string;
-  contentBase64: string;
-  contentType: string;
-};
-
 export type SmtpEmailInput = {
   to: string;
   subject: string;
@@ -17,7 +11,6 @@ export type SmtpEmailInput = {
   fromName: string;
   fromEmail: string;
   replyTo?: string;
-  attachments?: SmtpAttachment[];
 };
 
 export type SmtpSendResult = {
@@ -149,13 +142,6 @@ export async function sendSmtpEmail(input: SmtpEmailInput): Promise<SmtpSendResu
       html: contract.html,
       // Let Spacemail assign Message-ID (same as the webmail client).
       messageId: false as unknown as string,
-      attachments: input.attachments?.length
-        ? input.attachments.map((file) => ({
-            filename: file.filename,
-            content: Buffer.from(file.contentBase64, "base64"),
-            contentType: file.contentType,
-          }))
-        : undefined,
     });
 
     const id = (info.messageId || `smtp:${contract.to}`).replace(/^<|>$/g, "");

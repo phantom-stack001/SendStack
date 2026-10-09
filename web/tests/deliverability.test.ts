@@ -1,15 +1,9 @@
-import { createHmac } from "crypto";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import {
-  ATTACHMENT_MAX_FILE_BYTES,
-  validateCampaignAttachment,
-} from "../lib/attachments";
 import {
   canTransitionMessageStatus,
   canTransitionRecipientStatus,
 } from "../lib/delivery-status";
 import { identityComplianceGaps, isTestRecipientAllowed, loadSendingIdentity } from "../lib/sending-identity";
-import { applyComplianceFooter } from "../lib/compliance-footer";
 import { runCampaignPreflight } from "../lib/preflight";
 import { isSpecialUseRecipientDomain, validateLiveRecipient } from "../lib/recipients";
 import { requiredPermission } from "../lib/rbac";
@@ -107,7 +101,6 @@ describe("campaign preflight", () => {
       fromEmail: "news@example.com",
       htmlBody: '<p>Replace this text <a href="https://evil.example.net">x</a></p>',
       textBody: "Replace this text",
-      attachmentExtensions: ["zip"],
     });
     expect(withExternalLink.ok).toBe(true);
 
@@ -128,51 +121,6 @@ describe("campaign preflight", () => {
       textBody: "Hello {{first_name}}\nRead more: https://www.example.com/updates",
     });
     expect(plainOnly.ok).toBe(true);
-  });
-});
-
-describe("attachments without archives", () => {
-  it("rejects zip and validates magic bytes for pdf/png", () => {
-    const zip = validateCampaignAttachment({
-      filename: "pack.zip",
-      contentType: "application/zip",
-      byteSize: 100,
-      existingCount: 0,
-      existingTotalBytes: 0,
-      bytes: Buffer.from("PK\u0003\u0004"),
-    });
-    expect(zip.ok).toBe(false);
-
-    const pdf = validateCampaignAttachment({
-      filename: "guide.pdf",
-      contentType: "application/pdf",
-      byteSize: 12,
-      existingCount: 0,
-      existingTotalBytes: 0,
-      bytes: Buffer.from("%PDF-1.4 hello"),
-    });
-    expect(pdf.ok).toBe(true);
-
-    const fakePng = validateCampaignAttachment({
-      filename: "hero.png",
-      contentType: "image/png",
-      byteSize: 8,
-      existingCount: 0,
-      existingTotalBytes: 0,
-      bytes: Buffer.from("notapng!"),
-    });
-    expect(fakePng.ok).toBe(false);
-
-    expect(
-      validateCampaignAttachment({
-        filename: "big.pdf",
-        contentType: "application/pdf",
-        byteSize: ATTACHMENT_MAX_FILE_BYTES + 1,
-        existingCount: 0,
-        existingTotalBytes: 0,
-        bytes: Buffer.from("%PDF-1.4"),
-      }).ok,
-    ).toBe(false);
   });
 });
 
@@ -339,18 +287,5 @@ describe("mailbox Sent folder helpers", () => {
 describe("idempotency keys", () => {
   it("builds deterministic keys", () => {
     expect(buildIdempotencyKey(["smtp-send", "cam_1", "msg_1"])).toBe("smtp-send:cam_1:msg_1");
-  });
-});
-
-describe("webhook signature fixture still valid", () => {
-  it("accepts matching svix hmac", async () => {
-    const { verifySvixSignature } = await import("../lib/providers/webhook");
-    const secret = "whsec_" + Buffer.from("test-secret").toString("base64");
-    const key = Buffer.from(secret.slice(6), "base64");
-    const id = "msg_abc";
-    const timestamp = "1710000000";
-    const body = '{"type":"email.delivered"}';
-    const expected = createHmac("sha256", key).update(`${id}.${timestamp}.${body}`).digest("base64");
-    expect(verifySvixSignature(secret, body, id, timestamp, `v1,${expected}`)).toBe(true);
   });
 });

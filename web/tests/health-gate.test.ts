@@ -11,7 +11,7 @@ import {
   getDeliveryHealthSnapshot,
 } from "../lib/delivery-health";
 
-describe("delivery health 100% complaint/bounce gate", () => {
+describe("delivery health operational gates (Spacemail SMTP)", () => {
   beforeEach(() => {
     queryMock.mockReset();
     process.env.SENDSTACK_HEALTH_MIN_SAMPLE = "1";
@@ -23,7 +23,7 @@ describe("delivery health 100% complaint/bounce gate", () => {
     delete process.env.SENDSTACK_EMERGENCY_STOP;
   });
 
-  function mockHealthyBaseline() {
+  it("records high complaint rates as informational issues without blocking launch", async () => {
     queryMock.mockImplementation(async (sql: string) => {
       if (sql.includes("FROM messages") && sql.includes("FILTER")) {
         return {
@@ -43,18 +43,16 @@ describe("delivery health 100% complaint/bounce gate", () => {
       }
       return { rows: [{ count: "0" }] };
     });
-  }
 
-  it("marks unhealthy and launch-blocked when complaint rate is 100%", async () => {
-    mockHealthyBaseline();
     const health = await getDeliveryHealthSnapshot();
     expect(health.complaint_rate).toBe(1);
     expect(health.healthy).toBe(false);
-    expect(health.launch_blocked).toBe(true);
-    expect(health.blocking_reasons.join(" ")).toMatch(/100%|Complaint/i);
+    expect(health.launch_blocked).toBe(false);
+    expect(health.issues.join(" ")).toMatch(/Complaint/i);
+    expect(health.blocking_reasons).toEqual([]);
   });
 
-  it("marks unhealthy when bounce rate is 100%", async () => {
+  it("records high bounce rates as informational issues without blocking launch", async () => {
     queryMock.mockImplementation(async (sql: string) => {
       if (sql.includes("FROM messages") && sql.includes("FILTER")) {
         return {
@@ -78,7 +76,7 @@ describe("delivery health 100% complaint/bounce gate", () => {
     const health = await getDeliveryHealthSnapshot();
     expect(health.bounce_rate).toBe(1);
     expect(health.healthy).toBe(false);
-    expect(health.launch_blocked).toBe(true);
+    expect(health.launch_blocked).toBe(false);
   });
 
   it("submit health ignores only the current job, not unrelated submission_unknown", async () => {
@@ -92,7 +90,6 @@ describe("delivery health 100% complaint/bounce gate", () => {
         return { rows: [{ complained: "0", unsubscribed: "0", suppressed: "0" }] };
       }
       if (sql.includes("FROM launch_jobs")) {
-        // Unrelated unresolved job still counted because ignore filter excludes only current id.
         return { rows: [{ count: "1" }] };
       }
       return { rows: [{ count: "0" }] };
@@ -103,7 +100,26 @@ describe("delivery health 100% complaint/bounce gate", () => {
     ).rejects.toThrow(/unresolved launch job/i);
   });
 
-  it("does not query or block on provider webhook correlation under Spacemail SMTP", async () => {
+  it("blocks launch when emergency stop is enabled", async () => {
+    process.env.SENDSTACK_EMERGENCY_STOP = "true";
+    queryMock.mockImplementation(async (sql: string) => {
+      if (sql.includes("FROM messages") && sql.includes("FILTER")) {
+        return {
+          rows: [{ submitted: "0", delivered: "5", delayed: "0", bounced: "0", failed: "0" }],
+        };
+      }
+      if (sql.includes("FROM suppressions") || sql.includes("reason = 'complaint'")) {
+        return { rows: [{ complained: "0", unsubscribed: "0", suppressed: "0" }] };
+      }
+      return { rows: [{ count: "0" }] };
+    });
+
+    const health = await getDeliveryHealthSnapshot();
+    expect(health.launch_blocked).toBe(true);
+    expect(health.blocking_reasons.join(" ")).toMatch(/EMERGENCY_STOP/i);
+  });
+
+  it("does not query provider_events under Spacemail SMTP", async () => {
     queryMock.mockImplementation(async (sql: string) => {
       if (sql.includes("FROM messages") && sql.includes("FILTER")) {
         return {

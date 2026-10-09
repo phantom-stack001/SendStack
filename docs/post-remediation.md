@@ -18,4 +18,4 @@ Operator-only follow-ups after switching delivery from Resend to Spacemail SMTP.
    - Align `SENDSTACK_SMTP_HOURLY_LIMIT` and `SENDSTACK_DAILY_LIMIT` with the mailbox plan.
 
 5. **Bounce handling**
-   - Automatic IMAP bounce ingestion is out of scope. Spacemail does not send delivery webhooks. Use manual suppressions and the unsubscribe page for opt-outs.
+   - Automatic IMAP bounce ingestion is out of scope. Spacemail does not send delivery webhooks. Use manual suppressions and optional `{{unsubscribe_url}}` opt-out links for exclusions.

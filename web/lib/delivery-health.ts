@@ -34,14 +34,9 @@ export function loadDeliveryHealthThresholds(): DeliveryHealthThresholds {
     (process.env.SENDSTACK_EMERGENCY_STOP ?? "").trim().toLowerCase(),
   );
 
-  const configured =
-    Number.isFinite(minSample) &&
-    minSample > 0 &&
-    maxBounceRate !== null &&
-    maxComplaintRate !== null &&
-    maxUnsubscribeRate !== null &&
-    maxDelayRate !== null &&
-    maxFailureRate !== null;
+  // Rate envs are display-only under Spacemail SMTP (no delivery webhooks).
+  // Launch is gated by emergency stop and queue integrity, not ESP reputation rates.
+  const configured = true;
 
   return {
     minSample: Number.isFinite(minSample) && minSample > 0 ? minSample : 0,
@@ -379,7 +374,6 @@ export async function getDeliveryHealthSnapshot(
           campaign_id IN (
             SELECT id FROM campaigns
              WHERE status IN ('sending', 'submission_unknown', 'reconciling')
-                OR provider_broadcast_id IS NOT NULL
           )
           OR provider_id IS NOT NULL
         )
@@ -414,9 +408,6 @@ export async function getDeliveryHealthSnapshot(
   const issues: string[] = [];
   const blockingReasons: string[] = [];
 
-  if (!thresholds.configured) {
-    issues.push("Delivery health thresholds are not configured.");
-  }
   if (thresholds.emergencyStop) {
     issues.push("Emergency stop is enabled.");
     blockingReasons.push("SENDSTACK_EMERGENCY_STOP is enabled.");
@@ -447,41 +438,33 @@ export async function getDeliveryHealthSnapshot(
     blockingReasons.push(reason);
   }
 
-  if (thresholds.configured && sampleSize >= thresholds.minSample) {
+  // Optional rate envs are informational only (Spacemail has no delivery webhooks).
+  if (thresholds.minSample > 0 && sampleSize >= thresholds.minSample) {
     if (bounceRate > thresholds.maxBounceRate) {
-      const reason = `Bounce rate ${(bounceRate * 100).toFixed(2)}% exceeds threshold ${(thresholds.maxBounceRate * 100).toFixed(2)}%.`;
-      issues.push(reason);
-      blockingReasons.push(reason);
+      issues.push(
+        `Bounce rate ${(bounceRate * 100).toFixed(2)}% exceeds display threshold ${(thresholds.maxBounceRate * 100).toFixed(2)}%.`,
+      );
     }
     if (complaintRate > thresholds.maxComplaintRate) {
-      const reason = `Complaint rate ${(complaintRate * 100).toFixed(2)}% exceeds threshold ${(thresholds.maxComplaintRate * 100).toFixed(2)}%.`;
-      issues.push(reason);
-      blockingReasons.push(reason);
+      issues.push(
+        `Complaint rate ${(complaintRate * 100).toFixed(2)}% exceeds display threshold ${(thresholds.maxComplaintRate * 100).toFixed(2)}%.`,
+      );
     }
     if (unsubscribeRate > thresholds.maxUnsubscribeRate) {
-      const reason = `Unsubscribe rate ${(unsubscribeRate * 100).toFixed(2)}% exceeds threshold ${(thresholds.maxUnsubscribeRate * 100).toFixed(2)}%.`;
-      issues.push(reason);
-      blockingReasons.push(reason);
+      issues.push(
+        `Unsubscribe rate ${(unsubscribeRate * 100).toFixed(2)}% exceeds display threshold ${(thresholds.maxUnsubscribeRate * 100).toFixed(2)}%.`,
+      );
     }
     if (delayRate > thresholds.maxDelayRate) {
-      const reason = `Delay rate ${(delayRate * 100).toFixed(2)}% exceeds threshold ${(thresholds.maxDelayRate * 100).toFixed(2)}%.`;
-      issues.push(reason);
-      blockingReasons.push(reason);
+      issues.push(
+        `Delay rate ${(delayRate * 100).toFixed(2)}% exceeds display threshold ${(thresholds.maxDelayRate * 100).toFixed(2)}%.`,
+      );
     }
     if (failureRate > thresholds.maxFailureRate) {
-      const reason = `Failure rate ${(failureRate * 100).toFixed(2)}% exceeds threshold ${(thresholds.maxFailureRate * 100).toFixed(2)}%.`;
-      issues.push(reason);
-      blockingReasons.push(reason);
+      issues.push(
+        `Failure rate ${(failureRate * 100).toFixed(2)}% exceeds display threshold ${(thresholds.maxFailureRate * 100).toFixed(2)}%.`,
+      );
     }
-  }
-
-  if (sampleSize > 0 && (complaintRate >= 1 || bounceRate >= 1)) {
-    const reason =
-      complaintRate >= 1
-        ? "Complaint rate is 100% for the current sample."
-        : "Bounce rate is 100% for the current sample.";
-    if (!issues.includes(reason)) issues.push(reason);
-    if (!blockingReasons.includes(reason)) blockingReasons.push(reason);
   }
 
   const healthy = issues.length === 0;
@@ -516,15 +499,7 @@ export async function getDeliveryHealthSnapshot(
   };
 }
 
-export function assertLaunchAllowedByHealth(
-  health: DeliveryHealthSnapshot,
-  options?: { requireThresholds?: boolean },
-): void {
-  if (options?.requireThresholds && !health.thresholds_configured) {
-    throw new Error(
-      "Configure SENDSTACK_HEALTH_MIN_SAMPLE and SENDSTACK_HEALTH_MAX_*_RATE before live sending.",
-    );
-  }
+export function assertLaunchAllowedByHealth(health: DeliveryHealthSnapshot): void {
   if (health.launch_blocked) {
     throw new Error(health.blocking_reasons[0] || "Delivery health gate blocked launch.");
   }
@@ -533,21 +508,14 @@ export function assertLaunchAllowedByHealth(
 /**
  * Recheck used by the launch worker / live test send immediately before provider submission.
  * Ignores only the current job/campaign expected in-flight state; unrelated work stays blocking.
- * Thresholds are required again at submit time for live paths.
  */
 export async function assertDeliveryHealthAllowsSubmit(
-  context?: HealthSubmitContext & { requireThresholds?: boolean },
+  context?: HealthSubmitContext,
 ): Promise<DeliveryHealthSnapshot> {
-  const requireThresholds = context?.requireThresholds ?? true;
   const health = await getDeliveryHealthSnapshot({
     jobId: context?.jobId,
     campaignId: context?.campaignId,
   });
-  if (requireThresholds && !health.thresholds_configured) {
-    throw new Error(
-      "Configure SENDSTACK_HEALTH_MIN_SAMPLE and SENDSTACK_HEALTH_MAX_*_RATE before provider submission.",
-    );
-  }
   if (health.blocking_reasons.length > 0) {
     throw new Error(health.blocking_reasons[0] || "Delivery health gate blocked provider submission.");
   }

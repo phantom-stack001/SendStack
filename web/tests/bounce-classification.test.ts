@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { isPermanentBounce } from "../lib/providers/webhook-processor";
+import { isPermanentBounce } from "../lib/bounce-classification";
 
 describe("bounce classification", () => {
   it("treats a permanent bounce as suppressible", () => {

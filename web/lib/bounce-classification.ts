@@ -1,5 +1,5 @@
 /**
- * Bounce classification helpers retained for simulated feedback and tests.
+ * Bounce classification helpers for simulated admin feedback and tests.
  * Spacemail SMTP has no delivery webhooks; acceptance is recorded at SMTP submit time.
  */
 
@@ -19,8 +19,8 @@ export type BounceEvent = {
  * Only a permanent bounce justifies a protected, permanent suppression.
  *
  * A transient bounce (full mailbox, greylisting, throttling) must not destroy a
- * legitimate subscriber: protected suppressions cannot be cleared by re-consent or
- * by the removal APIs, so treating a soft bounce as hard is unrecoverable in-app.
+ * legitimate address: protected suppressions cannot be cleared by the removal APIs,
+ * so treating a soft bounce as hard is unrecoverable in-app.
  * A missing classification is treated as permanent, which protects sending
  * reputation rather than continuing to mail an address that may be dead.
  */

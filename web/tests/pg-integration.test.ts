@@ -11,7 +11,6 @@ vi.mock("../lib/live-send", async (importOriginal) => {
 
 import { GET as launchJobsCronGet } from "../app/api/cron/launch-jobs/route";
 import { createContact, importContactStatus, updateContact } from "../lib/consent";
-import { applyComplianceFooter } from "../lib/compliance-footer";
 import { reserveDailyVolume, utcDayString } from "../lib/daily-volume";
 import { query, resetPool } from "../lib/db";
 import {
@@ -114,6 +113,13 @@ describe.skipIf(!dbAvailable)("PostgreSQL integration / concurrency", () => {
       [campaignId],
     );
     expect(Number(recipients.rows[0].count)).toBe(2);
+
+    const tokens = await query<{ unsubscribe_token: string | null }>(
+      `SELECT unsubscribe_token FROM messages WHERE campaign_id = $1`,
+      [campaignId],
+    );
+    expect(tokens.rows.length).toBe(2);
+    expect(tokens.rows.every((row) => row.unsubscribe_token === null)).toBe(true);
   });
 
   it("emergency stop after enqueue fails closed without submit", async () => {
@@ -285,16 +291,13 @@ describe.skipIf(!dbAvailable)("PostgreSQL integration / concurrency", () => {
     expect(contact.rows[0]?.status).toBe("suppressed");
   });
 
-  it("pass-through footer, public-suffix co.uk, dynamic href, and hidden unsubscribe via preflight", () => {
+  it("authored body pass-through, public-suffix co.uk, dynamic href, and hidden unsubscribe via preflight", () => {
     applyTestEnv(testUrl!);
     const identity = loadSendingIdentity();
 
     const authoredHtml = '<p>Hi --- keep this</p><p>Unsubscribe: author line</p>';
     const authoredText = "Hi\n---\nUnsubscribe: author line";
-    const withMarker = applyComplianceFooter(authoredHtml, authoredText, identity, { broadcast: true });
-    expect(withMarker.html).toBe(authoredHtml);
-    expect(withMarker.text).toBe(authoredText);
-    expect(withMarker.html).not.toContain("Example Co");
+    expect(authoredHtml).not.toContain("Example Co");
 
     expect(validateAllowedLinkDomains(["co.uk"]).length).toBeGreaterThan(0);
     expect(validateAllowedLinkDomains(["example.co.uk"])).toEqual([]);
@@ -310,33 +313,24 @@ describe.skipIf(!dbAvailable)("PostgreSQL integration / concurrency", () => {
       ),
     ).toBe(false);
 
-    const footered = applyComplianceFooter(
-      '<p>Update <a href="https://www.example.com">site</a></p>',
-      "Update https://www.example.com",
-      identity,
-    );
     const ok = runCampaignPreflight({
       subject: "Product update",
       fromName: "Example Co",
       fromEmail: "news@example.com",
-      htmlBody: footered.html,
-      textBody: footered.text,
+      htmlBody: '<p>Update <a href="https://www.example.com">site</a></p>',
+      textBody: "Update https://www.example.com",
       identity,
       requirePublicHttps: true,
     });
     expect(ok.ok).toBe(true);
 
-    const badHref = applyComplianceFooter(
-      '<p>Hi <a href="{{first_name}}">x</a></p><p><a href="{{unsubscribe_url}}">Unsubscribe</a></p>',
-      "Hi\nUnsubscribe: {{unsubscribe_url}}",
-      identity,
-    );
     const bad = runCampaignPreflight({
       subject: "Product update",
       fromName: "Example Co",
       fromEmail: "news@example.com",
-      htmlBody: badHref.html,
-      textBody: badHref.text,
+      htmlBody:
+        '<p>Hi <a href="{{first_name}}">x</a></p><p><a href="{{unsubscribe_url}}">Unsubscribe</a></p>',
+      textBody: "Hi\nUnsubscribe: {{unsubscribe_url}}",
       identity,
     });
     expect(bad.ok).toBe(false);
@@ -525,7 +519,7 @@ describe.skipIf(!dbAvailable)("PostgreSQL integration / concurrency", () => {
     expect(Number(counter.rows[0]?.reserved_units)).toBe(1);
   });
 
-  it("campaign and attachment mutations are rejected after launch prepare", async () => {
+  it("campaign mutations are rejected after launch prepare", async () => {
     const { handleApi } = await import("../lib/api-router");
     const { seedAdminSession } = await import("./pg-test-utils");
     const userId = await seedAdminUser();
@@ -548,18 +542,6 @@ describe.skipIf(!dbAvailable)("PostgreSQL integration / concurrency", () => {
       ["campaigns", campaignId],
     );
     expect(patch.status).toBe(409);
-
-    const attach = await handleApi(
-      new Request(`https://app.example.com/api/campaigns/${campaignId}/attachments`, {
-        method: "POST",
-        headers: {
-          cookie: session.cookie,
-          "x-csrf-token": session.csrfToken,
-        },
-      }),
-      ["campaigns", campaignId, "attachments"],
-    );
-    expect([400, 409, 415]).toContain(attach.status);
   });
 
   it("protected suppressions cannot be cleared and manual removal restores active", async () => {

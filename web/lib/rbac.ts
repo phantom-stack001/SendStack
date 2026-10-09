@@ -57,7 +57,7 @@ export const PERMISSION_DEFINITIONS = [
   { id: "sending.view", label: "Sending setup", description: "View delivery setup and go-live checklist (administrators only)" },
   { id: "lists.view", label: "List reporting", description: "View list names and audience totals" },
   { id: "lists.manage", label: "Manage lists", description: "Create audience lists" },
-  { id: "contacts.view", label: "Recipient data", description: "View contact identities and consent records" },
+  { id: "contacts.view", label: "Recipient data", description: "View contact identities" },
   { id: "contacts.manage", label: "Manage contacts", description: "Create and import contacts" },
   { id: "contacts.edit", label: "Edit contacts", description: "Edit or delete existing contacts" },
   { id: "campaigns.view", label: "Campaign reporting", description: "View campaigns, content, and totals" },
@@ -113,11 +113,6 @@ export function requiredPermission(method: string, path: string): string | null 
   if (/^\/api\/campaigns\/[^/]+$/.test(normalized)) {
     if (method === "GET") return "campaigns.view";
     if (method === "PATCH" || method === "DELETE") return "campaigns.manage";
-    return null;
-  }
-  if (/^\/api\/campaigns\/[^/]+\/attachments(?:\/[^/]+)?$/.test(normalized)) {
-    if (method === "GET") return "campaigns.view";
-    if (method === "POST" || method === "DELETE") return "campaigns.manage";
     return null;
   }
   if (/^\/api\/campaigns\/[^/]+\/(launch|pause|resume)$/.test(normalized)) {

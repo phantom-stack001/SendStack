@@ -217,8 +217,6 @@ export async function truncateAppTables(): Promise<void> {
         daily_volume_reservations,
         daily_volume_counters,
         delivery_health_blocks,
-        provider_events,
-        campaign_attachments,
         messages,
         campaign_recipients,
         campaigns,
@@ -322,6 +320,7 @@ export async function seedActiveContact(input: {
   return id;
 }
 
+/** Seeds a non-sendable suppressed contact (replaces the old pending_consent helper). */
 export async function seedPendingContact(input: {
   listId: string;
   email: string;
@@ -330,7 +329,7 @@ export async function seedPendingContact(input: {
   await query(
     `INSERT INTO contacts
        (id, email, first_name, last_name, status, consent_source, consent_at, created_at, updated_at)
-     VALUES ($1, $2, 'Pending', 'User', 'pending_consent', 'csv_import', NOW(), NOW(), NOW())`,
+     VALUES ($1, $2, 'Pending', 'User', 'suppressed', 'csv_import', NOW(), NOW(), NOW())`,
     [id, input.email.toLowerCase()],
   );
   await query(`INSERT INTO list_contacts (list_id, contact_id, added_at) VALUES ($1, $2, NOW())`, [

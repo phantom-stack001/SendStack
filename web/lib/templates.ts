@@ -1,3 +1,4 @@
+/** Optional author-inserted merge fields. unsubscribe_url is only substituted when present. */
 const ALLOWED_MERGE_FIELDS = new Set(["first_name", "last_name", "email", "unsubscribe_url"]);
 
 const UNSAFE_EMAIL_HTML = [

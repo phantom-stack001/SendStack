@@ -192,8 +192,6 @@ export type PreflightInput = {
   textBody: string;
   fromEmail: string;
   fromName: string;
-  attachmentExtensions?: string[];
-  attachmentCount?: number;
   identity?: SendingIdentity;
   requirePublicHttps?: boolean;
 };

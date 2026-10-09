@@ -1,5 +1,4 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { applyComplianceFooter } from "../lib/compliance-footer";
 import { assertProductionSessionCookie } from "../lib/env";
 import {
   canTransitionMessageStatus,
@@ -52,7 +51,7 @@ describe("fail-closed link validation", () => {
     expect(validateAllowedLinkDomains(["com"]).length).toBeGreaterThan(0);
     expect(validateAllowedLinkDomains(["example"]).length).toBeGreaterThan(0);
     expect(validateAllowedLinkDomains(["co.uk"]).length).toBeGreaterThan(0);
-    expect(validateAllowedLinkDomains(["co.kr"]).length).toBeGreaterThan(0);
+    expect(validateAllowedLinkDomains(["co.jp"]).length).toBeGreaterThan(0);
     expect(validateAllowedLinkDomains(["github.io"]).length).toBeGreaterThan(0);
     expect(validateAllowedLinkDomains(["contoso.com"])).toEqual([]);
     expect(validateAllowedLinkDomains(["example.co.uk"])).toEqual([]);
@@ -76,58 +75,18 @@ describe("fail-closed link validation", () => {
   });
 });
 
-describe("compliance footer pass-through", () => {
-  it("returns authored html and text unchanged", () => {
+describe("authored body pass-through", () => {
+  it("preflight does not require unsubscribe or company footer content", () => {
     setIdentityEnv();
-    const identity = loadSendingIdentity();
-    const html = '<p>Hello {{first_name}}</p><p><a href="{{unsubscribe_url}}">Unsubscribe</a></p>';
-    const text = "Hello {{first_name}}\nUnsubscribe: {{unsubscribe_url}}";
-    const result = applyComplianceFooter(html, text, identity);
-    expect(result.html).toBe(html);
-    expect(result.text).toBe(text);
-    expect(result.html).not.toContain("Contoso Ltd");
-    expect(result.html).not.toContain("1 Contoso Way");
-  });
-
-  it("does not inject unsubscribe tokens when the author omitted them", () => {
-    setIdentityEnv();
-    const result = applyComplianceFooter("<p>Hi</p>", "Hi", loadSendingIdentity(), { broadcast: true });
-    expect(result.html).toBe("<p>Hi</p>");
-    expect(result.text).toBe("Hi");
-    expect(result.html).not.toContain("{{unsubscribe_url}}");
-  });
-
-  it("preserves author content including dashes and Unsubscribe lines", () => {
-    setIdentityEnv();
-    const html = "<p>Hi</p><p>Section --- still here</p>";
-    const text = "Hi\n---\nOld Co\nUnsubscribe: read this line";
-    const result = applyComplianceFooter(html, text, loadSendingIdentity());
-    expect(result.html).toBe(html);
-    expect(result.text).toBe(text);
-    const again = applyComplianceFooter(result.html, result.text, loadSendingIdentity());
-    expect(again.html).toBe(result.html);
-    expect(again.text).toBe(result.text);
-  });
-
-  it("does not strip author CSS", () => {
-    setIdentityEnv();
-    const identity = loadSendingIdentity();
-    const hidden = applyComplianceFooter('<p style="display:none;color:#333">Hi</p>', "Hi", identity);
-    expect(hidden.html).toBe('<p style="display:none;color:#333">Hi</p>');
-    const styled = applyComplianceFooter("<style>p{color:#333}</style><p>Hi</p>", "Hi", identity);
-    expect(styled.html).toContain("<style");
-    expect(styled.html).toBe("<style>p{color:#333}</style><p>Hi</p>");
-  });
-
-  it("preserves visual layout styles", () => {
-    setIdentityEnv();
-    const html =
-      '<div style="max-height:0;line-height:1px;font-size:1px;color:#ffffff">Preview</div>' +
-      '<table style="max-width:600px;background:#ffffff;border-radius:14px"><tr><td style="padding:34px 30px;color:#14213d">Hello</td></tr></table>';
-    const result = applyComplianceFooter(html, "Hello", loadSendingIdentity());
-    expect(result.html).toBe(html);
-    expect(result.html).toContain("border-radius:14px");
-    expect(result.html).toContain("max-height:0");
+    const result = runCampaignPreflight({
+      subject: "Hello",
+      fromName: "Ops",
+      fromEmail: "news@contoso.com",
+      htmlBody: "<p>Hi</p>",
+      textBody: "Hi",
+      identity: loadSendingIdentity(),
+    });
+    expect(result.ok).toBe(true);
   });
 
   it("refuses a production session cookie unless it is Secure", () => {
@@ -151,7 +110,6 @@ describe("universal preflight including live tests", () => {
       fromEmail: "news@contoso.com",
       htmlBody: '<p>Replace this text <a href="https://evil.example">x</a></p>',
       textBody: "Replace this text",
-      attachmentExtensions: ["zip"],
       identity: loadSendingIdentity(),
       requirePublicHttps: true,
     });
@@ -168,21 +126,14 @@ describe("universal preflight including live tests", () => {
     expect(bad.ok).toBe(false);
   });
 
-  it("allows SMTP campaign launches with non-archive attachments", () => {
+  it("allows SMTP campaign launches without attachments", () => {
     setIdentityEnv();
-    const footered = applyComplianceFooter(
-      '<p>Update <a href="https://www.contoso.com">site</a></p>',
-      "Update https://www.contoso.com",
-      loadSendingIdentity(),
-    );
     const result = runCampaignPreflight({
       subject: "March update",
       fromName: "Ops",
       fromEmail: "news@contoso.com",
-      htmlBody: footered.html,
-      textBody: footered.text,
-      attachmentCount: 1,
-      attachmentExtensions: ["pdf"],
+      htmlBody: '<p>Update <a href="https://www.contoso.com">site</a></p>',
+      textBody: "Update https://www.contoso.com",
       identity: loadSendingIdentity(),
     });
     expect(result.ok).toBe(true);
@@ -202,17 +153,17 @@ describe("monotonic status transitions", () => {
 });
 
 describe("delivery health thresholds", () => {
-  it("requires explicit threshold configuration", () => {
+  it("treats rate thresholds as optional display config under Spacemail SMTP", () => {
     delete process.env.SENDSTACK_HEALTH_MIN_SAMPLE;
     delete process.env.SENDSTACK_HEALTH_MAX_BOUNCE_RATE;
     delete process.env.SENDSTACK_HEALTH_MAX_COMPLAINT_RATE;
     delete process.env.SENDSTACK_HEALTH_MAX_UNSUBSCRIBE_RATE;
     delete process.env.SENDSTACK_HEALTH_MAX_DELAY_RATE;
     delete process.env.SENDSTACK_HEALTH_MAX_FAILURE_RATE;
-    expect(loadDeliveryHealthThresholds().configured).toBe(false);
+    expect(loadDeliveryHealthThresholds().configured).toBe(true);
   });
 
-  it("loads configured thresholds", () => {
+  it("loads optional display thresholds when set", () => {
     process.env.SENDSTACK_HEALTH_MIN_SAMPLE = "10";
     process.env.SENDSTACK_HEALTH_MAX_BOUNCE_RATE = "0.05";
     process.env.SENDSTACK_HEALTH_MAX_COMPLAINT_RATE = "0.001";
@@ -231,7 +182,6 @@ describe("launch chunking contract", () => {
     const recipients = 10_000;
     const chunks = Math.ceil(recipients / DEFAULT_LAUNCH_CHUNK_SIZE);
     expect(chunks).toBe(2_000);
-    // One HTTP launch creates a job; worker ticks process chunks.
     expect(chunks * DEFAULT_LAUNCH_CHUNK_SIZE).toBeGreaterThanOrEqual(recipients);
   });
 });

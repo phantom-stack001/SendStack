@@ -15,7 +15,7 @@ import {
 const testUrl = resolveTestDatabaseUrl();
 const dbAvailable = Boolean(testUrl) && (await canConnectToTestDatabase(testUrl!));
 
-describe.skipIf(!dbAvailable)("PostgreSQL migrations (0001→0006)", () => {
+describe.skipIf(!dbAvailable)("PostgreSQL migrations (0001→0009)", () => {
   beforeAll(async () => {
     applyTestEnv(testUrl!);
     await resetPool();
@@ -178,12 +178,14 @@ describe.skipIf(!dbAvailable)("PostgreSQL migrations (0001→0006)", () => {
     expect(appliedCatchup).toEqual([
       "0007_submission_state_machine.sql",
       "0008_drop_consent_gate.sql",
+      "0009_spacemail_parity.sql",
     ]);
     const caughtUp = await query<{ id: string }>(`SELECT id FROM schema_migrations ORDER BY id`);
     expect(caughtUp.rows.map((row) => row.id)).toEqual([
       ...before.rows.map((row) => row.id),
       "0007_submission_state_machine.sql",
       "0008_drop_consent_gate.sql",
+      "0009_spacemail_parity.sql",
     ]);
     const appliedAgain = await applyMigrations();
     expect(appliedAgain).toEqual([]);
@@ -200,7 +202,7 @@ describe.skipIf(!dbAvailable)("PostgreSQL migrations (0001→0006)", () => {
     expect(Number(campaignCountAfter.rows[0].count)).toBe(Number(campaignCount.rows[0].count));
     expect(Number(messageCountAfter.rows[0].count)).toBe(Number(messageCount.rows[0].count));
 
-    // After 0008, the consent gate is gone and previously pending contacts are active.
+    // After 0009, consent evidence and attachment/webhook tables are gone.
     const consentCheckGone = await query<{ conname: string }>(
       `SELECT conname FROM pg_constraint WHERE conname = 'contacts_active_requires_consent_check'`,
     );
@@ -211,16 +213,20 @@ describe.skipIf(!dbAvailable)("PostgreSQL migrations (0001→0006)", () => {
     );
     expect(promoted.rows[0]).toBeUndefined();
 
-    // 0006 SQL itself remains idempotent when re-executed directly (re-adds the gate).
-    const sql6 = readFileSync(
-      join(__dirname, "../drizzle/0006_consent_volume_launch_hardening.sql"),
-      "utf8",
+    const attachmentsGone = await query<{ exists: boolean }>(
+      `SELECT to_regclass('public.campaign_attachments') IS NOT NULL AS exists`,
     );
-    await query(sql6);
+    expect(attachmentsGone.rows[0]?.exists).toBe(false);
 
-    const consentCheck = await query<{ conname: string }>(
-      `SELECT conname FROM pg_constraint WHERE conname = 'contacts_active_requires_consent_check'`,
+    const providerEventsGone = await query<{ exists: boolean }>(
+      `SELECT to_regclass('public.provider_events') IS NOT NULL AS exists`,
     );
-    expect(consentCheck.rows[0]?.conname).toBe("contacts_active_requires_consent_check");
+    expect(providerEventsGone.rows[0]?.exists).toBe(false);
+
+    const tokenNullable = await query<{ is_nullable: string }>(
+      `SELECT is_nullable FROM information_schema.columns
+        WHERE table_name = 'messages' AND column_name = 'unsubscribe_token'`,
+    );
+    expect(tokenNullable.rows[0]?.is_nullable).toBe("YES");
   });
 });

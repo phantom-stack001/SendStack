@@ -85,11 +85,6 @@ const PERMISSION_GROUPS = [
   ["Governance", ["overview.view", "audit.view", "users.view", "users.manage"]],
 ];
 
-const ATTACHMENT_ACCEPT = ".png,.jpg,.jpeg,.gif,.webp,.pdf";
-const ATTACHMENT_MAX_FILE_BYTES = 5 * 1024 * 1024;
-const ATTACHMENT_MAX_COUNT = 3;
-const ATTACHMENT_MAX_TOTAL_BYTES = 10 * 1024 * 1024;
-
 const PLACEHOLDER_PATTERNS = [
   [/replace this (text|copy|section)/i, "placeholder copy"],
   [/write your message/i, "placeholder message prompt"],
@@ -1263,12 +1258,6 @@ async function renderComposer(campaignId, token) {
           <p id="from-line" class="help"></p>
           <div class="segmented" role="group" aria-label="Format">${contentModes.map((mode) => `<button type="button" data-mode="${mode.id}">${mode.title}</button>`).join("")}</div>
           <div id="mode-editor-host"></div>
-          <section id="attachment-panel" class="stack">
-            <div id="attachment-list"></div>
-            <label class="button">Add attachment<input id="attachment-input" type="file" accept="${ATTACHMENT_ACCEPT}" multiple /></label>
-            <p class="help">PNG, JPG, GIF, WEBP, or PDF. Up to 3 files, 5 MB each, 10 MB total.</p>
-            <p id="attachment-error" class="form-error" role="alert"></p>
-          </section>
           <div id="preflight" class="preflight"></div>
           <p class="form-error" data-form-error role="alert"></p>
           <div class="form-actions" id="composer-actions"></div>
@@ -1310,8 +1299,6 @@ async function renderComposer(campaignId, token) {
     plain_text: { schema_version: 1, plain_text: selectedMode === "plain_text" ? (stored.plain_text || campaign.text_body || "") : "" },
   };
   let activeId = campaignId;
-  let attachments = Array.isArray(campaign.attachments) ? [...campaign.attachments] : [];
-  let pendingFiles = [];
   let saveTimer = null;
   let savedAt = 0;
   const editable = can("campaigns.manage") && (!activeId || campaign.status === "draft" || (campaign.status === "paused" && can("campaigns.send")));
@@ -1417,17 +1404,7 @@ async function renderComposer(campaignId, token) {
     checks.push([!placeholder, placeholder ? `Replace ${placeholder[1]}` : "No placeholder copy detected"]);
     const unknown = [...blob.matchAll(/{{\s*([a-zA-Z0-9_]+)\s*}}/g)].map((match) => match[1]).filter((field) => !["first_name", "last_name", "email", "unsubscribe_url"].includes(field));
     checks.push([unknown.length === 0, unknown.length ? `Unknown merge field: ${unknown[0]}` : "Merge fields are recognised"]);
-    const archive = [...attachments, ...pendingFiles].some((file) => /\.(zip|rar|7z|gz)$/i.test(file.filename || file.name || ""));
-    checks.push([!archive, archive ? "Remove archive attachments" : "No archive attachments"]);
     document.querySelector("#preflight").innerHTML = `<strong>Before you send</strong><ul class="checklist">${checks.map(([ok, label]) => `<li><span class="${ok ? "done" : ""}">${ok ? "Pass" : "Check"} · ${escapeHtml(label)}</span></li>`).join("")}</ul>`;
-  };
-  const totalCount = () => attachments.length + pendingFiles.length;
-  const totalBytes = () => attachments.reduce((sum, file) => sum + Number(file.byte_size || 0), 0) + pendingFiles.reduce((sum, file) => sum + Number(file.size || 0), 0);
-  const paintFiles = () => {
-    const files = activeId ? attachments.map((file) => ({ id: file.id, name: file.filename, size: file.byte_size, pending: false })) : pendingFiles.map((file, index) => ({ id: index, name: file.name, size: file.size, pending: true }));
-    document.querySelector("#attachment-list").innerHTML = files.length ? `<ul class="chips">${files.map((file) => `<li class="chip"><span>${escapeHtml(file.name)}</span><span class="nums">${escapeHtml(formatByteSize(file.size))}</span>${editable ? `<button type="button" class="icon-button" data-remove-file="${escapeHtml(file.id)}" data-pending="${file.pending}" aria-label="Remove ${escapeHtml(file.name)}">${icon("close")}</button>` : ""}</li>`).join("")}</ul>` : "";
-    const input = document.querySelector("#attachment-input");
-    if (input) input.disabled = !editable || totalCount() >= ATTACHMENT_MAX_COUNT;
   };
   const markDirty = () => {
     if (!editable) return;
@@ -1471,8 +1448,6 @@ async function renderComposer(campaignId, token) {
         history.replaceState(null, "", `#/campaigns/${activeId}`);
         state.route = readRoute();
         state.pageKey = pageKey(state.route);
-        const uploaded = await uploadPending();
-        if (!uploaded) return false;
       }
       invalidate("campaigns");
       setSaved();
@@ -1484,25 +1459,6 @@ async function renderComposer(campaignId, token) {
       form.querySelector("[data-form-error]").textContent = error.message;
       return false;
     }
-  };
-  const uploadPending = async () => {
-    const queued = [...pendingFiles];
-    pendingFiles = [];
-    for (let index = 0; index < queued.length; index += 1) {
-      try {
-        const body = new FormData();
-        body.append("file", queued[index]);
-        const result = await api(`/api/campaigns/${activeId}/attachments`, { method: "POST", body });
-        attachments = result.attachments || [];
-      } catch (error) {
-        pendingFiles = queued.slice(index);
-        document.querySelector("#attachment-error").textContent = error.message;
-        paintFiles();
-        return false;
-      }
-    }
-    paintFiles();
-    return true;
   };
   const paintActions = () => {
     const actions = document.querySelector("#composer-actions");
@@ -1531,7 +1487,6 @@ async function renderComposer(campaignId, token) {
   paintEditor();
   form.elements.name?.addEventListener("input", markDirty);
   form.elements.subject?.addEventListener("input", markDirty);
-  paintFiles();
   paintActions();
   document.querySelector("#save-state").textContent = activeId ? "Saved" : "Not saved yet";
   document.querySelectorAll("[data-mode]").forEach((button) => button.addEventListener("click", () => {
@@ -1553,44 +1508,6 @@ async function renderComposer(campaignId, token) {
     const pressed = event.currentTarget.getAttribute("aria-pressed") !== "true";
     event.currentTarget.setAttribute("aria-pressed", pressed ? "true" : "false");
     refreshPreview();
-  });
-  document.querySelector("#attachment-input")?.addEventListener("change", async (event) => {
-    const error = document.querySelector("#attachment-error");
-    error.textContent = "";
-    for (const file of [...event.target.files]) {
-      if (file.size > ATTACHMENT_MAX_FILE_BYTES) { error.textContent = `"${file.name}" is larger than 5 MB.`; break; }
-      if (totalCount() >= ATTACHMENT_MAX_COUNT) { error.textContent = "A campaign can have at most 3 attachments."; break; }
-      if (totalBytes() + file.size > ATTACHMENT_MAX_TOTAL_BYTES) { error.textContent = "Attachments cannot exceed 10 MB in total."; break; }
-      if (!activeId) pendingFiles.push(file);
-      else {
-        try {
-          const body = new FormData();
-          body.append("file", file);
-          const result = await api(`/api/campaigns/${activeId}/attachments`, { method: "POST", body });
-          attachments = result.attachments || [];
-          toast("Attachment added");
-        } catch (uploadError) {
-          error.textContent = uploadError.message;
-          break;
-        }
-      }
-    }
-    event.target.value = "";
-    paintFiles();
-    refreshPreview();
-  });
-  document.querySelector("#attachment-list")?.addEventListener("click", async (event) => {
-    const button = event.target.closest("[data-remove-file]");
-    if (!button) return;
-    if (button.dataset.pending === "true") pendingFiles.splice(Number(button.dataset.removeFile), 1);
-    else {
-      try {
-        const result = await api(`/api/campaigns/${activeId}/attachments/${button.dataset.removeFile}`, { method: "DELETE", body: {} });
-        attachments = result.attachments || [];
-        toast("Attachment removed");
-      } catch (error) { toast(error.message, "error"); }
-    }
-    paintFiles();
   });
   form.addEventListener("submit", async (event) => {
     event.preventDefault();

@@ -1,4 +1,4 @@
-import { applyComplianceFooter } from "./compliance-footer";
+import { randomBytes } from "crypto";
 import { config } from "./config";
 import {
   consumeDailyReservationsForCampaign,
@@ -9,10 +9,9 @@ import { getPool, query } from "./db";
 import { withSubmitBarrier } from "./submit-barrier";
 import { ensureDeliveryHealthBlock } from "./delivery-health";
 import { makeId } from "./ids";
-import { buildIdempotencyKey, liveSendAllowed, smtpHourlyLimit } from "./live-send";
+import { liveSendAllowed, smtpHourlyLimit } from "./live-send";
 import { sendSmtpEmail, smtpAcceptanceAmbiguous, type SmtpEmailInput } from "./providers/smtp";
 import { appendToSentFolder, buildSentAppendSource } from "./mailbox";
-import { loadSendingIdentity } from "./sending-identity";
 import { isSpecialUseRecipientDomain, validateLiveRecipient } from "./recipients";
 import { renderTemplate } from "./templates";
 
@@ -37,9 +36,6 @@ export type LaunchJobRow = {
   next_retry_at: string | null;
   cancel_requested_at: string | null;
   terminal_reason: string | null;
-  provider_segment_id: string | null;
-  provider_broadcast_id: string | null;
-  provider_import_id: string | null;
   reservation_batch_id: string | null;
   last_error: string | null;
   submit_attempted_at?: string | null;
@@ -56,10 +52,20 @@ function frozenLaunchContent(
   if (snapshot && typeof snapshot.html_body === "string" && typeof snapshot.text_body === "string") {
     return { html: snapshot.html_body, text: snapshot.text_body };
   }
-  return applyComplianceFooter(campaign.html_body, campaign.text_body, loadSendingIdentity());
+  return { html: campaign.html_body ?? "", text: campaign.text_body ?? "" };
 }
 
-export type SmtpSendFn = (input: SmtpEmailInput) => Promise<{ id: string; accepted: boolean }>;
+function templateUsesOptOut(subject: string, html: string, text: string): boolean {
+  return (
+    subject.includes("{{unsubscribe_url}}") ||
+    html.includes("{{unsubscribe_url}}") ||
+    text.includes("{{unsubscribe_url}}")
+  );
+}
+
+export type SmtpSendFn = (
+  input: SmtpEmailInput,
+) => Promise<{ id: string; accepted: boolean; raw?: string }>;
 
 type ProcessOptions = {
   /** Test seam: inject a fake SMTP sender (never opens a socket). */
@@ -83,8 +89,6 @@ type CampaignLaunchRow = {
   text_body: string;
   list_id: string;
   status: string;
-  provider_broadcast_id: string | null;
-  provider_segment_id: string | null;
   launch_job_id: string | null;
   cancel_requested?: boolean;
 };
@@ -252,7 +256,7 @@ export async function claimAndPrepareCampaignLaunch(input: {
 
   const campaignResult = await query<CampaignLaunchRow>(
     `SELECT id, subject, from_name, from_email, reply_to_email, html_body, text_body, list_id,
-            status, provider_broadcast_id, provider_segment_id, launch_job_id
+            status, launch_job_id
        FROM campaigns WHERE id = $1`,
     [input.campaignId],
   );
@@ -264,22 +268,18 @@ export async function claimAndPrepareCampaignLaunch(input: {
     throw new Error("Campaign is not launchable (wrong status or already has a launch job).");
   }
 
-  const identity = loadSendingIdentity();
   const liveMode = input.liveMode ?? liveSendAllowed();
   const fromEmail = input.fromEmail ?? campaign.from_email;
   const replyTo = input.replyToEmail ?? campaign.reply_to_email ?? null;
-  const footered = applyComplianceFooter(
-    input.htmlBody ?? campaign.html_body,
-    input.textBody ?? campaign.text_body,
-    identity,
-  );
+  const authoredHtml = input.htmlBody ?? campaign.html_body ?? "";
+  const authoredText = input.textBody ?? campaign.text_body ?? "";
   const snapshot: LaunchSnapshot = {
     subject: campaign.subject,
     from_name: campaign.from_name,
     from_email: fromEmail,
     reply_to_email: replyTo,
-    html_body: footered.html,
-    text_body: footered.text,
+    html_body: authoredHtml,
+    text_body: authoredText,
     list_id: campaign.list_id,
     live_mode: liveMode,
   };
@@ -381,7 +381,7 @@ export async function claimAndPrepareCampaignLaunch(input: {
               $5,
               $6,
               'captured',
-              replace(gen_random_uuid()::text, '-', '') || substr(replace(gen_random_uuid()::text, '-', ''), 1, 16),
+              NULL,
               NOW(),
               $7 || ':' || cr.campaign_id || ':' || cr.contact_id,
               $8::jsonb,
@@ -400,9 +400,9 @@ export async function claimAndPrepareCampaignLaunch(input: {
         snapshot.subject,
         fromEmail,
         replyTo,
-        footered.html,
-        footered.text,
-        "broadcast",
+        authoredHtml,
+        authoredText,
+        "smtp",
         JSON.stringify({ intent: "smtp", campaign_id: input.campaignId }),
       ],
     );
@@ -427,7 +427,7 @@ export async function claimAndPrepareCampaignLaunch(input: {
     const batchId = makeId("dvb");
     const messageIdByKey: Record<string, string> = {};
     const reservationKeys = messageRows.rows.map((row) => {
-      const key = `broadcast:${input.campaignId}:${row.contact_id}`;
+      const key = `smtp:${input.campaignId}:${row.contact_id}`;
       messageIdByKey[key] = row.id;
       return key;
     });
@@ -684,7 +684,7 @@ async function failJob(
       WHERE id = $2`,
     [status, job.campaign_id],
   );
-  if (options?.releaseVolume && !job.provider_broadcast_id) {
+  if (options?.releaseVolume) {
     await releaseDailyReservationsForCampaign(job.campaign_id, true);
   }
   if (options?.manualReview || status === "failed") {
@@ -701,7 +701,7 @@ async function failJob(
 async function loadCampaign(campaignId: string): Promise<CampaignLaunchRow | null> {
   const result = await query<CampaignLaunchRow>(
     `SELECT id, subject, from_name, from_email, reply_to_email, html_body, text_body, list_id,
-            status, provider_broadcast_id, provider_segment_id, launch_job_id
+            status, launch_job_id
        FROM campaigns WHERE id = $1`,
     [campaignId],
   );
@@ -774,9 +774,7 @@ async function enforcePreparedAudience(
           AND status IN ('sending', 'cancel_requested', 'submission_unknown')`,
       [job.campaign_id],
     );
-    if (!job.provider_broadcast_id) {
-      await releaseDailyReservationsForCampaign(job.campaign_id, true);
-    }
+    await releaseDailyReservationsForCampaign(job.campaign_id, true);
     return { ok: false, result: { done: true, advanced: 0, status: "cancelled" } };
   }
 
@@ -787,7 +785,7 @@ async function enforcePreparedAudience(
     result: await failJob(
       job,
       `Late suppression after prepare: ${check.suppressedEmails.length} recipient(s) suppressed (${preview}${suffix}). Failing closed to avoid sending a stale segment.`,
-      { releaseVolume: !job.provider_broadcast_id },
+      { releaseVolume: true },
     ),
   };
 }
@@ -800,25 +798,6 @@ async function withinSmtpHourlyLimit(): Promise<boolean> {
         AND created_at >= NOW() - INTERVAL '1 hour'`,
   );
   return Number(used.rows[0]?.count ?? 0) < limit;
-}
-
-async function loadCampaignAttachments(campaignId: string): Promise<
-  Array<{ filename: string; contentBase64: string; contentType: string }>
-> {
-  const result = await query<{ filename: string; content_type: string; content: Buffer }>(
-    `SELECT filename, content_type, content
-       FROM campaign_attachments
-      WHERE campaign_id = $1
-        AND COALESCE(blocked, FALSE) = FALSE
-        AND lower(filename) NOT LIKE '%.zip'
-      ORDER BY created_at ASC`,
-    [campaignId],
-  );
-  return result.rows.map((row) => ({
-    filename: row.filename,
-    contentType: row.content_type,
-    contentBase64: Buffer.from(row.content).toString("base64"),
-  }));
 }
 
 async function preflightIrreversibleOp(
@@ -1007,7 +986,7 @@ export async function processLaunchJobChunk(
     reply_to_email: string | null;
     html_body: string;
     text_body: string;
-    unsubscribe_token: string;
+    unsubscribe_token: string | null;
     recipient_id: string | null;
     first_name: string;
     last_name: string;
@@ -1042,10 +1021,13 @@ export async function processLaunchJobChunk(
     return completeSmtpLaunch(job, campaign, options);
   }
 
-  const attachments = await loadCampaignAttachments(campaign.id);
   const sendFn = options?.sendEmail ?? sendSmtpEmail;
   const fromName = snapshot?.from_name ?? campaign.from_name;
   const replyTo = snapshot?.reply_to_email || campaign.reply_to_email || undefined;
+  const templateHtml = footered.html || "";
+  const templateText = footered.text || "";
+  const templateSubject = snapshot?.subject ?? campaign.subject;
+  const usesOptOut = templateUsesOptOut(templateSubject, templateHtml, templateText);
   let advanced = 0;
 
   for (const row of pending.rows) {
@@ -1065,25 +1047,29 @@ export async function processLaunchJobChunk(
       return { done: false, advanced, status: "pending" };
     }
 
-    const unsubscribeUrl = `${config.publicUrl}/u/${row.unsubscribe_token}`;
-    const templateHtml = footered.html || row.html_body;
-    const templateText = footered.text || row.text_body;
-    const templateSubject = snapshot?.subject ?? row.subject;
-    const mergeValues = {
+    let unsubscribeToken = row.unsubscribe_token;
+    let unsubscribeUrl: string | undefined;
+    if (usesOptOut) {
+      if (!unsubscribeToken) {
+        unsubscribeToken = randomBytes(24).toString("base64url");
+        await query(`UPDATE messages SET unsubscribe_token = $1 WHERE id = $2`, [
+          unsubscribeToken,
+          row.id,
+        ]);
+      }
+      unsubscribeUrl = `${config.publicUrl}/u/${unsubscribeToken}`;
+    }
+    const mergeValues: Record<string, string> = {
       first_name: row.first_name,
       last_name: row.last_name,
       email: row.to_email,
-      unsubscribe_url: unsubscribeUrl,
     };
-    const htmlBody = renderTemplate(templateHtml, mergeValues);
-    const textBody = renderTemplate(templateText, mergeValues);
+    if (unsubscribeUrl) mergeValues.unsubscribe_url = unsubscribeUrl;
+    const htmlBody = renderTemplate(templateHtml || row.html_body, mergeValues);
+    const textBody = renderTemplate(templateText || row.text_body, mergeValues);
     const subject = renderTemplate(templateSubject, mergeValues);
-    const usesOptOut =
-      templateHtml.includes("{{unsubscribe_url}}") ||
-      templateText.includes("{{unsubscribe_url}}") ||
-      templateSubject.includes("{{unsubscribe_url}}");
     const diagnostic: Record<string, unknown> = { intent: "smtp" };
-    if (usesOptOut) diagnostic.opt_out_url = unsubscribeUrl;
+    if (unsubscribeUrl) diagnostic.opt_out_url = unsubscribeUrl;
 
     await query(
       `UPDATE messages
@@ -1129,11 +1115,10 @@ export async function processLaunchJobChunk(
           fromName,
           fromEmail,
           replyTo: replyTo || undefined,
-          attachments,
         });
         if (options?.afterProviderAccepted) await options.afterProviderAccepted();
         const submittedDiagnostic: Record<string, unknown> = { provider_id: accepted.id };
-        if (usesOptOut) submittedDiagnostic.opt_out_url = unsubscribeUrl;
+        if (unsubscribeUrl) submittedDiagnostic.opt_out_url = unsubscribeUrl;
         const raw =
           accepted.raw ||
           buildSentAppendSource({

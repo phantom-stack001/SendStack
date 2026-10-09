@@ -14,6 +14,7 @@ export const REQUIRED_MIGRATIONS = [
   "0006_consent_volume_launch_hardening.sql",
   "0007_submission_state_machine.sql",
   "0008_drop_consent_gate.sql",
+  "0009_spacemail_parity.sql",
 ] as const;
 
 export const REQUIRED_TABLES = [
@@ -25,10 +26,8 @@ export const REQUIRED_TABLES = [
   "list_contacts",
   "campaigns",
   "campaign_recipients",
-  "campaign_attachments",
   "messages",
   "suppressions",
-  "provider_events",
   "audit_events",
   "daily_volume_counters",
   "daily_volume_reservations",
@@ -38,11 +37,8 @@ export const REQUIRED_TABLES = [
   "schema_migrations",
 ] as const;
 
-/** Columns added by 0005/0006 that the application reads or writes unconditionally. */
+/** Columns the application reads or writes unconditionally. */
 export const REQUIRED_COLUMNS: ReadonlyArray<readonly [string, string]> = [
-  ["contacts", "consent_evidence"],
-  ["contacts", "consent_attested_by"],
-  ["contacts", "consent_verified_at"],
   ["campaigns", "launch_job_id"],
   ["campaigns", "submission_state"],
   ["campaigns", "frozen_at"],
@@ -52,18 +48,12 @@ export const REQUIRED_COLUMNS: ReadonlyArray<readonly [string, string]> = [
   ["campaigns", "cancellable"],
   ["campaign_recipients", "first_name"],
   ["campaign_recipients", "last_name"],
-  ["campaign_attachments", "blocked"],
   ["messages", "volume_reservation_id"],
   ["messages", "status_rank"],
   ["messages", "idempotency_key"],
   ["messages", "is_test"],
   ["messages", "diagnostic_json"],
   ["suppressions", "protected"],
-  ["provider_events", "claim_owner"],
-  ["provider_events", "claim_expires_at"],
-  ["provider_events", "claim_token"],
-  ["provider_events", "waived_at"],
-  ["provider_events", "resolved_at"],
   ["daily_volume_reservations", "attempt_key"],
   ["launch_jobs", "lease_generation"],
   ["launch_jobs", "live_mode"],
@@ -78,7 +68,6 @@ export const REQUIRED_COLUMNS: ReadonlyArray<readonly [string, string]> = [
 export const REQUIRED_INDEXES = [
   "daily_volume_reservations_day_key_uidx",
   "launch_jobs_one_active_per_campaign",
-  "provider_events_claim_token_uidx",
   "messages_idempotency_key_uidx",
   "login_attempts_account_time_idx",
 ] as const;

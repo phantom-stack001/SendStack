@@ -68,8 +68,6 @@ async function main() {
       daily_volume_reservations,
       daily_volume_counters,
       delivery_health_blocks,
-      provider_events,
-      campaign_attachments,
       messages,
       campaign_recipients,
       campaigns,

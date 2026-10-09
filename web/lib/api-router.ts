@@ -3,7 +3,6 @@ import { json } from "./http";
 import { config } from "./config";
 import { getPool, query } from "./db";
 import { withSubmitBarrier } from "./submit-barrier";
-import { applyComplianceFooter } from "./compliance-footer";
 import {
   createContact,
   importContactStatus,
@@ -54,11 +53,6 @@ import {
   loadSendingIdentity,
 } from "./sending-identity";
 import { applySuppression, isEmailSuppressed, removeSuppression } from "./suppressions";
-import {
-  ATTACHMENT_MAX_COUNT,
-  attachmentMeta,
-  validateCampaignAttachment,
-} from "./attachments";
 import { passwordChangeAllowedPath, requireCsrf } from "./auth";
 import { PERMISSION_DEFINITIONS, ROLE_DEFINITIONS, permissionsForRole, roleDefinitionsPayload } from "./rbac";
 import { renderTemplate, validateEmailContent } from "./templates";
@@ -139,14 +133,23 @@ function hasValidCsrf(request: Request, csrfToken: string): boolean {
 function renderContactTemplate(
   value: string,
   contact: { email: string; first_name?: string; last_name?: string },
-  unsubscribeUrl: string,
+  unsubscribeUrl?: string,
 ): string {
-  return renderTemplate(value, {
+  const values: Record<string, string> = {
     first_name: contact.first_name ?? "",
     last_name: contact.last_name ?? "",
     email: contact.email,
-    unsubscribe_url: unsubscribeUrl,
-  });
+  };
+  if (unsubscribeUrl) values.unsubscribe_url = unsubscribeUrl;
+  return renderTemplate(value, values);
+}
+
+function templateUsesOptOut(subject: string, html: string, text: string): boolean {
+  return (
+    subject.includes("{{unsubscribe_url}}") ||
+    html.includes("{{unsubscribe_url}}") ||
+    text.includes("{{unsubscribe_url}}")
+  );
 }
 
 async function currentSession(request: Request) {
@@ -405,7 +408,7 @@ async function campaignById(id: string) {
     content_mode: string; content_json: string; html_body: string; text_body: string;
     list_id: string; list_name: string; status: string; created_at: string;
     launched_at: string | null; completed_at: string | null;
-    provider_broadcast_id: string | null; provider_segment_id: string | null;
+    reply_to_email: string | null;
     launch_lock_token: string | null;
   }>(
     `SELECT c.*, l.name AS list_name FROM campaigns c JOIN lists l ON l.id = c.list_id WHERE c.id = $1`,
@@ -427,106 +430,6 @@ async function completeCampaignIfIdle(campaignId: string) {
         )`,
     [campaignId],
   );
-}
-
-async function persistLaunchRecipientIntent(input: {
-  campaign: NonNullable<Awaited<ReturnType<typeof campaignById>>>;
-  contact: { id: string; email: string; first_name: string; last_name: string };
-  fromEmail: string;
-  replyTo: string | null;
-  htmlBody: string;
-  textBody: string;
-  reservationId: string;
-  intent: "broadcast" | "direct";
-}) {
-  const recipientId = makeId("rec");
-  const messageId = makeId("msg");
-  const unsubscribeToken = randomBytes(24).toString("base64url");
-  const idempotencyKey = buildIdempotencyKey([input.intent, input.campaign.id, input.contact.id]);
-  const inserted = await query<{ id: string; message_id: string }>(
-    `INSERT INTO campaign_recipients
-       (id, campaign_id, contact_id, email, status, message_id, provider_email_id, queued_at, sent_at)
-     VALUES ($1, $2, $3, $4, 'queued', $5, NULL, NOW(), NULL)
-     ON CONFLICT (campaign_id, contact_id) DO UPDATE
-       SET email = EXCLUDED.email,
-           message_id = COALESCE(campaign_recipients.message_id, EXCLUDED.message_id)
-     RETURNING id, message_id`,
-    [recipientId, input.campaign.id, input.contact.id, input.contact.email, messageId],
-  );
-  const recipientRow = inserted.rows[0];
-  const resolvedMessageId = recipientRow.message_id || messageId;
-  const existingMessage = await query<{ id: string }>(
-    `SELECT id FROM messages WHERE recipient_id = $1 LIMIT 1`,
-    [recipientRow.id],
-  );
-  if (!existingMessage.rows[0]) {
-    await query(
-      `INSERT INTO messages
-         (id, campaign_id, recipient_id, contact_id, to_email, subject, from_email, reply_to_email,
-          html_body, text_body, status, unsubscribe_token, created_at, idempotency_key, diagnostic_json,
-          is_test, volume_reservation_id)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'captured', $11, NOW(), $12, $13, FALSE, $14)
-       ON CONFLICT (idempotency_key) DO NOTHING`,
-      [
-        resolvedMessageId,
-        input.campaign.id,
-        recipientRow.id,
-        input.contact.id,
-        input.contact.email,
-        input.campaign.subject,
-        input.fromEmail,
-        input.replyTo,
-        input.htmlBody,
-        input.textBody,
-        unsubscribeToken,
-        idempotencyKey,
-        JSON.stringify({ intent: input.intent, campaign_id: input.campaign.id }),
-        input.reservationId,
-      ],
-    );
-  } else {
-    await query(
-      `UPDATE messages SET volume_reservation_id = COALESCE(volume_reservation_id, $1) WHERE id = $2`,
-      [input.reservationId, existingMessage.rows[0].id],
-    );
-  }
-  return { recipientId: recipientRow.id, messageId: resolvedMessageId };
-}
-
-async function listCampaignAttachmentMeta(campaignId: string) {
-  const result = await query<{
-    id: string;
-    filename: string;
-    content_type: string;
-    byte_size: number;
-  }>(
-    `SELECT id, filename, content_type, byte_size
-       FROM campaign_attachments
-      WHERE campaign_id = $1
-      ORDER BY created_at ASC`,
-    [campaignId],
-  );
-  return result.rows.map(attachmentMeta);
-}
-
-async function loadCampaignAttachmentsForSend(campaignId: string) {
-  const result = await query<{
-    filename: string;
-    content_type: string;
-    content: Buffer;
-  }>(
-    `SELECT filename, content_type, content
-       FROM campaign_attachments
-      WHERE campaign_id = $1
-        AND COALESCE(blocked, FALSE) = FALSE
-      ORDER BY created_at ASC`,
-    [campaignId],
-  );
-  return result.rows.map((row) => ({
-    filename: row.filename,
-    contentType: row.content_type,
-    contentBase64: Buffer.from(row.content).toString("base64"),
-  }));
 }
 
 async function readinessResponse() {
@@ -552,7 +455,6 @@ async function readinessResponse() {
     smtpReady &&
     schema.ok &&
     cronConfigured &&
-    health.thresholds_configured &&
     !health.launch_blocked;
 
   return json(200, {
@@ -633,23 +535,24 @@ async function readinessResponse() {
       },
       {
         id: "delivery_health",
-        label: "Delivery health",
-        status: !health.launch_blocked && health.thresholds_configured ? "ready" : "pending",
-        detail: !health.launch_blocked && health.thresholds_configured
-          ? "Delivery health thresholds are configured and launch is not blocked."
-          : health.blocking_reasons.join(" ") || health.issues.join(" ") || "Delivery health checks are incomplete.",
+        label: "Queue health",
+        status: !health.launch_blocked ? "ready" : "pending",
+        detail: !health.launch_blocked
+          ? "Launch is not blocked by emergency stop or unresolved queue issues."
+          : health.blocking_reasons.join(" ") || health.issues.join(" ") || "Queue health checks are incomplete.",
       },
     ],
     delivery_health: health,
     delivery_path: [
-      "Create a campaign draft with monitored From/Reply-To identity",
-      "Pass launch preflight (no placeholders, allowed links, no archives)",
+      "Create a campaign draft (From, optional Reply-To, subject, body)",
+      "Pass launch preflight (subject, From, safe HTML)",
       "Verify audience suppressions and daily/hourly volume headroom",
       "Submit one recipient at a time through Spacemail SMTP (mail.spacemail.com:465)",
     ],
     volume_plan: {
       goal: `${config.dailyLimit.toLocaleString()} emails/day`,
-      launch_policy: "Increase volume only after bounce, complaint, and unsubscribe signals remain healthy within Spacemail SMTP limits.",
+      launch_policy:
+        "Respect SENDSTACK_SMTP_HOURLY_LIMIT, SENDSTACK_DAILY_LIMIT, and the live-send kill switch. Spacemail does not report bounce or complaint webhooks.",
     },
     identity_gaps: gaps,
   });
@@ -1427,85 +1330,7 @@ export async function handleApi(request: Request, path: string[]) {
       ],
     );
     await recordRequestAudit(request, auth.session.user_id, "campaign_created", "campaign", id, { name, list_id: listId, content_mode: contentMode });
-    return json(201, { campaign: { id, name, subject, status: "draft", list_id: listId, attachments: [] } });
-  }
-  const attachmentDeleteMatch = route.match(/^\/campaigns\/([^/]+)\/attachments\/([^/]+)$/);
-  if (request.method === "DELETE" && attachmentDeleteMatch) {
-    const auth = await requirePermission(request, "campaigns.manage");
-    if (auth.response) return auth.response;
-    if (!hasValidCsrf(request, auth.session.csrf_token)) return json(403, { error: "CSRF validation failed." });
-    const campaign = await campaignById(attachmentDeleteMatch[1]);
-    if (!campaign) return json(404, { error: "Campaign not found." });
-    if (campaign.status !== "draft") return json(409, { error: "Attachments can only be changed on draft campaigns." });
-    const deleted = await query(
-      `DELETE FROM campaign_attachments WHERE id = $1 AND campaign_id = $2 RETURNING id, filename`,
-      [attachmentDeleteMatch[2], campaign.id],
-    );
-    if (!deleted.rows[0]) return json(404, { error: "Attachment not found." });
-    await recordRequestAudit(request, auth.session.user_id, "campaign_attachment_deleted", "campaign", campaign.id, {
-      attachment_id: deleted.rows[0].id,
-      filename: deleted.rows[0].filename,
-    });
-    return json(200, { ok: true, attachments: await listCampaignAttachmentMeta(campaign.id) });
-  }
-  const attachmentCollectionMatch = route.match(/^\/campaigns\/([^/]+)\/attachments$/);
-  if (request.method === "GET" && attachmentCollectionMatch) {
-    const auth = await requirePermission(request, "campaigns.view");
-    if (auth.response) return auth.response;
-    const campaign = await campaignById(attachmentCollectionMatch[1]);
-    if (!campaign) return json(404, { error: "Campaign not found." });
-    return json(200, { attachments: await listCampaignAttachmentMeta(campaign.id) });
-  }
-  if (request.method === "POST" && attachmentCollectionMatch) {
-    const auth = await requirePermission(request, "campaigns.manage");
-    if (auth.response) return auth.response;
-    if (!hasValidCsrf(request, auth.session.csrf_token)) return json(403, { error: "CSRF validation failed." });
-    const campaign = await campaignById(attachmentCollectionMatch[1]);
-    if (!campaign) return json(404, { error: "Campaign not found." });
-    if (campaign.status !== "draft") return json(409, { error: "Attachments can only be added to draft campaigns." });
-
-    const form = await request.formData().catch(() => null);
-    const file = form?.get("file");
-    if (!(file instanceof File)) return json(400, { error: "Choose a file to attach." });
-    const bytes = Buffer.from(await file.arrayBuffer());
-    const existing = await query<{ count: string; total_bytes: string }>(
-      `SELECT COUNT(*)::int AS count, COALESCE(SUM(byte_size), 0)::int AS total_bytes
-         FROM campaign_attachments WHERE campaign_id = $1`,
-      [campaign.id],
-    );
-    const existingCount = Number(existing.rows[0]?.count ?? 0);
-    const existingTotalBytes = Number(existing.rows[0]?.total_bytes ?? 0);
-    const validated = validateCampaignAttachment({
-      filename: file.name || "attachment",
-      contentType: file.type || "",
-      byteSize: bytes.length,
-      existingCount,
-      existingTotalBytes,
-      bytes,
-    });
-    if (!validated.ok) return json(400, { error: validated.error });
-
-    const attachmentId = makeId("att");
-    await query(
-      `INSERT INTO campaign_attachments (id, campaign_id, filename, content_type, byte_size, content, created_at)
-       VALUES ($1, $2, $3, $4, $5, $6, NOW())`,
-      [attachmentId, campaign.id, validated.filename, validated.contentType, bytes.length, bytes],
-    );
-    await recordRequestAudit(request, auth.session.user_id, "campaign_attachment_added", "campaign", campaign.id, {
-      attachment_id: attachmentId,
-      filename: validated.filename,
-      byte_size: bytes.length,
-    });
-    return json(201, {
-      attachment: {
-        id: attachmentId,
-        filename: validated.filename,
-        content_type: validated.contentType,
-        byte_size: bytes.length,
-      },
-      attachments: await listCampaignAttachmentMeta(campaign.id),
-      limits: { max_count: ATTACHMENT_MAX_COUNT },
-    });
+    return json(201, { campaign: { id, name, subject, status: "draft", list_id: listId } });
   }
   const campaignMatch = route.match(/^\/campaigns\/([^/]+)$/);
   if (request.method === "GET" && campaignMatch) {
@@ -1517,7 +1342,6 @@ export async function handleApi(request: Request, path: string[]) {
       `SELECT status, COUNT(*)::int AS count FROM campaign_recipients WHERE campaign_id = $1 GROUP BY status`,
       [campaign.id],
     );
-    const attachments = await listCampaignAttachmentMeta(campaign.id);
     const eligible = await query<{ count: string }>(
       `SELECT COUNT(*)::int AS count
          FROM contacts c JOIN list_contacts lc ON lc.contact_id = c.id
@@ -1529,7 +1353,6 @@ export async function handleApi(request: Request, path: string[]) {
       campaign: {
         ...campaign,
         stats: Object.fromEntries(stats.rows.map((row) => [row.status, row.count])),
-        attachments,
         eligible_recipients: Number(eligible.rows[0]?.count ?? 0),
       },
     });
@@ -1644,11 +1467,6 @@ export async function handleApi(request: Request, path: string[]) {
       if (campaign.status !== "paused") {
         return json(409, { error: "Only paused campaigns can be resumed." });
       }
-      if (campaign.provider_broadcast_id) {
-        return json(409, {
-          error: "This send already started through Spacemail SMTP. Create a new draft instead of resuming a partial send.",
-        });
-      }
       await query(`UPDATE campaigns SET status = 'draft', updated_at = NOW() WHERE id = $1`, [campaign.id]);
       await recordRequestAudit(request, auth.session.user_id, "campaign_resumed", "campaign", campaign.id, { status: "draft" });
       return json(200, { ok: true, status: "draft" });
@@ -1674,11 +1492,6 @@ export async function handleApi(request: Request, path: string[]) {
         return json(403, { error: "That address is suppressed and cannot receive test email." });
       }
 
-      const attachmentRows = await query<{ filename: string }>(
-        `SELECT filename FROM campaign_attachments WHERE campaign_id = $1 AND blocked = FALSE`,
-        [campaign.id],
-      );
-
       let fromEmail = campaign.from_email;
       // Reply-To only when the campaign sets one — not from SENDSTACK_REPLY_TO_EMAIL.
       let replyTo = campaign.reply_to_email || undefined;
@@ -1690,23 +1503,18 @@ export async function handleApi(request: Request, path: string[]) {
         }
       }
 
-      let footered: { html: string; text: string };
-      try {
-        footered = applyComplianceFooter(campaign.html_body, campaign.text_body, identity);
-      } catch (error) {
-        return json(400, { error: error instanceof Error ? error.message : "Campaign content could not be prepared." });
-      }
+      const authoredHtml = campaign.html_body ?? "";
+      const authoredText = campaign.text_body ?? "";
+      const usesOptOut = templateUsesOptOut(campaign.subject, authoredHtml, authoredText);
 
       const preflight = runCampaignPreflight({
         subject: campaign.subject,
-        htmlBody: footered.html,
-        textBody: footered.text,
+        htmlBody: authoredHtml,
+        textBody: authoredText,
         fromEmail: campaign.from_email,
         fromName: campaign.from_name,
-        attachmentExtensions: attachmentRows.rows.map((row) => row.filename.split(".").pop()?.toLowerCase() || ""),
-        attachmentCount: attachmentRows.rows.length,
         identity,
-        requirePublicHttps: isLive,
+        requirePublicHttps: isLive && usesOptOut,
       });
       if (!preflight.ok) {
         return json(400, { error: preflight.errors[0], errors: preflight.errors });
@@ -1768,13 +1576,12 @@ export async function handleApi(request: Request, path: string[]) {
         return json(429, { error: reserved.error, used: reserved.used, limit: reserved.limit });
       }
 
-      const sendAttachments = await loadCampaignAttachmentsForSend(campaign.id);
       const contact = { id: null as string | null, email: targetEmail, first_name: "Test", last_name: "Recipient" };
       const messageId = existingUnknown?.id || makeId("msg");
-      const unsubscribeToken = randomBytes(24).toString("base64url");
-      const unsubscribeUrl = `${config.publicUrl}/u/${unsubscribeToken}`;
-      const htmlBody = renderContactTemplate(footered.html, contact, unsubscribeUrl);
-      const textBody = renderContactTemplate(footered.text, contact, unsubscribeUrl);
+      const unsubscribeToken = usesOptOut ? randomBytes(24).toString("base64url") : null;
+      const unsubscribeUrl = unsubscribeToken ? `${config.publicUrl}/u/${unsubscribeToken}` : undefined;
+      const htmlBody = renderContactTemplate(authoredHtml, contact, unsubscribeUrl);
+      const textBody = renderContactTemplate(authoredText, contact, unsubscribeUrl);
       const subject = renderContactTemplate(`[TEST] ${campaign.subject}`, contact, unsubscribeUrl);
       const idempotencyKey =
         existingUnknown?.idempotency_key || buildIdempotencyKey(["test", campaign.id, targetEmail, attemptId]);
@@ -1799,17 +1606,13 @@ export async function handleApi(request: Request, path: string[]) {
           idempotencyKey,
           JSON.stringify({
             intent: "test-send",
-            ...(footered.html.includes("{{unsubscribe_url}}") ||
-            footered.text.includes("{{unsubscribe_url}}") ||
-            campaign.subject.includes("{{unsubscribe_url}}")
-              ? { opt_out_url: unsubscribeUrl }
-              : {}),
+            ...(unsubscribeUrl ? { opt_out_url: unsubscribeUrl } : {}),
           }),
           reserved.reservationId,
         ],
       );
 
-      const accepted: { current: { id: string } | null } = { current: null };
+      const accepted: { current: { id: string; raw?: string } | null } = { current: null };
       let providerAttempted = false;
       try {
         if (isLive) {
@@ -1848,7 +1651,6 @@ export async function handleApi(request: Request, path: string[]) {
               fromName: campaign.from_name,
               fromEmail,
               replyTo: replyTo || undefined,
-              attachments: sendAttachments,
             });
             if (accepted.current) {
               const raw =
@@ -1918,11 +1720,7 @@ export async function handleApi(request: Request, path: string[]) {
               JSON.stringify({
                 provider_id: accepted.current.id,
                 attempt_id: attemptId,
-                ...(footered.html.includes("{{unsubscribe_url}}") ||
-                footered.text.includes("{{unsubscribe_url}}") ||
-                campaign.subject.includes("{{unsubscribe_url}}")
-                  ? { opt_out_url: unsubscribeUrl }
-                  : {}),
+                ...(unsubscribeUrl ? { opt_out_url: unsubscribeUrl } : {}),
               }),
               messageId,
             ],
@@ -1959,10 +1757,6 @@ export async function handleApi(request: Request, path: string[]) {
     // Audience select/validate/persist happens inside claimAndPrepareCampaignLaunch (same TX).
     // Do not query live contacts here — that TOCTOU gap is closed by transactional freeze.
 
-    const attachmentRows = await query<{ filename: string }>(
-      `SELECT filename FROM campaign_attachments WHERE campaign_id = $1 AND blocked = FALSE`,
-      [campaign.id],
-    );
     let fromEmail = campaign.from_email;
     // Reply-To only when the campaign sets one — not from SENDSTACK_REPLY_TO_EMAIL.
     let replyTo: string | null = campaign.reply_to_email || null;
@@ -1974,23 +1768,18 @@ export async function handleApi(request: Request, path: string[]) {
       }
     }
 
-    let footered: { html: string; text: string };
-    try {
-      footered = applyComplianceFooter(campaign.html_body, campaign.text_body, identity);
-    } catch (error) {
-      return json(400, { error: error instanceof Error ? error.message : "Campaign content could not be prepared." });
-    }
+    const authoredHtml = campaign.html_body ?? "";
+    const authoredText = campaign.text_body ?? "";
+    const usesOptOut = templateUsesOptOut(campaign.subject, authoredHtml, authoredText);
 
     const preflight = runCampaignPreflight({
       subject: campaign.subject,
-      htmlBody: footered.html,
-      textBody: footered.text,
+      htmlBody: authoredHtml,
+      textBody: authoredText,
       fromEmail: campaign.from_email,
       fromName: campaign.from_name,
-      attachmentExtensions: attachmentRows.rows.map((row) => row.filename.split(".").pop()?.toLowerCase() || ""),
-      attachmentCount: attachmentRows.rows.length,
       identity,
-      requirePublicHttps: isLive,
+      requirePublicHttps: isLive && usesOptOut,
     });
     if (!preflight.ok) {
       return json(400, { error: preflight.errors[0], errors: preflight.errors });
@@ -2010,8 +1799,8 @@ export async function handleApi(request: Request, path: string[]) {
         liveMode: Boolean(isSmtpLaunch && isLive),
         fromEmail,
         replyToEmail: replyTo,
-        htmlBody: footered.html,
-        textBody: footered.text,
+        htmlBody: authoredHtml,
+        textBody: authoredText,
         validateLiveRecipients: Boolean(isSmtpLaunch && isLive),
       });
       if (prepared.totalRecipients === 0) {

@@ -1,4 +1,3 @@
-import { createHmac } from "crypto";
 import { readFileSync } from "fs";
 import { join } from "path";
 import { describe, expect, it } from "vitest";
@@ -6,11 +5,7 @@ import { requireCsrf, passwordChangeAllowedPath, type SessionUser } from "../lib
 import { hashPassword, verifyPassword, normalizeEmail, validEmail, makeId } from "../lib/ids";
 import { permissionsForRole, requiredPermission, ROLE_DEFINITIONS } from "../lib/rbac";
 import { validateEmailContent, renderTemplate } from "../lib/templates";
-import {
-  verifySvixSignature,
-  isTimestampFresh,
-  shouldReuseExistingBroadcast,
-} from "../lib/providers/webhook";
+import { isPermanentBounce } from "../lib/bounce-classification";
 import { liveSendAllowed } from "../lib/live-send";
 import { validateProductionEnv } from "../lib/env";
 
@@ -148,31 +143,11 @@ describe("live send kill switch", () => {
   });
 });
 
-describe("launch idempotency helper", () => {
-  it("reuses an existing provider broadcast id", () => {
-    expect(shouldReuseExistingBroadcast(null)).toBe(false);
-    expect(shouldReuseExistingBroadcast("bcast_123")).toBe(true);
-  });
-});
-
-describe("webhook signature and replay guards", () => {
-  it("accepts a matching svix-style hmac and rejects tampering", () => {
-    const secret = "whsec_" + Buffer.from("test-secret").toString("base64");
-    const key = Buffer.from(secret.slice(6), "base64");
-    const id = "msg_123";
-    const timestamp = "1710000000";
-    const body = '{"type":"email.delivered"}';
-    const expected = createHmac("sha256", key).update(`${id}.${timestamp}.${body}`).digest("base64");
-    expect(verifySvixSignature(secret, body, id, timestamp, `v1,${expected}`)).toBe(true);
-    expect(verifySvixSignature(secret, body, id, timestamp, `v1,${expected}tampered`)).toBe(false);
-    expect(verifySvixSignature(secret, '{"type":"other"}', id, timestamp, `v1,${expected}`)).toBe(false);
-  });
-
-  it("rejects stale timestamps and accepts fresh ones", () => {
-    const now = 1_700_000_000;
-    expect(isTimestampFresh(String(now), 300, now)).toBe(true);
-    expect(isTimestampFresh(String(now - 301), 300, now)).toBe(false);
-    expect(isTimestampFresh("not-a-number", 300, now)).toBe(false);
+describe("bounce classification helper", () => {
+  it("treats permanent and missing bounce types as suppressible", () => {
+    expect(isPermanentBounce({ data: { bounce: { type: "Permanent" } } })).toBe(true);
+    expect(isPermanentBounce({ data: { bounce: { type: "Transient" } } })).toBe(false);
+    expect(isPermanentBounce({})).toBe(true);
   });
 });
 
@@ -203,5 +178,10 @@ describe("Spacemail-style UI contract", () => {
     expect(appJs).not.toMatch(/data-feedback/);
     expect(appJs).not.toMatch(/Record hard bounce|Record complaint/);
     expect(appJs).not.toMatch(/\/api\/messages\/\$\{[^}]+\}\/event/);
+  });
+
+  it("has no campaign attachment upload UI", () => {
+    expect(appJs).not.toMatch(/attachment-input|attachment-panel|ATTACHMENT_MAX/);
+    expect(appJs).not.toMatch(/\/api\/campaigns\/\$\{[^}]+\}\/attachments/);
   });
 });

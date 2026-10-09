@@ -5,16 +5,20 @@ import { join } from "node:path";
 const drizzleDir = join(__dirname, "../drizzle");
 
 describe("migration idempotence and ordering", () => {
-  it("includes 0006 after 0005 and 0008 after 0007 without rewriting prior migrations", () => {
+  it("includes 0009 after 0008 without rewriting prior migrations", () => {
     const files = readdirSync(drizzleDir).filter((name) => name.endsWith(".sql")).sort();
     expect(files).toContain("0005_deliverability_hardening.sql");
     expect(files).toContain("0006_consent_volume_launch_hardening.sql");
     expect(files).toContain("0008_drop_consent_gate.sql");
+    expect(files).toContain("0009_spacemail_parity.sql");
     expect(files.indexOf("0006_consent_volume_launch_hardening.sql")).toBeGreaterThan(
       files.indexOf("0005_deliverability_hardening.sql"),
     );
     expect(files.indexOf("0008_drop_consent_gate.sql")).toBeGreaterThan(
       files.indexOf("0007_submission_state_machine.sql"),
+    );
+    expect(files.indexOf("0009_spacemail_parity.sql")).toBeGreaterThan(
+      files.indexOf("0008_drop_consent_gate.sql"),
     );
   });
 
@@ -26,16 +30,24 @@ describe("migration idempotence and ordering", () => {
     expect(sql).not.toMatch(/DROP TABLE/i);
   });
 
-  it("0006 preserves historical attachment and campaign data (additive SQL only)", () => {
+  it("0009 makes unsubscribe tokens optional and drops broadcast/attachment leftovers", () => {
+    const sql = readFileSync(join(drizzleDir, "0009_spacemail_parity.sql"), "utf8");
+    expect(sql).toMatch(/unsubscribe_token DROP NOT NULL/);
+    expect(sql).toMatch(/DROP TABLE IF EXISTS provider_events/);
+    expect(sql).toMatch(/DROP TABLE IF EXISTS campaign_attachments/);
+    expect(sql).toMatch(/DROP COLUMN IF EXISTS provider_broadcast_id/);
+    expect(sql).toMatch(/DROP COLUMN IF EXISTS consent_evidence/);
+    expect(sql).toMatch(/CHECK \(status IN \('active', 'suppressed'\)\)/);
+  });
+
+  it("0006 preserves historical campaign data (additive SQL only)", () => {
     const sql = readFileSync(join(drizzleDir, "0006_consent_volume_launch_hardening.sql"), "utf8");
     expect(sql).not.toMatch(/DROP TABLE/i);
     expect(sql).not.toMatch(/DELETE FROM campaigns/i);
     expect(sql).not.toMatch(/DELETE FROM messages/i);
-    expect(sql).not.toMatch(/DELETE FROM campaign_attachments/i);
     expect(sql).toMatch(/pending_consent/);
     expect(sql).toMatch(/daily_volume_reservations/);
     expect(sql).toMatch(/launch_jobs/);
-    // Historical contacts are demoted, not deleted.
     expect(sql).toMatch(/UPDATE contacts[\s\S]*pending_consent/);
   });
 

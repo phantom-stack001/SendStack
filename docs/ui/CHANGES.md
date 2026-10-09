@@ -1,6 +1,6 @@
 # CTN workspace UI changes
 
-The signed-in app is the static shell in `web/public/` (`index.html`, `app.js`, `styles.css`), served by the Next.js rewrite `/app` → `/index.html`. The public site stays in `web/app/`. The older Python demo in `app/static/` was left as it is.
+The signed-in app is the static shell in `web/public/` (`index.html`, `app.js`, `styles.css`), served by the Next.js rewrite `/app` → `/index.html`. The public site stays in `web/app/`.
 
 No API route, request or response shape, permission check, or database schema was changed. Outbound mail was not sent.
 
@@ -33,7 +33,7 @@ Asset size before → after:
 
 **Contacts.** One header with the count, Import, and Add contact. Lists are a rail (tabs on a narrow screen) with counts and New list. “Shown” is gone. The add form fills the dialog, marks required fields, validates email on blur, and offers Create a list when none exist. Consent source is a labelled list; an optional note is stored in the existing consent-source string. Import is upload, column mapping, then a consent confirmation and the existing import call. The table sorts the loaded rows, can select and delete via the existing delete call, and opens a drawer with the consent record the API returns.
 
-**Campaigns.** The list shows status, audience, sent/total, and created time, with a status filter. The composer is a full page at `#/campaigns/new` or `#/campaigns/:id`, with preview width, light/dark frame, and a sample contact. Starter copy is inserted only if you ask for it. The toolbar can add a link and `{{first_name}}`, `{{last_name}}`, `{{email}}`, or `{{unsubscribe_url}}`. A before-you-send list mirrors the checks the server already enforces. Drafts autosave when subject, list, and sender are present, and leaving warns about unsaved changes. Live launch asks for a checkbox and the word SEND, and shows eligible count, From, Reply-To, and a rough time from today’s remaining allowance and the 500-per-hour cap already stated in the product.
+**Campaigns.** The list shows status, audience, sent/total, and created time, with a status filter. The composer is a full page at `#/campaigns/new` or `#/campaigns/:id`, with preview width, light/dark frame, and a sample contact. Starter copy is inserted only if you ask for it. The toolbar can add a link and `{{first_name}}`, `{{last_name}}`, `{{email}}`, or optional `{{unsubscribe_url}}`. There is no attachment upload. A before-you-send list mirrors the checks the server already enforces. Drafts autosave when subject, list, and sender are present, and leaving warns about unsaved changes. Live launch asks for a checkbox and the word SEND, and shows eligible count, From, Reply-To, and a rough time from today’s remaining allowance and the 500-per-hour cap already stated in the product.
 
 **Deliveries.** One status list covers the eight filters the API accepts, plus a note that Delayed can appear but cannot be filtered. Filters hide when there is nothing to filter. A row opens a drawer with the rendered message and the timestamps on that record. Analysts get the role explanation.
 

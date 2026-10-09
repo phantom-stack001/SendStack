@@ -1,7 +1,7 @@
 import { getPool } from "./db";
 import { makeId, normalizeEmail } from "./ids";
 
-export type ContactStatus = "active" | "suppressed" | "pending_consent";
+export type ContactStatus = "active" | "suppressed";
 
 export function isSendableContactStatus(status: string): boolean {
   return status === "active";
