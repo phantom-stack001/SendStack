@@ -1,97 +1,39 @@
-# Python
-__pycache__/
-*.py[cod]
-*$py.class
-*.so
-.Python
-build/
-develop-eggs/
+# Dependencies & build
+node_modules/
 dist/
-downloads/
-eggs/
-.eggs/
-/lib/
-/lib64/
-parts/
-sdist/
-var/
-wheels/
-*.egg-info/
-.installed.cfg
-*.egg
-.pytest_cache/
-.mypy_cache/
-.ruff_cache/
-.coverage
-htmlcov/
-.tox/
-.nox/
+dist-ssr/
 
-# Virtual environments
-.venv/
-venv/
-ENV/
-env/
-
-# Environment / secrets
+# Environment & secrets
 .env
 .env.*
 !.env.example
-!**/.env.example
 
-# Local databases (keep data/.gitkeep)
-data/*.db
-data/*.db-*
-*.sqlite
-*.sqlite3
+# Logs & debug
+*.log
+npm-debug.log*
+pnpm-debug.log*
+yarn-debug.log*
+yarn-error.log*
 
-# OS
-.DS_Store
-**/.DS_Store
-.AppleDouble
-.LSOverride
-Thumbs.db
-Desktop.ini
-
-# Editors / IDEs
+# Editor & local tooling
+.cursor/
 .idea/
-.vscode/
+.vscode/*
+!.vscode/extensions.json
 *.swp
 *.swo
 *~
-.cursor/
-.history/
 
-# Logs and temp
-*.log
-*.tmp
-*.temp
-.cache/
-tmp/
-temp/
+# OS
+.DS_Store
+Thumbs.db
 
-# Node / package managers
-node_modules/
-web/node_modules/
-.pnpm-store/
-npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
-pnpm-debug.log*
+# TypeScript / Vite cache
+*.tsbuildinfo
+.vite/
 
-# Next.js / Vercel (web app)
-web/.next/
-web/out/
-web/coverage/
-web/.vercel/
-web/*.tsbuildinfo
-
-# Test / tooling output
+# Test & coverage (future)
 coverage/
-.nyc_output/
-playwright-report/
-test-results/
-.turbo/
 
-# Docker overrides
-docker-compose.override.yml
+# Optional local Herd / PHP noise (if linked nearby)
+.phpunit.result.cache

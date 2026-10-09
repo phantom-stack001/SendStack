@@ -1,0 +1,31 @@
+.legal-page .page {
+  min-height: 100vh;
+}
+
+.legal-back {
+  display: inline-block;
+  margin-bottom: 1.5rem;
+  color: var(--accent-strong);
+  text-decoration: none;
+  font-weight: 600;
+}
+
+.legal-back:hover {
+  text-decoration: underline;
+}
+
+.legal-prose h2 {
+  margin: 2rem 0 0.75rem;
+  font-size: 1.2rem;
+  color: var(--ink);
+}
+
+.legal-prose ul {
+  margin: 0 0 1rem;
+  padding-left: 1.2rem;
+  color: var(--muted);
+}
+
+.legal-prose li {
+  margin-bottom: 0.35rem;
+}
