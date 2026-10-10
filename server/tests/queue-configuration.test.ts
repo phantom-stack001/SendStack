@@ -19,4 +19,13 @@ describe("queue configuration", () => {
     });
     expect(parsed.success).toBe(false);
   });
+
+  it("rejects non-redis REDIS_URL values when queue is enabled", () => {
+    const parsed = queueEnvSchema.safeParse({
+      QUEUE_ENABLED: "true",
+      QUEUE_SIMULATION_ONLY: "true",
+      REDIS_URL: "https://example.upstash.io",
+    });
+    expect(parsed.success).toBe(false);
+  });
 });

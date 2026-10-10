@@ -18,6 +18,8 @@
     "typecheck": "tsc -b --noEmit",
     "test": "vitest run",
     "queue:reconcile": "tsx server/scripts/queue-reconcile.ts",
+    "queue:check": "tsx server/scripts/queue-check.ts",
+    "queue:check:production": "tsx server/scripts/queue-check.ts --production",
     "db:generate": "drizzle-kit generate",
     "db:migrate": "drizzle-kit migrate",
     "db:inspect": "tsx server/scripts/inspect-database.ts",

@@ -37,10 +37,14 @@ export function validateConfirmPassword(password: string, confirm: string) {
 
 export function mapAuthErrorMessage(message: string) {
   const normalized = message.toLowerCase();
-  if (normalized.includes("invalid") && normalized.includes("credential")) {
+  if (
+    normalized.includes("invalid email or password") ||
+    normalized.includes("invalid_email_or_password") ||
+    (normalized.includes("invalid") && normalized.includes("credential"))
+  ) {
     return "Invalid email or password.";
   }
-  if (normalized.includes("verify")) {
+  if (normalized.includes("verify") || normalized.includes("not verified")) {
     return "Verify your email before signing in. Check your inbox for a verification link.";
   }
   return "Unable to complete the request. Please try again.";

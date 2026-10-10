@@ -1,5 +1,7 @@
 import { z } from "zod";
 
+import { assertRedisProtocolUrl } from "./redis-url.js";
+
 export const QUEUE_NAMES = {
   campaignDispatch: "sendstack-campaign-dispatch",
   emailProcessing: "sendstack-email-processing",
@@ -50,6 +52,17 @@ export const queueEnvSchema = z
         message: "REDIS_URL is required when QUEUE_ENABLED=true",
         path: ["REDIS_URL"],
       });
+    }
+    if (data.QUEUE_ENABLED && data.REDIS_URL?.trim()) {
+      try {
+        assertRedisProtocolUrl(data.REDIS_URL.trim());
+      } catch (error) {
+        ctx.addIssue({
+          code: "custom",
+          message: error instanceof Error ? error.message : "Invalid REDIS_URL",
+          path: ["REDIS_URL"],
+        });
+      }
     }
   });
 

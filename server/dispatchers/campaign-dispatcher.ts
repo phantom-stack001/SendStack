@@ -3,7 +3,10 @@ import { Worker } from "bullmq";
 import { createDb } from "../db/index.js";
 import { loadEnv } from "../env.js";
 import { QUEUE_NAMES, loadQueueEnv } from "../queue/configuration.js";
-import { closeRedisConnection, getRedisConnection } from "../queue/connection.js";
+import {
+  closeRedisConnection,
+  getWorkerRedisConnection,
+} from "../queue/connection.js";
 import type { CampaignDispatchJobData } from "../queue/job-types.js";
 import { closeQueues } from "../queue/queues.js";
 import { dispatchCampaignJobs } from "../services/queue-service.js";
@@ -14,16 +17,18 @@ const queueEnv = loadQueueEnv();
 const { db, client } = createDb(env);
 
 let worker: Worker<CampaignDispatchJobData> | null = null;
+let workerConnection: ReturnType<typeof getWorkerRedisConnection> | null = null;
 let reconcileTimer: ReturnType<typeof setInterval> | null = null;
 
 function startDispatcher() {
+  workerConnection = getWorkerRedisConnection();
   worker = new Worker<CampaignDispatchJobData>(
     QUEUE_NAMES.campaignDispatch,
     async (job) => {
       await dispatchCampaignJobs(db, job.data.campaignId);
     },
     {
-      connection: getRedisConnection(),
+      connection: workerConnection,
       concurrency: 2,
     },
   );
@@ -39,6 +44,8 @@ async function shutdown(signal: string) {
   console.info(`[dispatcher] shutting down (${signal})`);
   if (reconcileTimer) clearInterval(reconcileTimer);
   await worker?.close();
+  await workerConnection?.quit();
+  workerConnection = null;
   await closeQueues();
   await closeRedisConnection();
   await client.end({ timeout: 5 });

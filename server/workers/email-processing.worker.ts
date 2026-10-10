@@ -4,7 +4,10 @@ import { createDb } from "../db/index.js";
 import { deliveryJobs } from "../db/schema.js";
 import { loadEnv } from "../env.js";
 import { QUEUE_NAMES, loadQueueEnv } from "../queue/configuration.js";
-import { closeRedisConnection, getRedisConnection } from "../queue/connection.js";
+import {
+  closeRedisConnection,
+  getWorkerRedisConnection,
+} from "../queue/connection.js";
 import type { EmailProcessingJobData } from "../queue/job-types.js";
 import { closeQueues } from "../queue/queues.js";
 import {
@@ -20,6 +23,7 @@ const queueEnv = loadQueueEnv();
 const { db, client } = createDb(env);
 
 let worker: Worker<EmailProcessingJobData> | null = null;
+let workerConnection: ReturnType<typeof getWorkerRedisConnection> | null = null;
 
 async function processJob(deliveryJobId: string) {
   const [job] = await db.select().from(deliveryJobs).where(eq(deliveryJobs.id, deliveryJobId)).limit(1);
@@ -58,13 +62,14 @@ async function processJob(deliveryJobId: string) {
 }
 
 function startWorker() {
+  workerConnection = getWorkerRedisConnection();
   worker = new Worker<EmailProcessingJobData>(
     QUEUE_NAMES.emailProcessing,
     async (bullJob) => {
       await processJob(bullJob.data.deliveryJobId);
     },
     {
-      connection: getRedisConnection(),
+      connection: workerConnection,
       concurrency: queueEnv.QUEUE_WORKER_CONCURRENCY,
       limiter: {
         max: queueEnv.QUEUE_MAX_JOBS_PER_SECOND,
@@ -81,6 +86,8 @@ function startWorker() {
 async function shutdown(signal: string) {
   console.info(`[worker:email-processing] shutting down (${signal})`);
   await worker?.close();
+  await workerConnection?.quit();
+  workerConnection = null;
   await closeQueues();
   await closeRedisConnection();
   await client.end({ timeout: 5 });

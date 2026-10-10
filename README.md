@@ -422,6 +422,8 @@ Ownership is enforced on campaigns, drafts, contacts, and lists. Cross-user IDs 
 
 Phase 7 adds **Redis + BullMQ** workers for **simulation-only** campaign processing. Campaign workers do not send email. Direct mailbox SMTP is a separate path and is not wired into these workers.
 
+**Neon PostgreSQL** remains the durable source of truth (`delivery_jobs`, campaigns, audit events). **Redis** (local or [Upstash](https://upstash.com/docs/redis/overall/getstarted)) only coordinates BullMQ workers—it does not replace the database.
+
 ### Processes
 
 | Script | Role |
@@ -430,18 +432,42 @@ Phase 7 adds **Redis + BullMQ** workers for **simulation-only** campaign process
 | `npm run dev:dispatcher` | Publishes pending `delivery_jobs` to BullMQ |
 | `npm run dev:worker` | Simulates per-recipient jobs |
 | `npm run queue:reconcile` | Republish orphaned pending jobs |
+| `npm run queue:check` | Safe Redis/BullMQ connectivity diagnostic (no secrets in output) |
+
+Upstash does **not** run BullMQ workers for you. In production you still need **three long-lived Node processes** (or equivalent containers): API, dispatcher, and worker. Do not run workers inside short-lived serverless handlers (for example a Vercel function).
 
 ### Environment (server only)
 
-`QUEUE_ENABLED`, `QUEUE_SIMULATION_ONLY=true` (required), `REDIS_URL`, `QUEUE_WORKER_CONCURRENCY`, `QUEUE_MAX_JOBS_PER_SECOND`, `QUEUE_MAX_ATTEMPTS`, `QUEUE_JOB_RETENTION_DAYS`, `QUEUE_SIMULATION_DELAY_MS`.
+| Variable | Purpose |
+| --- | --- |
+| `DATABASE_URL` | Neon PostgreSQL (unchanged) |
+| `REDIS_URL` | `redis://` (local) or `rediss://` (Upstash TCP/TLS). **Not** the Upstash REST URL. |
+| `QUEUE_ENABLED` | `true` when Redis is configured |
+| `QUEUE_SIMULATION_ONLY` | Must stay `true` (simulation only; no campaign SMTP) |
+| `QUEUE_WORKER_CONCURRENCY` | Worker parallelism (default `2`) |
+| `QUEUE_MAX_JOBS_PER_SECOND` | Worker rate limit (default `5`; production often `1`) |
+| `QUEUE_MAX_ATTEMPTS` | BullMQ retry attempts |
+| `QUEUE_JOB_RETENTION_DAYS` | Completed/failed job retention in Redis |
+| `QUEUE_SIMULATION_DELAY_MS` | Artificial delay per simulated job |
 
 The API starts without Redis when `QUEUE_ENABLED=false`.
+
+**Upstash setup:** create a Redis database, copy the **TCP** connection string (`rediss://…`), set it as `REDIS_URL` on the host that runs the dispatcher and worker. Use a separate Upstash database for development. TLS uses default certificate validation (no `rejectUnauthorized: false`).
+
+**Shared Neon warning:** if `.env` and `.env.production` point at the same `DATABASE_URL`, local and production share one database. Use a Neon **branch** for development and avoid destructive queue tests against production data.
+
+### Redis diagnostics
+
+```bash
+npm run queue:check           # PING + TLS/scheme summary (no credentials logged)
+npm run queue:check -- --bullmq # Also enqueue/remove a probe job (BullMQ compatibility)
+```
 
 ### Database tables
 
 `delivery_jobs`, `delivery_job_attempts`, `queue_events` (migration `0004_queue_infrastructure.sql`).
 
-Durable jobs are created in PostgreSQL first; the dispatcher publishes to BullMQ (`sendstack:campaign-dispatch`, `sendstack:email-processing`).
+Durable jobs are created in PostgreSQL first; the dispatcher publishes to BullMQ (`sendstack-campaign-dispatch`, `sendstack-email-processing`).
 
 ### Queue APIs
 
@@ -469,7 +495,15 @@ Scheduling, pause/resume, cancellation, retries, and Redis interruption should b
 
 ### Production deployment
 
-The static `dist/` SPA alone is **not** sufficient: you need a Node (or serverless) host for `server/` with `DATABASE_URL` and auth secrets, plus reverse-proxy `/api` to that service (or deploy frontend and API on one origin). Update `vercel.json` / hosting accordingly—do not expose Neon credentials to the browser.
+| Component | Hosting notes |
+| --- | --- |
+| **SPA** (`dist/`) | Static host (e.g. Vercel) per `vercel.json` |
+| **Hono API** | Node service with `DATABASE_URL`, auth secrets, optional `QUEUE_ENABLED` for enqueue APIs |
+| **Dispatcher** | Persistent Node: `node` / `tsx server/dispatchers/campaign-dispatcher.ts` |
+| **Worker** | Persistent Node: `node` / `tsx server/workers/email-processing.worker.ts` |
+| **Redis** | Upstash (or other Redis) via `REDIS_URL` — required when `QUEUE_ENABLED=true` |
+
+The static `dist/` SPA alone is **not** sufficient: you need a Node host for `server/` with `DATABASE_URL` and auth secrets, plus reverse-proxy `/api` to that service (or deploy frontend and API on one origin). Do not expose Neon or Redis credentials to the browser (`VITE_` prefix must never carry secrets).
 
 ## Direct mailbox
 
