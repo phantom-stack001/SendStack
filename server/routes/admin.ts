@@ -155,7 +155,11 @@ export function registerAdminRoutes(app: Hono) {
     const result = await manuallyVerifyUserEmail(
       db,
       { id: account.id, role: (account as { role?: string | null }).role, banned: false },
-      { userId: c.req.param("userId"), ...parsed.data },
+      {
+        userId: c.req.param("userId"),
+        confirmed: parsed.data.confirmed,
+        expectedEmail: parsed.data.expectedEmail,
+      },
     );
     if (!result.ok) return json(c, { error: result.error }, result.status);
     const detail = await getAdminUser(db, c.req.param("userId"));

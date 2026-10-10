@@ -3,8 +3,7 @@ import { z } from "zod";
 import { validatePassword } from "../lib/password-policy.js";
 
 export const manualEmailVerificationSchema = z.object({
-  confirmed: z.literal(true, { error: "Confirm that you verified control of this email address." }),
-  reason: z.string().trim().min(12, "Enter a verification reason.").max(400),
+  confirmed: z.literal(true, { error: "Confirm that you have verified this user's email address." }),
   expectedEmail: z.email(),
 });
 

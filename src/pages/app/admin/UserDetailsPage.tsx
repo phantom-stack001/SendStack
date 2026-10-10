@@ -16,7 +16,6 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
-import { Textarea } from "@/components/ui/textarea";
 import { authClient } from "@/lib/auth-client";
 
 type UserDetail = {
@@ -50,7 +49,6 @@ export function UserDetailsPage() {
   const [message, setMessage] = useState<string | null>(null);
   const [verifyOpen, setVerifyOpen] = useState(false);
   const [acknowledged, setAcknowledged] = useState(false);
-  const [reason, setReason] = useState("");
   const [verifying, setVerifying] = useState(false);
   const { data: session } = authClient.useSession();
   const isSuperAdmin = ((session?.user as { role?: string } | undefined)?.role ?? "")
@@ -128,13 +126,12 @@ export function UserDetailsPage() {
 
   function openVerify() {
     setAcknowledged(false);
-    setReason("");
     setError(null);
     setVerifyOpen(true);
   }
 
   async function confirmVerify() {
-    if (!account || verifying) return;
+    if (!account || verifying || !acknowledged) return;
     setVerifying(true);
     setError(null);
     const response = await fetch(`/api/admin/users/${userId}/verify-email`, {
@@ -143,17 +140,19 @@ export function UserDetailsPage() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         confirmed: true,
-        reason,
         expectedEmail: account.email,
       }),
     });
     const payload = await response.json();
     setVerifying(false);
-    if (!response.ok) {
+    if (!response.ok || !payload.user) {
       setError(payload.error ?? "Could not verify this email address.");
       return;
     }
     setAccount(payload.user);
+    setName(payload.user.name);
+    setRoles(payload.user.roles);
+    setAcknowledged(false);
     setVerifyOpen(false);
     setMessage("Email address manually verified.");
   }
@@ -184,8 +183,8 @@ export function UserDetailsPage() {
           actions={<Button variant="outline" asChild><Link to="/app/admin/users/">Back</Link></Button>}
         />
         {created ? <p className="text-sm" role="status">User created successfully.</p> : null}
-        {error ? <p className="text-sm text-destructive">{error}</p> : null}
-        {message ? <p className="text-sm">{message}</p> : null}
+        {error && !verifyOpen ? <p className="text-sm text-destructive">{error}</p> : null}
+        {message ? <p className="text-sm" role="status">{message}</p> : null}
         <div className="grid gap-4 lg:grid-cols-2">
           <Card>
             <CardHeader><CardTitle>Profile</CardTitle></CardHeader>
@@ -271,7 +270,7 @@ export function UserDetailsPage() {
             <DialogHeader>
               <DialogTitle>Verify Email Manually</DialogTitle>
               <DialogDescription>
-                You are about to mark this user&apos;s email address as verified without requiring them to open a verification link. Only continue if you have independently confirmed that the user controls this email address.
+                Confirm that you have verified this user&apos;s email address.
               </DialogDescription>
             </DialogHeader>
             <div className="space-y-2 text-sm">
@@ -286,22 +285,14 @@ export function UserDetailsPage() {
                 checked={acknowledged}
                 onChange={(event) => setAcknowledged(event.target.checked)}
               />
-              <span>
-                I have independently confirmed that this person controls this email address. Administrative access alone is not proof of ownership, and I am not verifying it only because a message could not be delivered.
-              </span>
+              <span>I confirm that I have verified this user&apos;s email address.</span>
             </label>
-            <Textarea
-              value={reason}
-              onChange={(event) => setReason(event.target.value)}
-              placeholder="Verified ownership through an approved internal identity check."
-              aria-label="Verification reason"
-              rows={4}
-            />
+            {error ? <p className="text-sm text-destructive" role="alert">{error}</p> : null}
             <DialogFooter className="gap-2">
               <Button type="button" variant="outline" disabled={verifying} onClick={() => setVerifyOpen(false)}>Cancel</Button>
               <Button
                 type="button"
-                disabled={verifying || !acknowledged || reason.trim().length < 12}
+                disabled={verifying || !acknowledged}
                 onClick={() => void confirmVerify()}
               >
                 {verifying ? "Verifying…" : "Confirm Verification"}

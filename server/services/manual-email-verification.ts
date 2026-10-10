@@ -16,9 +16,15 @@ export type ManualVerifyActor = {
 export type ManualVerifyInput = {
   userId: string;
   expectedEmail: string;
-  reason: string;
-  confirmed: true;
+  confirmed: boolean;
 };
+
+export function manualEmailVerificationAuditMetadata(email: string) {
+  return {
+    email,
+    verificationMethod: "manual" as const,
+  };
+}
 
 export type EmailVerificationView = {
   status: "verified" | "unverified";
@@ -82,11 +88,17 @@ export async function applyManualEmailVerification(input: {
     actorUserId: string;
     targetUserId: string;
     email: string;
-    reason: string;
   }) => Promise<void>;
 }) {
   const actorError = manualVerifyActorError(input.actor, input.actorAccessStatus ?? "active");
   if (actorError) return { ok: false as const, status: 403 as const, error: actorError };
+  if (input.request.confirmed !== true) {
+    return {
+      ok: false as const,
+      status: 400 as const,
+      error: "Confirm that you have verified this user's email address.",
+    };
+  }
 
   const target = await input.loadTarget();
   if (!target) return { ok: false as const, status: 404 as const, error: "User not found" };
@@ -110,7 +122,6 @@ export async function applyManualEmailVerification(input: {
     actorUserId: input.actor.id,
     targetUserId: target.id,
     email: target.email,
-    reason: input.request.reason.trim(),
   });
 
   return {
@@ -171,11 +182,7 @@ export async function manuallyVerifyUserEmail(
           actorUserId: event.actorUserId,
           targetUserId: event.targetUserId,
           action: MANUAL_EMAIL_VERIFICATION_ACTION,
-          metadata: {
-            email: event.email,
-            verificationMethod: "manual",
-            reason: event.reason,
-          },
+          metadata: manualEmailVerificationAuditMetadata(event.email),
         });
       },
     });
