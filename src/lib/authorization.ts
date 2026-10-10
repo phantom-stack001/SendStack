@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 
 import { authClient } from "@/lib/auth-client";
 
-const SUPER_ADMIN_NAV = ["mailbox.read", "users.read", "roles.read", "audit.read"];
+const SUPER_ADMIN_NAV = ["mailbox.read", "mailbox.send", "users.read", "roles.read", "audit.read"];
 
 export function useAuthorization() {
   const { data: session } = authClient.useSession();

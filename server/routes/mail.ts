@@ -16,7 +16,10 @@ import {
 } from "../mail/imap.js";
 import { getMailboxStatus, testMailboxConnection } from "../services/mail-connection.js";
 import { sendControlledTest } from "../services/mail-test-send.js";
-import { mailboxFolderSchema, mailPageQuerySchema, mailUidSchema, testSendSchema } from "../validation/mail.js";
+import { sendIndividualEmail } from "../services/individual-send.js";
+import { listIndividualSubmissions } from "../services/individual-send-records.js";
+import { toPublicIndividualSend } from "../mail/individual-send-public.js";
+import { mailboxFolderSchema, mailPageQuerySchema, mailUidSchema, testSendSchema, individualSendSchema, individualSendListQuerySchema } from "../validation/mail.js";
 
 const env = loadEnv();
 const { db } = createDb(env);
@@ -120,6 +123,73 @@ export function registerMailRoutes(app: Hono) {
       }
       throw error;
     }
+  });
+
+  app.get("/api/mail/sends", async (c) => {
+    const access = await requireMailbox(c, "mailbox.send");
+    if ("response" in access) return access.response;
+    const parsed = individualSendListQuerySchema.safeParse({
+      page: c.req.query("page") ?? "1",
+      limit: c.req.query("limit") ?? "10",
+    });
+    if (!parsed.success) return json(c, validationError(parsed.error), 400);
+    const { rows, total } = await listIndividualSubmissions(
+      db,
+      access.user.id,
+      parsed.data.page,
+      parsed.data.limit,
+    );
+    return json(c, {
+      submissions: rows.map((row) => toPublicIndividualSend(row)),
+      pagination: {
+        page: parsed.data.page,
+        limit: parsed.data.limit,
+        total,
+        totalPages: Math.max(1, Math.ceil(total / parsed.data.limit)),
+      },
+    });
+  });
+
+  app.post("/api/mail/send", async (c) => {
+    const access = await requireMailbox(c, "mailbox.send");
+    if ("response" in access) return access.response;
+
+    let body: unknown;
+    try {
+      body = await c.req.json();
+    } catch {
+      return json(c, { error: "Invalid JSON body" }, 400);
+    }
+    const parsed = individualSendSchema.safeParse(body);
+    if (!parsed.success) return json(c, validationError(parsed.error), 400);
+
+    const outcome = await sendIndividualEmail(db, access.user.id, {
+      ...parsed.data,
+      draftId: parsed.data.draftId ?? null,
+    });
+    if (outcome.kind === "not_configured") {
+      return json(c, { error: "Email account is not configured on the server." }, 503);
+    }
+    if (outcome.kind === "invalid") return json(c, { error: outcome.message }, 400);
+    if (outcome.kind === "forbidden_draft") return json(c, { error: "Draft not found." }, 404);
+    if (outcome.kind === "rate_limited") return json(c, { error: outcome.message }, 429);
+    if (outcome.kind === "in_progress") {
+      return json(c, { error: "This message is already being sent.", submission: outcome.submission }, 409);
+    }
+    if (outcome.kind === "duplicate") {
+      return json(c, { submission: outcome.submission, duplicate: true });
+    }
+    if (outcome.kind === "accepted") {
+      return json(c, { submission: outcome.submission, duplicate: false });
+    }
+    if (outcome.kind === "uncertain") {
+      return json(c, { error: outcome.submission.note, submission: outcome.submission }, 409);
+    }
+    return json(
+      c,
+      { error: outcome.submission.errorMessage ?? outcome.submission.note, submission: outcome.submission },
+      502,
+    );
   });
 
   app.get("/api/mail/folders", async (c) => {

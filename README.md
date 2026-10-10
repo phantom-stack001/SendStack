@@ -537,9 +537,41 @@ POP3 is not implemented.
 
 All of these require a Better Auth session and the `mailbox.read`, `mailbox.send_test`, or `mailbox.manage_connection` permission. By default only `super-admin` has those permissions.
 
-`GET /api/mail/status`, `POST /api/mail/test-connection`, `POST /api/mail/test-send`, `GET /api/mail/folders`, `GET /api/mail/inbox`, `GET /api/mail/sent`, `GET /api/mail/mailbox`, `GET /api/mail/messages/:uid`.
+`GET /api/mail/status`, `POST /api/mail/test-connection`, `POST /api/mail/test-send`, `POST /api/mail/send`, `GET /api/mail/sends`, `GET /api/mail/folders`, `GET /api/mail/inbox`, `GET /api/mail/sent`, `GET /api/mail/mailbox`, `GET /api/mail/messages/:uid`.
 
 Test sending requires `confirm: true`, a UUID idempotency key, and the server-side recipient. The limit is one message per minute and three per hour. The UI asks for confirmation before the request is sent.
+
+## Direct composer sending (Phase 9)
+
+The composer can submit one individual message through the same server-side SMTP account used for the controlled test send. Campaign workers stay simulation-only (`QUEUE_SIMULATION_ONLY=true`). This does not start a Redis worker.
+
+### What the composer does
+
+To is required. Cc and Bcc are optional. Addresses can be typed, pasted as a comma-separated list, or chosen from the signed-in user's saved contacts. Choosing a contact does not change that contact's consent. Duplicate addresses in one field are kept once. The same address in two fields is rejected. The server validates every address again.
+
+Bcc is placed on the SMTP envelope only. It is not added to the To or Cc headers of the message that recipients receive. The review step shows Bcc only to the person sending. Ordinary history rows show a Bcc count, not a shared copy of the list for other users.
+
+The sender is always the configured mailbox (`SPACEMAIL_EMAIL`). A draft that names a different sender is not sent. The composer explains the difference and can switch the field to the authorized address. The browser cannot supply SMTP credentials or another user's id.
+
+### Who can send
+
+`mailbox.send` is separate from `mailbox.send_test`. Only the super-admin role template includes it. The API checks the permission even if the Send button is hidden. Other roles do not receive it automatically.
+
+### Who can receive
+
+For this phase, every recipient must be the configured test recipient (`SPACEMAIL_TEST_RECIPIENT`). An address is still blocked when that user has a suppression for it, or when a saved contact with that address is unsubscribed, pending, or missing recorded consent. Typing an address does not create consent.
+
+At most 3 recipients are accepted, and at most 5 individual submissions per hour, with at least one minute between them. These are application defaults, not a verified provider quota.
+
+### What gets stored
+
+`POST /api/mail/send` writes `individual_email_submissions` in Neon before SMTP starts. Statuses are `pending` (not yet submitted), `submitting` (SMTP has started), `accepted`, `rejected`, `failed`, and `uncertain`. The same idempotency key does not call SMTP again. A retry that finds `submitting` is recorded as `uncertain` and is not sent again. A `pending` row can still be continued because SMTP had not started. SMTP itself cannot promise exactly-once delivery.
+
+`accepted` means the outgoing server accepted the message. It does not mean the recipient inbox delivered it. After acceptance, SendStack appends one IMAP Sent copy when that Message-ID is not already there. If the Sent copy fails, the submission stays `accepted` and the sent-copy status records the failure.
+
+Drafts are not deleted when a message is sent. Sending history at `/app/history/` lists these records only. It does not include simulated campaign jobs.
+
+The API runs in a Vercel Function: each send opens SMTP and IMAP for that request, with the existing connection timeouts, and does not keep a process-wide mail connection or start a campaign worker.
 
 ## Administration (Phase 8)
 

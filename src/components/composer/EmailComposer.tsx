@@ -3,8 +3,11 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { useBlocker, useNavigate } from "react-router-dom";
 
 import { ComposerHeader } from "@/components/composer/ComposerHeader";
+import { ContactPickerDialog } from "@/components/composer/ContactPickerDialog";
 import { EmailPreview } from "@/components/composer/EmailPreview";
+import { RecipientField } from "@/components/composer/RecipientField";
 import { RichTextEditor } from "@/components/composer/RichTextEditor";
+import { SendReviewDialog } from "@/components/composer/SendReviewDialog";
 import { SenderFields } from "@/components/composer/SenderFields";
 import { SubjectField } from "@/components/composer/SubjectField";
 import {
@@ -21,7 +24,16 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { DraftApiError, type Draft, type DraftInput } from "@/lib/drafts-api";
 import { buildFormStateFromDraft, type ComposerFormState } from "@/lib/composer-form";
 import { isValidSenderEmail } from "@/lib/email-content";
+import { useAuthorization } from "@/lib/authorization";
+import { getMailStatus, MailApiError, sendIndividualEmail, type IndividualSend } from "@/lib/mail-api";
+import { addRecipients, recipientFieldError, type RecipientFieldName } from "@/lib/recipient-input";
 import { composerExtensions } from "@/lib/tiptap-extensions";
+
+function submissionFromSend(error: MailApiError): IndividualSend | null {
+  const details = error.details;
+  if (!details || typeof details !== "object" || !("submission" in details)) return null;
+  return details.submission as IndividualSend;
+}
 
 function statesEqual(a: ComposerFormState, b: ComposerFormState) {
   return (
@@ -54,9 +66,26 @@ export function EmailComposer({
   const [saveError, setSaveError] = useState<string | null>(null);
   const [saveSuccess, setSaveSuccess] = useState<string | null>(null);
   const [previewOpen, setPreviewOpen] = useState(false);
+  const [pickerField, setPickerField] = useState<RecipientFieldName | null>(null);
+  const [reviewOpen, setReviewOpen] = useState(false);
+  const [recipientError, setRecipientError] = useState<string | null>(null);
+  const [sendPhase, setSendPhase] = useState<"idle" | "sending" | "submitted" | "failed" | "uncertain">("idle");
+  const [sendMessage, setSendMessage] = useState<string | null>(null);
+  const [idempotencyKey, setIdempotencyKey] = useState<string | null>(null);
+  const [authorizedSender, setAuthorizedSender] = useState<string | null>(null);
+  const { can } = useAuthorization();
+  const canSend = can("mailbox.send");
+
+  useEffect(() => {
+    if (!canSend) return;
+    void getMailStatus()
+      .then((status) => setAuthorizedSender(status.accountEmail))
+      .catch(() => undefined);
+  }, [canSend]);
 
   const dirty = !statesEqual(form, savedSnapshot);
-  const blocker = useBlocker(dirty && !saving);
+  const sending = sendPhase === "sending";
+  const blocker = useBlocker(dirty && !saving && !sending);
   const navigationBlocked = blocker.state === "blocked";
 
   useEffect(() => {
@@ -100,8 +129,13 @@ export function EmailComposer({
         currentDraftId,
       );
 
-      const snapshot = buildFormStateFromDraft(saved);
-      setSavedSnapshot(snapshot);
+      const snapshot = {
+        ...buildFormStateFromDraft(saved),
+        to: form.to,
+        cc: form.cc,
+        bcc: form.bcc,
+      };
+      setSavedSnapshot({ ...snapshot, to: [], cc: [], bcc: [] });
       setForm(snapshot);
       setSaveSuccess("Draft saved.");
       setCurrentDraftId(saved.id);
@@ -118,6 +152,61 @@ export function EmailComposer({
       setSaving(false);
     }
   }, [currentDraftId, draftId, form, navigate, onSave, senderEmailError]);
+
+  const openReview = () => {
+    const error = recipientFieldError(form) ?? senderEmailError;
+    if (!form.subject.trim()) {
+      setRecipientError("Add a subject before sending.");
+      return;
+    }
+    if (error) {
+      setRecipientError(error);
+      return;
+    }
+    setRecipientError(null);
+    setIdempotencyKey((current) => current ?? crypto.randomUUID());
+    setReviewOpen(true);
+    if (!authorizedSender) {
+      void getMailStatus()
+        .then((status) => setAuthorizedSender(status.accountEmail))
+        .catch(() => setAuthorizedSender(null));
+    }
+  };
+
+  const confirmSend = async () => {
+    if (!idempotencyKey || sending) return;
+    setSendPhase("sending");
+    setSendMessage(null);
+    try {
+      const result = await sendIndividualEmail({
+        senderEmail: form.senderEmail,
+        to: form.to,
+        cc: form.cc,
+        bcc: form.bcc,
+        subject: form.subject,
+        contentJson: form.contentJson,
+        draftId: currentDraftId ?? null,
+        idempotencyKey,
+        confirm: true,
+      });
+      const submission = result.submission;
+      setSendMessage(submission.note);
+      if (submission.status === "accepted") setSendPhase("submitted");
+      else if (submission.status === "uncertain" || submission.status === "submitting") setSendPhase("uncertain");
+      else setSendPhase("failed");
+      setReviewOpen(false);
+    } catch (error) {
+      const submission = error instanceof MailApiError ? submissionFromSend(error) : null;
+      if (submission?.status === "uncertain" || submission?.status === "submitting") {
+        setSendPhase("uncertain");
+        setSendMessage(submission.note);
+      } else {
+        setSendPhase("failed");
+        setSendMessage(error instanceof MailApiError ? error.message : "The message was not sent.");
+      }
+      setReviewOpen(false);
+    }
+  };
 
   const handleDiscard = () => {
     setForm(savedSnapshot);
@@ -149,7 +238,16 @@ export function EmailComposer({
         onPreview={() => setPreviewOpen(true)}
         onDiscard={handleDiscard}
         canDiscard={dirty}
+        canSend={canSend && sendPhase !== "uncertain"}
+        sending={sending}
+        onSend={openReview}
       />
+      {sendMessage ? (
+        <p className={`text-sm wrap-break-word ${sendPhase === "failed" || sendPhase === "uncertain" ? "text-destructive" : "text-muted-foreground"}`}>
+          {sendPhase === "sending" ? "Sending…" : sendMessage}
+        </p>
+      ) : null}
+      {recipientError ? <p className="text-sm text-destructive wrap-break-word">{recipientError}</p> : null}
 
       <Card>
         <CardHeader>
@@ -175,6 +273,46 @@ export function EmailComposer({
           <CardTitle className="text-base">Message</CardTitle>
         </CardHeader>
         <CardContent className="space-y-4">
+          {canSend ? (
+            <div className="space-y-4">
+              {(["to", "cc", "bcc"] as const).map((field) => (
+                <div key={field} className="space-y-2">
+                  <RecipientField
+                    id={`recipient-${field}`}
+                    label={field === "to" ? "To" : field === "cc" ? "Cc" : "Bcc"}
+                    required={field === "to"}
+                    values={form[field]}
+                    disabled={sending}
+                    onInvalid={setRecipientError}
+                    onChange={(values) => {
+                      setForm((current) => ({ ...current, [field]: values }));
+                      setSendPhase("idle");
+                      setIdempotencyKey(null);
+                    }}
+                  />
+                  <button
+                    type="button"
+                    className="text-sm text-primary underline-offset-4 hover:underline"
+                    onClick={() => setPickerField(field)}
+                  >
+                    Choose a saved contact
+                  </button>
+                </div>
+              ))}
+              {authorizedSender && form.senderEmail.trim() && form.senderEmail.trim().toLowerCase() !== authorizedSender ? (
+                <p className="text-sm text-destructive wrap-break-word">
+                  This draft uses {form.senderEmail}, but mail can only be sent as {authorizedSender}.{" "}
+                  <button
+                    type="button"
+                    className="underline"
+                    onClick={() => setForm((current) => ({ ...current, senderEmail: authorizedSender }))}
+                  >
+                    Use {authorizedSender}
+                  </button>
+                </p>
+              ) : null}
+            </div>
+          ) : null}
           <SubjectField
             subject={form.subject}
             onSubjectChange={(value) =>
@@ -190,6 +328,32 @@ export function EmailComposer({
         </CardContent>
       </Card>
 
+      <ContactPickerDialog
+        open={pickerField !== null}
+        onOpenChange={(open) => {
+          if (!open) setPickerField(null);
+        }}
+        onSelect={(email) => {
+          if (!pickerField) return;
+          const { next, invalid } = addRecipients(form[pickerField], email);
+          setForm((current) => ({ ...current, [pickerField]: next }));
+          setRecipientError(invalid[0] ? `${invalid[0]} is not a valid email address.` : null);
+        }}
+      />
+      <SendReviewDialog
+        open={reviewOpen}
+        sending={sending}
+        from={form.senderName.trim() ? `${form.senderName.trim()} · ${authorizedSender ?? form.senderEmail}` : authorizedSender ?? form.senderEmail}
+        to={form.to}
+        cc={form.cc}
+        bcc={form.bcc}
+        subject={form.subject}
+        bodyHtml={previewHtml}
+        onCancel={() => {
+          if (!sending) setReviewOpen(false);
+        }}
+        onConfirm={() => void confirmSend()}
+      />
       <EmailPreview
         open={previewOpen}
         onOpenChange={setPreviewOpen}

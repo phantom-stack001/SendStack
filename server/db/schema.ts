@@ -434,6 +434,40 @@ export const mailSubmissions = pgTable(
   ],
 );
 
+export const individualEmailSubmissions = pgTable(
+  "individual_email_submissions",
+  {
+    id: text("id").primaryKey(),
+    userId: text("user_id")
+      .notNull()
+      .references(() => user.id, { onDelete: "cascade" }),
+    sourceDraftId: text("source_draft_id").references(() => emailDrafts.id, { onDelete: "set null" }),
+    idempotencyKey: text("idempotency_key").notNull(),
+    messageId: text("message_id"),
+    senderEmail: text("sender_email").notNull(),
+    toRecipients: jsonb("to_recipients").$type<string[]>().notNull().default([]),
+    ccRecipients: jsonb("cc_recipients").$type<string[]>().notNull().default([]),
+    bccRecipients: jsonb("bcc_recipients").$type<string[]>().notNull().default([]),
+    recipientSummary: text("recipient_summary").notNull(),
+    subject: text("subject").notNull(),
+    status: text("status").notNull(),
+    smtpAcceptedAt: timestamp("smtp_accepted_at"),
+    sentCopySavedAt: timestamp("sent_copy_saved_at"),
+    sentCopyStatus: text("sent_copy_status"),
+    errorCode: text("error_code"),
+    errorMessage: text("error_message"),
+    createdAt: timestamp("created_at").defaultNow().notNull(),
+    updatedAt: timestamp("updated_at")
+      .defaultNow()
+      .$onUpdate(() => new Date())
+      .notNull(),
+  },
+  (table) => [
+    uniqueIndex("individual_email_submissions_idempotency_key_unique").on(table.idempotencyKey),
+    index("individual_email_submissions_user_created_idx").on(table.userId, table.createdAt),
+  ],
+);
+
 export const appRoles = pgTable("app_roles", {
   id: text("id").primaryKey(),
   key: text("key").notNull().unique(),

@@ -51,6 +51,7 @@ export const PERMISSIONS = [
   "queue.retry",
   "mailbox.read",
   "mailbox.send_test",
+  "mailbox.send",
   "mailbox.manage_connection",
   "history.read",
   "settings.read",
@@ -108,6 +109,7 @@ export const PERMISSION_DETAILS: Record<PermissionKey, { category: string; descr
   "queue.retry": { category: "Queue", description: "Retry queue jobs" },
   "mailbox.read": { category: "Mailbox", description: "Read the shared mailbox" },
   "mailbox.send_test": { category: "Mailbox", description: "Send one controlled test message" },
+  "mailbox.send": { category: "Mailbox", description: "Send an individual email from the composer" },
   "mailbox.manage_connection": { category: "Mailbox", description: "Test the mailbox connection" },
   "history.read": { category: "History", description: "View sending history" },
   "settings.read": { category: "Settings", description: "View settings" },
@@ -256,6 +258,7 @@ export function permissionForRequest(path: string, method: string): PermissionKe
     return "users.update";
   }
   if (normalized.startsWith("/api/mail")) {
+    if (normalized === "/api/mail/send" || normalized.startsWith("/api/mail/sends")) return "mailbox.send";
     if (normalized.endsWith("/test-send")) return "mailbox.send_test";
     if (normalized.endsWith("/test-connection")) return "mailbox.manage_connection";
     return "mailbox.read";

@@ -115,6 +115,57 @@ export function testMailConnection() {
   return request<MailStatus>("/api/mail/test-connection", { method: "POST" });
 }
 
+export type IndividualSendStatus =
+  | "pending"
+  | "submitting"
+  | "accepted"
+  | "rejected"
+  | "failed"
+  | "uncertain";
+
+export type IndividualSend = {
+  id: string;
+  status: IndividualSendStatus;
+  from: string;
+  to: string[];
+  cc: string[];
+  bccCount: number;
+  bcc: string[];
+  subject: string;
+  messageId: string | null;
+  smtpAccepted: boolean;
+  inboxDeliveryConfirmed: false;
+  sentCopyStatus: string | null;
+  errorCode: string | null;
+  errorMessage: string | null;
+  createdAt: string;
+  note: string;
+};
+
+export function sendIndividualEmail(input: {
+  senderEmail: string;
+  to: string[];
+  cc: string[];
+  bcc: string[];
+  subject: string;
+  contentJson: unknown;
+  draftId?: string | null;
+  idempotencyKey: string;
+  confirm: true;
+}) {
+  return request<{ submission: IndividualSend; duplicate?: boolean }>("/api/mail/send", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export function listIndividualSends(page = 1, limit = 10) {
+  return request<{
+    submissions: IndividualSend[];
+    pagination: { page: number; limit: number; total: number; totalPages: number };
+  }>(`/api/mail/sends?page=${page}&limit=${limit}`);
+}
+
 export function sendMailTest(input: {
   subject: string;
   text: string;

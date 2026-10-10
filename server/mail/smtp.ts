@@ -40,6 +40,135 @@ function smtpTransport(config: MailConfig) {
   });
 }
 
+function compileMessage(mail: SendMailOptions) {
+  const compiler = createTransport({
+    streamTransport: true,
+    buffer: true,
+    newline: "unix",
+  });
+  return compiler
+    .sendMail(mail)
+    .then((compiled) => {
+      if (!Buffer.isBuffer(compiled.message)) {
+        throw new MailboxError("The message could not be prepared.", 502, "COMPOSE_FAILED");
+      }
+      return compiled.message;
+    })
+    .finally(() => compiler.close());
+}
+
+function isUncertainSmtpError(error: unknown) {
+  const code = (error as { code?: string }).code ?? "";
+  return ["ETIMEDOUT", "ESOCKET", "ECONNECTION", "ECONNRESET", "ETLS", "EDNS"].includes(code);
+}
+
+/**
+ * Submit one composer message through the configured mailbox.
+ * Bcc is on the envelope only, not in the To or Cc headers of the delivered message.
+ */
+export async function submitComposerMessage(
+  config: MailConfig,
+  message: {
+    subject: string;
+    text: string;
+    html: string;
+    to: string[];
+    cc: string[];
+    bcc: string[];
+    messageId: string;
+  },
+): Promise<CompiledSubmission> {
+  const from = config.email;
+  const envelopeTo = [...new Set([...message.to, ...message.cc, ...message.bcc])];
+  for (const recipient of envelopeTo) {
+    if (recipient !== config.testRecipient) {
+      throw new MailboxError(
+        "Only the configured mailbox can send, and only to the authorized test recipient.",
+        400,
+        "UNAUTHORIZED_PARTY",
+      );
+    }
+  }
+
+  const shared = {
+    from: { name: config.senderName, address: from },
+    to: message.to,
+    cc: message.cc.length > 0 ? message.cc : undefined,
+    subject: message.subject,
+    text: message.text,
+    html: message.html,
+    messageId: message.messageId,
+    date: new Date(),
+    disableFileAccess: true,
+    disableUrlAccess: true,
+  } satisfies SendMailOptions;
+
+  let deliveryRaw: Buffer;
+  let sentRaw: Buffer;
+  try {
+    deliveryRaw = await compileMessage(shared);
+    sentRaw = await compileMessage({
+      ...shared,
+      bcc: message.bcc.length > 0 ? message.bcc : undefined,
+    });
+  } catch (error) {
+    if (error instanceof MailboxError) throw error;
+    throw new MailboxError("The message could not be prepared.", 502, "COMPOSE_FAILED");
+  }
+
+  const transport = smtpTransport(config);
+  try {
+    const info = await transport.sendMail({
+      envelope: { from, to: envelopeTo },
+      raw: deliveryRaw,
+      disableFileAccess: true,
+      disableUrlAccess: true,
+    });
+    const acceptedRecipients = addressList(info.accepted);
+    const rejectedRecipients = addressList(info.rejected);
+    const accepted =
+      rejectedRecipients.length === 0 &&
+      envelopeTo.every((recipient) =>
+        acceptedRecipients.some((entry) => entry.toLowerCase() === recipient),
+      );
+    return {
+      accepted,
+      messageId: message.messageId,
+      acceptedRecipients,
+      rejectedRecipients,
+      response: redactSecrets(info.response ?? "", [config.password]),
+      raw: sentRaw,
+    };
+  } catch (error) {
+    const rejected = addressList((error as { rejected?: unknown }).rejected);
+    const code = (error as { code?: string }).code;
+    if (code === "EENVELOPE" || rejected.length > 0) {
+      return {
+        accepted: false,
+        messageId: message.messageId,
+        acceptedRecipients: addressList((error as { accepted?: unknown }).accepted),
+        rejectedRecipients: rejected,
+        response: redactSecrets(
+          error instanceof Error ? error.message : "The outgoing server rejected the message.",
+          [config.password],
+        ),
+        raw: sentRaw,
+      };
+    }
+    console.error("[mail] composer smtp send failed", safeErrorDetails(error, [config.password]));
+    if (isUncertainSmtpError(error)) {
+      throw new MailboxError(
+        "The outgoing server did not confirm whether it accepted the message.",
+        502,
+        "SMTP_UNCERTAIN",
+      );
+    }
+    throw new MailboxError(friendlyMailError(error, "smtp"), 502, "SMTP_SEND_FAILED");
+  } finally {
+    transport.close();
+  }
+}
+
 export async function verifySmtp(config: MailConfig) {
   const transport = smtpTransport(config);
   try {

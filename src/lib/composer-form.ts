@@ -5,6 +5,9 @@ export type ComposerFormState = {
   senderEmail: string;
   subject: string;
   contentJson: TiptapDoc;
+  to: string[];
+  cc: string[];
+  bcc: string[];
 };
 
 export function buildFormStateFromDraft(draft: {
@@ -18,6 +21,9 @@ export function buildFormStateFromDraft(draft: {
     senderEmail: draft.senderEmail,
     subject: draft.subject,
     contentJson: (draft.contentJson as TiptapDoc) ?? { ...EMPTY_TIPTAP_DOC },
+    to: [],
+    cc: [],
+    bcc: [],
   };
 }
 
@@ -26,4 +32,7 @@ export const emptyComposerFormState: ComposerFormState = {
   senderEmail: "",
   subject: "",
   contentJson: { ...EMPTY_TIPTAP_DOC },
+  to: [],
+  cc: [],
+  bcc: [],
 };

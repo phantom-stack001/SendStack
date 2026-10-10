@@ -1,4 +1,4 @@
-import { Eye, Save } from "lucide-react";
+import { Eye, Save, Send } from "lucide-react";
 
 import { DraftStatus } from "@/components/composer/DraftStatus";
 import { Button } from "@/components/ui/button";
@@ -13,6 +13,9 @@ type ComposerHeaderProps = {
   onPreview: () => void;
   onDiscard: () => void;
   canDiscard: boolean;
+  canSend?: boolean;
+  sending?: boolean;
+  onSend?: () => void;
 };
 
 export function ComposerHeader({
@@ -25,6 +28,9 @@ export function ComposerHeader({
   onPreview,
   onDiscard,
   canDiscard,
+  canSend,
+  sending,
+  onSend,
 }: ComposerHeaderProps) {
   return (
     <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
@@ -45,10 +51,16 @@ export function ComposerHeader({
             Discard changes
           </Button>
         ) : null}
-        <Button type="button" onClick={onSave} disabled={saving}>
+        <Button type="button" onClick={onSave} disabled={saving || sending}>
           <Save />
           {saving ? "Saving…" : "Save draft"}
         </Button>
+        {canSend && onSend ? (
+          <Button type="button" onClick={onSend} disabled={saving || sending}>
+            <Send />
+            {sending ? "Sending…" : "Send"}
+          </Button>
+        ) : null}
       </div>
     </div>
   );
