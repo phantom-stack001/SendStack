@@ -4,7 +4,7 @@ import { createSendStackApp } from "./app.js";
 import { loadEnv } from "./env.js";
 
 const env = loadEnv();
-const { app } = createSendStackApp(env);
+const { app } = createSendStackApp(env, { seedAccess: true });
 
 const server = serve(
   {

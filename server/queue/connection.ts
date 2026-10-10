@@ -1,7 +1,8 @@
 import { Redis } from "ioredis";
 
+import { safeErrorLabel } from "../lib/startup-log.js";
 import { loadQueueEnv } from "./configuration.js";
-import { buildBullmqRedisOptions } from "./redis-connection-options.js";
+import { buildBullmqRedisOptions, buildHealthRedisOptions } from "./redis-connection-options.js";
 import { maskRedisUrl } from "./redis-url.js";
 
 type RedisClient = Redis;
@@ -71,27 +72,33 @@ export async function probeRedis(): Promise<"ok" | "unavailable" | "disabled"> {
     if (!env.QUEUE_ENABLED || !env.REDIS_URL?.trim()) return "disabled";
     redisUrl = env.REDIS_URL;
   } catch (error) {
-    console.error("[health] redis", error instanceof Error ? error.name : "Error");
+    console.error("[health] redis", safeErrorLabel(error));
     return "unavailable";
   }
 
-  const client = new Redis(redisUrl, {
-    ...buildBullmqRedisOptions(redisUrl),
-    connectTimeout: 4_000,
-    maxRetriesPerRequest: 1,
-    retryStrategy: () => null,
-    lazyConnect: true,
-    enableReadyCheck: false,
-  });
+  const client = new Redis(redisUrl, buildHealthRedisOptions(redisUrl));
   attachSafeErrorLogging(client, "health");
-  try {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const attempt = (async (): Promise<"ok" | "unavailable"> => {
     await client.connect();
     const pong = await client.ping();
     return pong === "PONG" ? "ok" : "unavailable";
-  } catch (error) {
-    console.error("[health] redis", error instanceof Error ? error.name : "Error");
-    return "unavailable";
+  })().catch((error: unknown) => {
+    console.error("[health] redis", safeErrorLabel(error));
+    return "unavailable" as const;
+  });
+  try {
+    return await Promise.race([
+      attempt,
+      new Promise<"unavailable">((resolve) => {
+        timer = setTimeout(() => {
+          console.error("[health] redis timed out");
+          resolve("unavailable");
+        }, 4_500);
+      }),
+    ]);
   } finally {
+    if (timer) clearTimeout(timer);
     client.disconnect();
   }
 }

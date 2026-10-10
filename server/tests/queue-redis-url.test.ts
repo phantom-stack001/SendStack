@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { classifyRedisEndpoint, maskRedisUrl, summarizeRedisUrl } from "../queue/redis-url.js";
-import { buildBullmqRedisOptions } from "../queue/redis-connection-options.js";
+import { buildBullmqRedisOptions, buildHealthRedisOptions } from "../queue/redis-connection-options.js";
 import {
   campaignDispatchBullmqJobId,
   emailProcessingBullmqJobId,
@@ -34,6 +34,19 @@ describe("redis URL helpers", () => {
     expect(options.tls).toEqual({});
     expect(options).not.toHaveProperty("rejectUnauthorized", false);
     expect(options.maxRetriesPerRequest).toBeNull();
+  });
+
+  it("bounds health checks and keeps TLS verification enabled", () => {
+    const options = buildHealthRedisOptions("rediss://default:secret@example.upstash.io:6379");
+    expect(options.tls).toEqual({});
+    expect(options.tls).not.toHaveProperty("rejectUnauthorized", false);
+    expect(options.maxRetriesPerRequest).toBe(1);
+    expect(options.connectTimeout).toBe(4_000);
+    expect(options.commandTimeout).toBe(3_000);
+    expect(options.lazyConnect).toBe(true);
+    expect(options.enableOfflineQueue).toBe(false);
+    expect(options.retryStrategy?.(1)).toBeNull();
+    expect(options.reconnectOnError?.(new Error("ECONNRESET"))).toBe(false);
   });
 });
 

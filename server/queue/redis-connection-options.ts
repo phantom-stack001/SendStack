@@ -24,3 +24,22 @@ export function buildBullmqRedisOptions(redisUrl: string): RedisOptions {
 
   return options;
 }
+
+/**
+ * Request-scoped Redis options. Unlike BullMQ workers, health checks must not
+ * retry forever or block the Node response until the function limit.
+ */
+export function buildHealthRedisOptions(redisUrl: string): RedisOptions {
+  return {
+    ...buildBullmqRedisOptions(redisUrl),
+    connectTimeout: 4_000,
+    commandTimeout: 3_000,
+    maxRetriesPerRequest: 1,
+    retryStrategy: () => null,
+    reconnectOnError: () => false,
+    lazyConnect: true,
+    enableReadyCheck: false,
+    enableOfflineQueue: false,
+    autoResendUnfulfilledCommands: false,
+  };
+}

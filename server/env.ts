@@ -1,5 +1,6 @@
 import { z } from "zod";
 
+import { logSafeEnvironment } from "./lib/env-summary.js";
 import { loadConfiguredEnvFiles } from "./env-files.js";
 
 loadConfiguredEnvFiles();
@@ -23,6 +24,7 @@ const envSchema = z.object({
 export type ServerEnv = z.infer<typeof envSchema>;
 
 export function loadEnv(): ServerEnv {
+  logSafeEnvironment();
   const parsed = envSchema.safeParse(process.env);
   if (!parsed.success) {
     const message = parsed.error.issues.map((issue) => issue.message).join("; ");

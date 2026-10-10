@@ -4,10 +4,12 @@ import { cors } from "hono/cors";
 import { auth } from "./auth/auth.js";
 import { authTrustedOrigins } from "./auth/origins.js";
 import { permissionForRequest } from "./auth/permissions.js";
-import { createDb, type Database } from "./db/index.js";
+import { createDb, probeDatabase, type Database } from "./db/index.js";
 import type { ServerEnv } from "./env.js";
 import { loadEnv } from "./env.js";
+import { safeErrorLabel, logStartup } from "./lib/startup-log.js";
 import { getSessionUser } from "./lib/session.js";
+import { probeRedis } from "./queue/connection.js";
 import { registerAdminRoutes } from "./routes/admin.js";
 import { registerCampaignRoutes } from "./routes/campaigns.js";
 import { registerContactImportRoutes } from "./routes/contact-import.js";
@@ -25,7 +27,12 @@ export type SendStackApp = {
   db: Database;
 };
 
-export function createSendStackApp(env: ServerEnv): SendStackApp {
+export type CreateAppOptions = {
+  /** Persist system roles. Long-running server only — never on the Vercel request path. */
+  seedAccess?: boolean;
+};
+
+export function createSendStackApp(env: ServerEnv, options: CreateAppOptions = {}): SendStackApp {
   const { db } = createDb(env);
   const app = new Hono();
 
@@ -43,7 +50,11 @@ export function createSendStackApp(env: ServerEnv): SendStackApp {
   );
 
   app.use("/api/*", async (c, next) => {
-    if (c.req.path.startsWith("/api/auth") || c.req.path.startsWith("/api/health")) {
+    if (
+      c.req.path.startsWith("/api/auth") ||
+      c.req.path === "/api/health" ||
+      c.req.path === "/api/ping"
+    ) {
       return next();
     }
     const account = await getSessionUser(c.req.raw.headers);
@@ -58,7 +69,10 @@ export function createSendStackApp(env: ServerEnv): SendStackApp {
     return next();
   });
 
-  registerHealthRoutes(app, db);
+  registerHealthRoutes(app, {
+    probeDatabase: () => probeDatabase(env.DATABASE_URL),
+    probeRedis,
+  });
   registerAdminRoutes(app);
   registerDraftRoutes(app);
   registerContactRoutes(app);
@@ -72,17 +86,21 @@ export function createSendStackApp(env: ServerEnv): SendStackApp {
   app.all("/api/auth/*", (c) => auth.handler(c.req.raw));
 
   app.onError((error, c) => {
-    console.error("[api]", error);
+    console.error("[api]", safeErrorLabel(error));
     return c.json({ error: "Internal server error" }, 500);
   });
 
-  seedAccessControl(db).catch((error) => {
-    console.error(
-      "[admin] access control seed failed",
-      error instanceof Error ? error.message : "Error",
-    );
-  });
+  const seedAccess = options.seedAccess ?? !process.env.VERCEL;
+  if (seedAccess) {
+    logStartup("Access control seed started");
+    seedAccessControl(db).catch((error) => {
+      console.error("[admin] access control seed failed", safeErrorLabel(error));
+    });
+  } else {
+    logStartup("Access control seed skipped");
+  }
 
+  logStartup("Hono initialized");
   return { app, db };
 }
 
@@ -91,7 +109,7 @@ let cachedApp: Hono | undefined;
 /** Singleton Hono app for Vercel serverless (warm invocations reuse the instance). */
 export function getSendStackApp(): Hono {
   if (!cachedApp) {
-    cachedApp = createSendStackApp(loadEnv()).app;
+    cachedApp = createSendStackApp(loadEnv(), { seedAccess: false }).app;
   }
   return cachedApp;
 }
