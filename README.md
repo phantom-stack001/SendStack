@@ -165,6 +165,15 @@ This repo includes `vercel.json` at the root:
 
 If you see *“Root Directory web does not exist”*, the dashboard still points at the old Next.js layout—update Root Directory as above.
 
+**API on Vercel:** the static `dist/` build serves the SPA; `api/[...path].ts` runs the same Hono app as `server/index.ts` via `hono/vercel` (Node.js runtime, no separate API host). Set server env vars on the **Vercel project** (see [deploy/VERCEL.md](deploy/VERCEL.md)).
+
+Use the canonical browser origin for auth:
+
+- `BETTER_AUTH_URL=https://www.ctn-sk.com`
+- `FRONTEND_URL=https://www.ctn-sk.com`
+
+After deploy, `GET https://www.ctn-sk.com/api/health` must return JSON (`{"ok":true,"service":"sendstack-api",...}`), not HTML. SPA fallback in `vercel.json` excludes `/api/` so API routes are not rewritten to `index.html`.
+
 ### Apache
 
 `public/.htaccess` is copied into `dist/` and provides SPA fallback for unknown routes while serving prerendered folders directly.
@@ -497,13 +506,12 @@ Scheduling, pause/resume, cancellation, retries, and Redis interruption should b
 
 | Component | Hosting notes |
 | --- | --- |
-| **SPA** (`dist/`) | Static host (e.g. Vercel) per `vercel.json` |
-| **Hono API** | Node service with `DATABASE_URL`, auth secrets, optional `QUEUE_ENABLED` for enqueue APIs |
-| **Dispatcher** | Persistent Node: `node` / `tsx server/dispatchers/campaign-dispatcher.ts` |
-| **Worker** | Persistent Node: `node` / `tsx server/workers/email-processing.worker.ts` |
+| **SPA + API** | Vercel: `dist/` static output + `api/[...path].ts` (Hono on Node serverless) |
+| **Dispatcher** | Persistent Node elsewhere (not Vercel): `npm run start:dispatcher` or `tsx server/dispatchers/campaign-dispatcher.ts` |
+| **Worker** | Persistent Node elsewhere (not Vercel): `npm run start:worker` or `tsx server/workers/email-processing.worker.ts` |
 | **Redis** | Upstash (or other Redis) via `REDIS_URL` — required when `QUEUE_ENABLED=true` |
 
-The static `dist/` SPA alone is **not** sufficient: you need a Node host for `server/` with `DATABASE_URL` and auth secrets, plus reverse-proxy `/api` to that service (or deploy frontend and API on one origin). Do not expose Neon or Redis credentials to the browser (`VITE_` prefix must never carry secrets).
+Vercel runs request/response APIs and Better Auth; BullMQ **workers and the campaign dispatcher must not run inside Vercel Functions**. Queue simulation still needs a long-lived worker process (local machine, a free-tier VM, or optional Railway worker service). Do not expose Neon or Redis credentials to the browser (`VITE_` prefix must never carry secrets).
 
 ## Direct mailbox
 

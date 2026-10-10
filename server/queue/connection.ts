@@ -64,6 +64,38 @@ export async function closeRedisConnection() {
   }
 }
 
+export async function probeRedis(): Promise<"ok" | "unavailable" | "disabled"> {
+  let redisUrl: string | undefined;
+  try {
+    const env = loadQueueEnv();
+    if (!env.QUEUE_ENABLED || !env.REDIS_URL?.trim()) return "disabled";
+    redisUrl = env.REDIS_URL;
+  } catch (error) {
+    console.error("[health] redis", error instanceof Error ? error.name : "Error");
+    return "unavailable";
+  }
+
+  const client = new Redis(redisUrl, {
+    ...buildBullmqRedisOptions(redisUrl),
+    connectTimeout: 4_000,
+    maxRetriesPerRequest: 1,
+    retryStrategy: () => null,
+    lazyConnect: true,
+    enableReadyCheck: false,
+  });
+  attachSafeErrorLogging(client, "health");
+  try {
+    await client.connect();
+    const pong = await client.ping();
+    return pong === "PONG" ? "ok" : "unavailable";
+  } catch (error) {
+    console.error("[health] redis", error instanceof Error ? error.name : "Error");
+    return "unavailable";
+  } finally {
+    client.disconnect();
+  }
+}
+
 export function isQueueEnabled() {
   try {
     const env = loadQueueEnv();

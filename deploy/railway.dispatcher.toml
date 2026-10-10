@@ -1,0 +1,12 @@
+# Railway service: SendStack Dispatcher
+# Config file path: deploy/railway.dispatcher.toml
+# Do not assign a public domain or an HTTP healthcheck. This process does not listen on PORT.
+
+[build]
+builder = "NIXPACKS"
+buildCommand = "npm install --include=dev && npm run build:server"
+
+[deploy]
+startCommand = "npm run start:dispatcher"
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 10

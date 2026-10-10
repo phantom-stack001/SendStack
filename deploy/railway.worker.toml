@@ -1,0 +1,13 @@
+# Railway service: SendStack Worker
+# Config file path: deploy/railway.worker.toml
+# Do not assign a public domain or an HTTP healthcheck. This process does not listen on PORT.
+# Campaign processing stays simulation-only while QUEUE_SIMULATION_ONLY=true.
+
+[build]
+builder = "NIXPACKS"
+buildCommand = "npm install --include=dev && npm run build:server"
+
+[deploy]
+startCommand = "npm run start:worker"
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 10

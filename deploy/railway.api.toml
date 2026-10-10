@@ -1,0 +1,14 @@
+# Railway service: SendStack API
+# In the Railway service settings, set the config file path to deploy/railway.api.toml
+# Do not attach this config to the dispatcher or worker.
+
+[build]
+builder = "NIXPACKS"
+buildCommand = "npm install --include=dev && npm run build:server"
+
+[deploy]
+startCommand = "npm run start:api"
+healthcheckPath = "/api/health"
+healthcheckTimeout = 30
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 10

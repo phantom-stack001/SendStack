@@ -3,9 +3,15 @@
   "buildCommand": "npm run build",
   "installCommand": "npm install",
   "outputDirectory": "dist",
+  "functions": {
+    "api/**/*.ts": {
+      "maxDuration": 30,
+      "memory": 1024
+    }
+  },
   "rewrites": [
     {
-      "source": "/((?!assets/|favicon\\.svg).*)",
+      "source": "/((?!api/|assets/|favicon\\.svg).*)",
       "destination": "/index.html"
     }
   ]

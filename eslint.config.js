@@ -5,10 +5,10 @@ import reactRefresh from "eslint-plugin-react-refresh";
 import tseslint from "typescript-eslint";
 
 export default tseslint.config(
-  { ignores: ["dist", "web", "node_modules"] },
+  { ignores: ["dist", "web", "node_modules", "dist-server"] },
   {
     extends: [js.configs.recommended, ...tseslint.configs.recommended],
-    files: ["server/**/*.ts", "drizzle.config.ts"],
+    files: ["server/**/*.ts", "api/**/*.ts", "drizzle.config.ts"],
     languageOptions: {
       ecmaVersion: 2022,
       globals: globals.node,

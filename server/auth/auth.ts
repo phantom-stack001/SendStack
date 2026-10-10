@@ -7,18 +7,19 @@ import { createDb } from "../db/index.js";
 import * as schema from "../db/schema.js";
 import { loadEnv } from "../env.js";
 import { sendTransactionalEmail } from "../lib/email.js";
+import { authTrustedOrigins } from "./origins.js";
 
 const env = loadEnv();
 const { db } = createDb(env);
 
-const isProduction = env.NODE_ENV === "production";
+const isProduction = env.NODE_ENV === "production" || env.BETTER_AUTH_URL.startsWith("https://");
 
 export const auth = betterAuth({
   appName: "SendStack",
   baseURL: env.BETTER_AUTH_URL,
   basePath: "/api/auth",
   secret: env.BETTER_AUTH_SECRET,
-  trustedOrigins: [env.FRONTEND_URL],
+  trustedOrigins: authTrustedOrigins(env.FRONTEND_URL),
   database: drizzleAdapter(db, {
     provider: "pg",
     schema,
