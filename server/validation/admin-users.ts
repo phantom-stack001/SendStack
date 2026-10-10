@@ -2,6 +2,12 @@ import { z } from "zod";
 
 import { validatePassword } from "../lib/password-policy.js";
 
+export const manualEmailVerificationSchema = z.object({
+  confirmed: z.literal(true, { error: "Confirm that you verified control of this email address." }),
+  reason: z.string().trim().min(12, "Enter a verification reason.").max(400),
+  expectedEmail: z.email(),
+});
+
 export const createUserSchema = z
   .object({
     name: z.string().trim().min(1).max(120),

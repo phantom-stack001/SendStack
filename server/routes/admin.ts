@@ -4,8 +4,9 @@ import { z } from "zod";
 import { createDb } from "../db/index.js";
 import { loadEnv } from "../env.js";
 import { validationError } from "../lib/http-errors.js";
-import { createUserSchema } from "../validation/admin-users.js";
+import { createUserSchema, manualEmailVerificationSchema } from "../validation/admin-users.js";
 import { getSessionUser } from "../lib/session.js";
+import { manuallyVerifyUserEmail } from "../services/manual-email-verification.js";
 import type { PermissionKey } from "../auth/permissions.js";
 import { userHasPermission } from "../services/access-control.js";
 import { permissionsForUser } from "../services/access-control.js";
@@ -86,6 +87,7 @@ export function registerAdminRoutes(app: Hono) {
       search: c.req.query("search") ?? undefined,
       role: c.req.query("role") ?? undefined,
       status: c.req.query("status") ?? undefined,
+      verification: c.req.query("verification") ?? undefined,
       page: Number.isFinite(page) && page > 0 ? page : 1,
       limit: Number.isFinite(limit) ? Math.min(50, Math.max(1, limit)) : 25,
     });
@@ -140,6 +142,24 @@ export function registerAdminRoutes(app: Hono) {
     const result = await updateAdminUser(db, access.user, c.req.param("userId"), parsed.data);
     if ("error" in result) return json(c, { error: result.error }, result.status);
     return json(c, result);
+  });
+
+  app.post("/api/admin/users/:userId/verify-email", async (c) => {
+    const account = await getSessionUser(c.req.raw.headers);
+    if (!account) return json(c, { error: "Unauthorized" }, 401);
+    if ((account as { banned?: boolean }).banned) {
+      return json(c, { error: "This account cannot access SendStack." }, 403);
+    }
+    const parsed = manualEmailVerificationSchema.safeParse(await c.req.json().catch(() => null));
+    if (!parsed.success) return json(c, validationError(parsed.error), 400);
+    const result = await manuallyVerifyUserEmail(
+      db,
+      { id: account.id, role: (account as { role?: string | null }).role, banned: false },
+      { userId: c.req.param("userId"), ...parsed.data },
+    );
+    if (!result.ok) return json(c, { error: result.error }, result.status);
+    const detail = await getAdminUser(db, c.req.param("userId"));
+    return json(c, { user: detail });
   });
 
   app.post("/api/admin/users/:userId/status", async (c) => {

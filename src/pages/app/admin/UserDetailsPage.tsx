@@ -7,7 +7,17 @@ import { PageHeader } from "@/components/shared/PageHeader";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
+import { Textarea } from "@/components/ui/textarea";
+import { authClient } from "@/lib/auth-client";
 
 type UserDetail = {
   id: string;
@@ -19,6 +29,12 @@ type UserDetail = {
   permissions: string[];
   sessions: { id: string; updatedAt: string; ipAddress: string | null; userAgent: string | null; expiresAt: string }[];
   audit: { id: string; action: string; createdAt: string }[];
+  emailVerification?: {
+    status: "verified" | "unverified";
+    method: "manual" | "unknown" | null;
+    verifiedAt: string | null;
+    reason: string | null;
+  };
 };
 
 const ASSIGNABLE = ["viewer", "editor", "campaign-manager", "admin", "user"];
@@ -32,6 +48,15 @@ export function UserDetailsPage() {
   const [roles, setRoles] = useState<string[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
+  const [verifyOpen, setVerifyOpen] = useState(false);
+  const [acknowledged, setAcknowledged] = useState(false);
+  const [reason, setReason] = useState("");
+  const [verifying, setVerifying] = useState(false);
+  const { data: session } = authClient.useSession();
+  const isSuperAdmin = ((session?.user as { role?: string } | undefined)?.role ?? "")
+    .split(",")
+    .map((part) => part.trim())
+    .includes("super-admin");
 
   async function load() {
     const response = await fetch(`/api/admin/users/${userId}`, { credentials: "include" });
@@ -101,6 +126,38 @@ export function UserDetailsPage() {
     setAccount(payload.user);
   }
 
+  function openVerify() {
+    setAcknowledged(false);
+    setReason("");
+    setError(null);
+    setVerifyOpen(true);
+  }
+
+  async function confirmVerify() {
+    if (!account || verifying) return;
+    setVerifying(true);
+    setError(null);
+    const response = await fetch(`/api/admin/users/${userId}/verify-email`, {
+      method: "POST",
+      credentials: "include",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        confirmed: true,
+        reason,
+        expectedEmail: account.email,
+      }),
+    });
+    const payload = await response.json();
+    setVerifying(false);
+    if (!response.ok) {
+      setError(payload.error ?? "Could not verify this email address.");
+      return;
+    }
+    setAccount(payload.user);
+    setVerifyOpen(false);
+    setMessage("Email address manually verified.");
+  }
+
   async function resetPassword() {
     const response = await fetch(`/api/admin/users/${userId}/password-reset`, { method: "POST", credentials: "include" });
     const payload = await response.json();
@@ -135,7 +192,23 @@ export function UserDetailsPage() {
             <CardContent className="space-y-3">
               <Input value={name} onChange={(event) => setName(event.target.value)} aria-label="Name" />
               <p className="text-sm text-muted-foreground">Email changes require a verification flow and are not changed here.</p>
-              <p className="text-sm">Verification: {account.emailVerified ? "Verified" : "Not verified"}</p>
+              <div className="space-y-2 rounded-md border border-border p-3">
+                <p className="text-sm font-medium">Email verification</p>
+                <p className="break-all text-sm">{account.email}</p>
+                <p className="text-sm">Status: {account.emailVerified ? "Verified" : "Unverified"}</p>
+                {account.emailVerified ? (
+                  <>
+                    <p className="text-sm">
+                      Verified on: {account.emailVerification?.verifiedAt ? new Date(account.emailVerification.verifiedAt).toLocaleString() : "Not recorded"}
+                    </p>
+                    <p className="text-sm">
+                      Verification method: {account.emailVerification?.method === "manual" ? "Manual" : "Unknown"}
+                    </p>
+                  </>
+                ) : isSuperAdmin ? (
+                  <Button type="button" variant="outline" onClick={openVerify}>Verify Email Manually</Button>
+                ) : null}
+              </div>
               <p className="text-sm capitalize">Status: {account.status}</p>
               <Button type="button" onClick={() => void save()}>Save profile</Button>
             </CardContent>
@@ -193,6 +266,49 @@ export function UserDetailsPage() {
             </CardContent>
           </Card>
         </div>
+        <Dialog open={verifyOpen} onOpenChange={(open) => { if (!verifying) setVerifyOpen(open); }}>
+          <DialogContent className="max-h-[85vh] overflow-y-auto sm:max-w-lg">
+            <DialogHeader>
+              <DialogTitle>Verify Email Manually</DialogTitle>
+              <DialogDescription>
+                You are about to mark this user&apos;s email address as verified without requiring them to open a verification link. Only continue if you have independently confirmed that the user controls this email address.
+              </DialogDescription>
+            </DialogHeader>
+            <div className="space-y-2 text-sm">
+              <p className="wrap-break-word"><span className="text-muted-foreground">Name: </span>{account.name}</p>
+              <p className="break-all"><span className="text-muted-foreground">Email: </span>{account.email}</p>
+              <p><span className="text-muted-foreground">Current status: </span>{account.emailVerified ? "Verified" : "Unverified"}</p>
+            </div>
+            <label className="flex min-h-11 items-start gap-3 text-sm">
+              <input
+                className="mt-1 size-5 shrink-0"
+                type="checkbox"
+                checked={acknowledged}
+                onChange={(event) => setAcknowledged(event.target.checked)}
+              />
+              <span>
+                I have independently confirmed that this person controls this email address. Administrative access alone is not proof of ownership, and I am not verifying it only because a message could not be delivered.
+              </span>
+            </label>
+            <Textarea
+              value={reason}
+              onChange={(event) => setReason(event.target.value)}
+              placeholder="Verified ownership through an approved internal identity check."
+              aria-label="Verification reason"
+              rows={4}
+            />
+            <DialogFooter className="gap-2">
+              <Button type="button" variant="outline" disabled={verifying} onClick={() => setVerifyOpen(false)}>Cancel</Button>
+              <Button
+                type="button"
+                disabled={verifying || !acknowledged || reason.trim().length < 12}
+                onClick={() => void confirmVerify()}
+              >
+                {verifying ? "Verifying…" : "Confirm Verification"}
+              </Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
       </AppPageContainer>
     </>
   );

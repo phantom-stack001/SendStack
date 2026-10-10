@@ -41,7 +41,8 @@ export function AuditPage() {
               {events.length === 0 ? <li className="px-4 py-6 text-sm text-muted-foreground">No administrative events yet.</li> : null}
               {events.map((event) => (
                 <li key={event.id} className="space-y-1 px-4 py-3 text-sm">
-                  <p className="font-medium">{event.action}</p>
+                  <p className="font-medium wrap-break-word">{event.action}</p>
+                  {typeof event.metadata.reason === "string" ? <p className="wrap-break-word text-muted-foreground">{event.metadata.reason}</p> : null}
                   <p className="text-muted-foreground">{new Date(event.createdAt).toLocaleString()}</p>
                   <p className="break-all text-muted-foreground">Actor {event.actorUserId ?? "—"}</p>
                   <p className="break-all text-muted-foreground">Target {event.targetUserId ?? "—"}</p>

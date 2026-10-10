@@ -573,6 +573,16 @@ Drafts are not deleted when a message is sent. Sending history at `/app/history/
 
 The API runs in a Vercel Function: each send opens SMTP and IMAP for that request, with the existing connection timeouts, and does not keep a process-wide mail connection or start a campaign worker.
 
+## Manual email verification (Phase 9.1)
+
+A super-admin can mark one user's current email address verified from `/app/admin/users/:userId/` after confirming they have independently checked that the person controls that mailbox. The button is not shown for other roles. The API rejects anyone whose Better Auth role string does not include `super-admin`, including users who only have `users.update` or a custom role. This action is not in the assignable permission catalog.
+
+The dialog requires an unchecked-by-default acknowledgement and a written reason of at least 12 characters. `POST /api/admin/users/:userId/verify-email` updates only `emailVerified` on that Better Auth user, and only while the address still matches the address the administrator reviewed and the account is not already verified. Roles, suspensions, passwords, and sessions are left unchanged. A successful update writes `user.email_verified_manually` to `admin_audit_events` with the actor, target, email, method `manual`, and reason. A failed update does not write that event. Repeating verification does not add another event.
+
+If the account is verified and a matching manual audit event exists, the details page shows the event time and method Manual. Otherwise a verified account shows method Unknown and date Not recorded. SendStack does not invent an email-link timestamp. Login still requires a valid password. `requireEmailVerification` remains enabled, so a manually verified active account can pass that check. A suspended or deactivated account stays in that status.
+
+Composer sending is unchanged: `mailbox.send` is still required, recipients must still be `SPACEMAIL_TEST_RECIPIENT`, and SMTP acceptance is still not inbox delivery. A live production send was not executed in this phase.
+
 ## Administration (Phase 8)
 
 Better Auth remains authoritative for accounts, passwords, email verification, sessions, and the `user.role` string. SendStack permissions are authoritative for feature access. A role key registered with Better Auth (`user`, `viewer`, `editor`, `campaign-manager`, `admin`, `super-admin`) is stored on `user.role`. Custom roles are stored in `app_user_roles` and included when permissions are resolved. Only `super-admin` can call the Better Auth admin plugin.

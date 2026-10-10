@@ -27,6 +27,7 @@ import { sendTransactionalEmail } from "../lib/email.js";
 import { validatePassword } from "../lib/password-policy.js";
 import { withPgAdvisoryLock } from "../mail/lock.js";
 import { permissionsForUser } from "./access-control.js";
+import { latestManualVerification, verificationView } from "./manual-email-verification.js";
 
 const INVITE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const INVITE_HOURLY_LIMIT = 10;
@@ -86,7 +87,7 @@ async function countActiveSuperAdmins(db: Database) {
 
 export async function listAdminUsers(
   db: Database,
-  query: { search?: string; role?: string; status?: string; page: number; limit: number },
+  query: { search?: string; role?: string; status?: string; verification?: string; page: number; limit: number },
 ) {
   const filters = [];
   if (query.search) {
@@ -146,6 +147,8 @@ export async function listAdminUsers(
   });
   if (query.role) items = items.filter((item) => item.roles.includes(query.role ?? ""));
   if (query.status) items = items.filter((item) => item.status === query.status);
+  if (query.verification === "verified") items = items.filter((item) => item.emailVerified);
+  if (query.verification === "unverified") items = items.filter((item) => !item.emailVerified);
   const total = items.length;
   const start = (query.page - 1) * query.limit;
   const pageItems = items.slice(start, start + query.limit);
@@ -221,6 +224,11 @@ export async function getAdminUser(db: Database, userId: string) {
       createdAt: row.createdAt.toISOString(),
       metadata: row.metadata ?? {},
     })),
+    emailVerification: verificationView({
+      emailVerified: account.emailVerified,
+      email: account.email,
+      manualEvent: await latestManualVerification(db, userId),
+    }),
   };
 }
 

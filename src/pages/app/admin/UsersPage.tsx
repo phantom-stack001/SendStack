@@ -45,6 +45,7 @@ export function UsersPage() {
   const [search, setSearch] = useState("");
   const [role, setRole] = useState("");
   const [status, setStatus] = useState("");
+  const [verification, setVerification] = useState("");
   const [email, setEmail] = useState("");
   const [inviteRole, setInviteRole] = useState("");
   const [roleOptions, setRoleOptions] = useState<{ id: string; key: string; name: string }[]>([]);
@@ -53,7 +54,7 @@ export function UsersPage() {
   const [error, setError] = useState<string | null>(null);
 
   async function load() {
-    const params = new URLSearchParams({ search, role, status, page: "1", limit: "25" });
+    const params = new URLSearchParams({ search, role, status, verification, page: "1", limit: "25" });
     const response = await fetch(`/api/admin/users?${params}`, { credentials: "include" });
     const payload = await response.json();
     if (!response.ok) {
@@ -71,7 +72,7 @@ export function UsersPage() {
 
   useEffect(() => {
     let cancelled = false;
-    const params = new URLSearchParams({ search, role, status, page: "1", limit: "25" });
+    const params = new URLSearchParams({ search, role, status, verification, page: "1", limit: "25" });
     fetch(`/api/admin/users?${params}`, { credentials: "include" })
       .then(async (response) => {
         const payload = await response.json();
@@ -107,7 +108,7 @@ export function UsersPage() {
     return () => {
       cancelled = true;
     };
-  }, [search, role, status]);
+  }, [search, role, status, verification]);
 
   async function invite(event: React.FormEvent) {
     event.preventDefault();
@@ -160,7 +161,7 @@ export function UsersPage() {
             </Card>
           ))}
         </div>
-        <form className="grid gap-3 rounded-xl border p-4 md:grid-cols-[1fr_12rem_12rem]" onSubmit={(event) => event.preventDefault()}>
+        <form className="grid gap-3 rounded-xl border p-4 md:grid-cols-[1fr_12rem_12rem_12rem]" onSubmit={(event) => event.preventDefault()}>
           <Input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search name or email" aria-label="Search users" />
           <select className="native-select" value={role} onChange={(event) => setRole(event.target.value)} aria-label="Filter by role">
             <option value="">All roles</option>
@@ -174,6 +175,11 @@ export function UsersPage() {
             <option value="suspended">Suspended</option>
             <option value="deactivated">Deactivated</option>
           </select>
+          <select className="native-select" value={verification} onChange={(event) => setVerification(event.target.value)} aria-label="Filter by email verification">
+            <option value="">All verification</option>
+            <option value="verified">Verified</option>
+            <option value="unverified">Unverified</option>
+          </select>
         </form>
         {error ? <p className="text-sm text-destructive">{error}</p> : null}
         <Card>
@@ -186,7 +192,10 @@ export function UsersPage() {
                   <div className="flex flex-wrap gap-1">
                     {account.roles.map((item) => <Badge key={item} variant="outline">{item}</Badge>)}
                   </div>
-                  <p className="text-sm capitalize">{account.emailVerified ? account.status : `${account.status} · pending verification`}</p>
+                  <div className="flex flex-wrap items-center gap-2 text-sm">
+                    <span className="capitalize">{account.status}</span>
+                    <Badge variant={account.emailVerified ? "secondary" : "outline"}>{account.emailVerified ? "Verified" : "Unverified"}</Badge>
+                  </div>
                 </li>
               ))}
             </ul>
@@ -198,6 +207,7 @@ export function UsersPage() {
                   <TableHead>Email</TableHead>
                   <TableHead>Roles</TableHead>
                   <TableHead>Status</TableHead>
+                  <TableHead>Verification</TableHead>
                   <TableHead>Last session</TableHead>
                   <TableHead>Created</TableHead>
                 </TableRow>
@@ -212,7 +222,8 @@ export function UsersPage() {
                         {account.roles.map((item) => <Badge key={item} variant="outline">{item}</Badge>)}
                       </div>
                     </TableCell>
-                    <TableCell className="capitalize">{account.emailVerified ? account.status : `${account.status} · pending verification`}</TableCell>
+                    <TableCell className="capitalize">{account.status}</TableCell>
+                    <TableCell><Badge variant={account.emailVerified ? "secondary" : "outline"}>{account.emailVerified ? "Verified" : "Unverified"}</Badge></TableCell>
                     <TableCell>{account.lastSessionAt ? new Date(account.lastSessionAt).toLocaleString() : "—"}</TableCell>
                     <TableCell>{new Date(account.createdAt).toLocaleDateString()}</TableCell>
                   </TableRow>
