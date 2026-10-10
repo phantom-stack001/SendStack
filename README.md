@@ -165,7 +165,7 @@ This repo includes `vercel.json` at the root:
 
 If you see *“Root Directory web does not exist”*, the dashboard still points at the old Next.js layout—update Root Directory as above.
 
-**API on Vercel:** the static `dist/` build serves the SPA; `api/[...path].ts` runs the same Hono app as `server/index.ts` via `hono/vercel` (Node.js runtime, no separate API host). Set server env vars on the **Vercel project** (see [deploy/VERCEL.md](deploy/VERCEL.md)).
+**API on Vercel:** the static `dist/` build serves the SPA; `api/index.ts` runs the same Hono app as `server/index.ts` via `hono/vercel` (Node.js runtime, no separate API host). `vercel.json` rewrites every `/api/*` path to that function because a bracket catch-all only matches one segment. Set server env vars on the **Vercel project** (see [deploy/VERCEL.md](deploy/VERCEL.md)).
 
 Use the canonical browser origin for auth:
 
@@ -506,7 +506,7 @@ Scheduling, pause/resume, cancellation, retries, and Redis interruption should b
 
 | Component | Hosting notes |
 | --- | --- |
-| **SPA + API** | Vercel: `dist/` static output + `api/[...path].ts` (Hono on Node serverless) |
+| **SPA + API** | Vercel: `dist/` static output + `api/index.ts` (Hono on Node serverless; `/api/:path*` rewrite) |
 | **Dispatcher** | Persistent Node elsewhere (not Vercel): `npm run start:dispatcher` or `tsx server/dispatchers/campaign-dispatcher.ts` |
 | **Worker** | Persistent Node elsewhere (not Vercel): `npm run start:worker` or `tsx server/workers/email-processing.worker.ts` |
 | **Redis** | Upstash (or other Redis) via `REDIS_URL` — required when `QUEUE_ENABLED=true` |

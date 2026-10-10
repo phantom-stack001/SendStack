@@ -5,17 +5,17 @@ Production site: **https://www.ctn-sk.com**
 The Vercel project serves:
 
 - **Static SPA** from `dist/` (Vite build)
-- **Hono API** from `api/[...path].ts` → `server/app.ts` (Node.js serverless, `maxDuration` 30s)
+- **Hono API** from `api/index.ts` → `server/app.ts` (Node.js serverless, `maxDuration` 30s). `vercel.json` rewrites `/api/:path*` to this function so nested paths such as `/api/auth/get-session` are not dropped at the edge.
 
 No Railway or separate API host is required for login, drafts, campaigns, mail APIs, or admin.
 
 ## Files to commit
 
-- `api/[...path].ts` — Vercel entry (Hono `handle`)
+- `api/index.ts` — Vercel entry (Hono `handle`)
 - `server/app.ts` — shared Hono application
 - `server/index.ts` — local dev / optional `npm run start:api`
 - `server/db/index.ts` — serverless-friendly DB pooling
-- `vercel.json` — SPA rewrites exclude `/api/`
+- `vercel.json` — `/api/:path*` rewrite to `/api`, then SPA fallback for non-API routes
 
 ## Vercel environment variables
 
@@ -53,20 +53,26 @@ Optional client variable (only if auth must target a non-default origin):
 4. Trigger **Redeploy** (Production).
 5. Run verification commands below.
 
-Build on Vercel: `npm run build` (frontend only). The API function is bundled separately from `api/[...path].ts` and traced server imports.
+Build on Vercel: `npm run build` (frontend only). The API function is bundled separately from `api/index.ts` and traced server imports.
 
 ## Production verification
 
 ```bash
-# Health must be JSON, not HTML
+# Health and ping must be JSON
+curl -sS https://www.ctn-sk.com/api/ping | jq .
 curl -sS https://www.ctn-sk.com/api/health | jq .
+
+# Nested API paths must reach Hono, not Vercel NOT_FOUND or index.html
+curl -sS -D - --max-time 20 https://www.ctn-sk.com/api/auth/get-session
+curl -sS -o /dev/null -w "mail:%{http_code}\n" --max-time 20 https://www.ctn-sk.com/api/mail/status
+curl -sS -o /dev/null -w "admin:%{http_code}\n" --max-time 20 https://www.ctn-sk.com/api/admin/users
 
 # Auth endpoint must not return 405 / index.html
 curl -sS -o /dev/null -w "%{http_code}\n" \
   -X POST https://www.ctn-sk.com/api/auth/sign-in/email \
   -H "Content-Type: application/json" \
   -d '{"email":"not-a-real-user@example.com","password":"wrongpassword1"}'
-# Expect 401/400 from Better Auth, not 405
+# Expect 401/400 from Better Auth, not 404 NOT_FOUND or 405
 ```
 
 Sign in in the browser at https://www.ctn-sk.com/login/ with a real production account. Session cookie should persist after refresh (`GET /api/auth/get-session` returns a user).

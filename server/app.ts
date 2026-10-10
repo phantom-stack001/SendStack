@@ -85,6 +85,8 @@ export function createSendStackApp(env: ServerEnv, options: CreateAppOptions = {
 
   app.all("/api/auth/*", (c) => auth.handler(c.req.raw));
 
+  app.notFound((c) => c.json({ error: "Not found" }, 404));
+
   app.onError((error, c) => {
     console.error("[api]", safeErrorLabel(error));
     return c.json({ error: "Internal server error" }, 500);

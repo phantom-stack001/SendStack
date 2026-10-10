@@ -66,7 +66,7 @@ describe("vercel fetch handler", () => {
   });
 
   it("keeps the api entry on the shared Hono app without starting workers", () => {
-    const source = readFileSync(path.join(root, "api/[...path].ts"), "utf8");
+    const source = readFileSync(path.join(root, "api/index.ts"), "utf8");
     expect(source).toContain("createVercelFetchHandler(getSendStackApp())");
     expect(source).not.toContain("email-processing.worker");
     expect(source).not.toContain("campaign-dispatcher");
